@@ -44,13 +44,26 @@ import (
 )
 
 // VirtualMachines is the mechanics the reconciler drives. It is the consumer's
-// slice of vm.Manager: three methods, so a test drives a whole reconciler with
+// slice of vm.Manager: five methods, so a test drives a whole reconciler with
 // no systemd and no Firecracker under it.
+//
+// Start and Wake are both here and they are not interchangeable. A sleeping VM
+// carries a marker the unit reads as ConditionPathNotExists, so `systemctl
+// start` skips the unit and exits 0 with the guest still down; only Wake takes
+// the marker off first. A reconciler holding just Start can converge every VM on
+// this host except the ones sleep-on-idle parked.
 type VirtualMachines interface {
 	Start(ctx context.Context, runner *run.Runner, uuid string) (bool, error)
 	Stop(ctx context.Context, runner *run.Runner, uuid string, request vm.StopRequest) error
+	Sleep(ctx context.Context, runner *run.Runner, uuid string, request vm.SleepRequest) (vm.SleepResult, error)
+	Wake(ctx context.Context, runner *run.Runner, uuid string) error
 	Observe(ctx context.Context, runner *run.Runner, uuid string) (model.VirtualMachine, error)
 }
+
+// The one implementation outside tests, asserted here rather than discovered at
+// the call site: this package is where the shape is decided, so this is where a
+// vm.Manager that drifted out of it has to fail to compile.
+var _ VirtualMachines = (*vm.Manager)(nil)
 
 // How often Run sweeps every VM it holds desired state for, and how a failing
 // VM's next attempt is spaced.

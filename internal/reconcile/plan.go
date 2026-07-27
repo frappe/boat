@@ -12,7 +12,23 @@ const (
 	stepNone step = iota
 	stepStart
 	stepStop
+	stepWake
 )
+
+// String names the step, so an assertion about a plan fails as a sentence
+// instead of as two integers.
+func (step step) String() string {
+	switch step {
+	case stepStart:
+		return "start"
+	case stepStop:
+		return "stop"
+	case stepWake:
+		return "wake"
+	default:
+		return "nothing"
+	}
+}
 
 // plan decides what this pass does. It is a pure function of the three inputs
 // that may decide it — what Atlas wants, what the host was just observed to be,
@@ -27,14 +43,18 @@ const (
 //     emergent property: the alternative is a reconciler that happens to do the
 //     right thing today and starts resurrecting stopped VMs the moment someone
 //     adds a second reason to request a pass. The operator's stop must be the
-//     kind of stop that stays.
+//     kind of stop that stays. The whole system leans on this one branch — the
+//     wake trap turns an unauthenticated inbound packet into a requested pass and
+//     has no opinion of its own — so the rule is also expressed as scope below:
+//     the Stopped half is not given the trigger at all.
 //
 //   - **Sleeping is a resting state of a Running desire, not a deviation from
 //     it.** A VM parked by sleep-on-idle has desired_power = Running — that is
 //     the whole point, it is expected back — so a sweep that treated Sleeping as
 //     "not Running yet" would wake every sleeping VM within the interval and
 //     sleep-on-idle would free no RAM at all. Only a pass asked for by name
-//     resumes it, which is what the wake trap does when a SYN arrives.
+//     resumes it, which is what the wake trap does when a SYN arrives, and it
+//     resumes through Wake rather than Start.
 //
 //   - **A state the host could not be read into is not acted on.** Unknown means
 //     "I could not see", never "it is dead", and a unit caught mid-transition is
@@ -58,8 +78,10 @@ func plan(desired model.DesiredVirtualMachine, observed model.VirtualMachine, wh
 	}
 }
 
-// stopStep is the Stopped half. Nothing here consults the trigger: no reason for
-// asking can turn a Stopped desire into a start.
+// stopStep is the Stopped half. Nothing here consults the trigger, and it is
+// spelled as a missing parameter rather than as a discipline: no reason for
+// asking can turn a Stopped desire into a start, so the reason is not in scope
+// to be read. Adding it back is the change that would resurrect stopped VMs.
 func stopStep(observed model.VirtualMachine) step {
 	switch observed.ObservedStatus {
 	case model.StatusRunning, model.StatusPaused:
@@ -76,17 +98,20 @@ func stopStep(observed model.VirtualMachine) step {
 	}
 }
 
-// startStep is the Running half.
+// startStep is the Running half, and the only half that is handed the trigger.
 func startStep(observed model.VirtualMachine, why trigger) step {
 	switch observed.ObservedStatus {
 	case model.StatusStopped, model.StatusFailed:
 		return stepStart
 	case model.StatusSleeping:
-		// Resumed only when someone asked for this VM by name. vm.Start is the
-		// resume path: the unit finds the staged memory snapshot and restores from
-		// it instead of cold-booting.
+		// Resumed only when someone asked for this VM by name, and resumed by Wake
+		// rather than Start. A sleeping VM's unit carries
+		// ConditionPathNotExists=<the sleeping marker>, so `systemctl start` skips
+		// the unit, exits 0, and leaves the guest exactly as down as it found it —
+		// the pass then fails on its own is-active check and backs off, forever.
+		// Wake removes the marker first, which is the only order that works.
 		if why == triggerRequest {
-			return stepStart
+			return stepWake
 		}
 		return stepNone
 	default:

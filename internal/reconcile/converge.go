@@ -91,6 +91,8 @@ func (reconciler *Reconciler) apply(
 	switch step {
 	case stepStart:
 		return reconciler.start(ctx, runner, desired)
+	case stepWake:
+		return reconciler.wake(ctx, runner, desired)
 	case stepStop:
 		// The zero StopRequest is the cooperative stop: the guest is asked to power
 		// itself off and its filesystems are synced. A reconciler has no reason to
@@ -117,6 +119,22 @@ func (reconciler *Reconciler) start(
 	}
 	_, err := reconciler.machines.Start(ctx, runner, desired.UUID)
 	return err
+}
+
+// wake resumes a sleeping VM, and is fenced exactly as a cold start is.
+//
+// The gate matters more here, not less. A pass that reaches this step was asked
+// for by name, and the thing that asks by name is the wake trap — so the input
+// is an unauthenticated inbound packet, and this fence is the last check between
+// that packet and a guest booting on a host that may no longer own it. Waking is
+// booting: the marker comes off and the unit comes up.
+func (reconciler *Reconciler) wake(
+	ctx context.Context, runner *run.Runner, desired model.DesiredVirtualMachine,
+) error {
+	if err := reconciler.allowedToBoot(desired); err != nil {
+		return err
+	}
+	return reconciler.machines.Wake(ctx, runner, desired.UUID)
 }
 
 // allowedToBoot asks the fence, under the epoch Atlas asserted with the desired

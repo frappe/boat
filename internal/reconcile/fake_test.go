@@ -33,6 +33,14 @@ const testDeadline = 5 * time.Second
 
 var errHostRefused = errors.New("the host refused")
 
+// errStartSkippedWhileSleeping is what a real Start reports for a sleeping VM,
+// and modelling it is the point: the unit's ConditionPathNotExists sees the
+// sleeping marker, `systemctl start` skips the unit and exits 0, and the
+// trailing `is-active` then fails the whole start. A fake whose Start set
+// Running unconditionally made a reconciler that could not wake anything look
+// like one that could.
+var errStartSkippedWhileSleeping = errors.New("the unit was skipped: the virtual machine is asleep")
+
 // occupancy is how "one actor per VM" is asserted rather than assumed.
 //
 // The fake host marks a VM on the way into every call and unmarks it on the way
@@ -108,6 +116,14 @@ func (machines *machines) Start(ctx context.Context, runner *run.Runner, uuid st
 	if err := machines.called("start", uuid); err != nil {
 		return false, err
 	}
+	// A start does not clear the sleeping marker, so a VM that was asleep is
+	// still asleep afterwards and the start reports the failure it really
+	// reports. This is the one behaviour of the real host that a fake here must
+	// not simplify away: it is the difference between a wake that works and a
+	// pass that fails every five minutes forever.
+	if machines.statusOf(uuid) == model.StatusSleeping {
+		return false, errStartSkippedWhileSleeping
+	}
 	machines.setStatus(uuid, model.StatusRunning)
 	return false, nil
 }
@@ -119,6 +135,28 @@ func (machines *machines) Stop(
 		return err
 	}
 	machines.setStatus(uuid, model.StatusStopped)
+	return nil
+}
+
+// Sleep parks the VM. Stopped-and-marked-sleeping is one status here because
+// the marker is what a real Observe reports Sleeping from.
+func (machines *machines) Sleep(
+	ctx context.Context, runner *run.Runner, uuid string, request vm.SleepRequest,
+) (vm.SleepResult, error) {
+	if err := machines.called("sleep", uuid); err != nil {
+		return vm.SleepResult{}, err
+	}
+	machines.setStatus(uuid, model.StatusSleeping)
+	return vm.SleepResult{MemorySnapshot: true}, nil
+}
+
+// Wake is Start with the marker taken off first, which is the whole of why it
+// exists: the same start that is skipped above succeeds once the marker is gone.
+func (machines *machines) Wake(ctx context.Context, runner *run.Runner, uuid string) error {
+	if err := machines.called("wake", uuid); err != nil {
+		return err
+	}
+	machines.setStatus(uuid, model.StatusRunning)
 	return nil
 }
 

@@ -14,36 +14,53 @@ import (
 // goroutines drive one VM through both doors at once — verbs through Do and
 // passes through Wake — and the fake host counts any moment two of them are
 // inside it. Run under -race, this is what proves the actor is one.
+//
+// Both resting states are here because they take different steps. The sleeping
+// row is the wake path, and it is the one that has to be nailed down: the trap
+// can knock on it many times a second from an unauthenticated packet, so a wake
+// that reached the host outside the actor would be the cheapest way in the whole
+// system to get two drivers onto one VM.
 func TestOneActorPerVirtualMachineUnderConcurrentVerbsAndPasses(t *testing.T) {
-	harness := newReconciler(t)
-	harness.desire(t, firstVirtualMachine, model.PowerRunning)
+	for name, resting := range map[string]struct {
+		status model.VirtualMachineStatus
+		verb   string
+	}{
+		"a stopped virtual machine":  {model.StatusStopped, "start"},
+		"a sleeping virtual machine": {model.StatusSleeping, "wake"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			harness := newReconciler(t)
+			harness.desire(t, firstVirtualMachine, model.PowerRunning)
+			harness.machines.setStatus(firstVirtualMachine, resting.status)
 
-	const goroutines = 32
-	var workers sync.WaitGroup
-	for worker := 0; worker < goroutines; worker++ {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			// A verb, occupying the VM exactly as one that touched the host would.
-			err := harness.reconciler.Do(context.Background(), firstVirtualMachine, func(ctx context.Context) error {
-				harness.occupancy.enter(firstVirtualMachine)
-				defer harness.occupancy.exit(firstVirtualMachine)
-				return nil
-			})
-			if err != nil {
-				t.Errorf("verb: %v", err)
+			const goroutines = 32
+			var workers sync.WaitGroup
+			for worker := 0; worker < goroutines; worker++ {
+				workers.Add(1)
+				go func() {
+					defer workers.Done()
+					// A verb, occupying the VM exactly as one that touched the host would.
+					err := harness.reconciler.Do(context.Background(), firstVirtualMachine, func(ctx context.Context) error {
+						harness.occupancy.enter(firstVirtualMachine)
+						defer harness.occupancy.exit(firstVirtualMachine)
+						return nil
+					})
+					if err != nil {
+						t.Errorf("verb: %v", err)
+					}
+					harness.reconciler.Wake(firstVirtualMachine)
+				}()
 			}
-			harness.reconciler.Wake(firstVirtualMachine)
-		}()
-	}
-	workers.Wait()
-	harness.settled(t)
+			workers.Wait()
+			harness.settled(t)
 
-	if overlaps := harness.occupancy.overlaps(); overlaps != 0 {
-		t.Fatalf("%d overlaps: a verb and a pass drove one virtual machine at the same time", overlaps)
-	}
-	if harness.machines.counted("observe") == 0 {
-		t.Fatal("no pass ran at all, so the exclusion above proved nothing")
+			if overlaps := harness.occupancy.overlaps(); overlaps != 0 {
+				t.Fatalf("%d overlaps: a verb and a pass drove one virtual machine at the same time", overlaps)
+			}
+			if harness.machines.counted(resting.verb) == 0 {
+				t.Fatalf("no pass reached the host with a %s, so the exclusion above proved nothing", resting.verb)
+			}
+		})
 	}
 }
 
