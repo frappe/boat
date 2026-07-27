@@ -1,12 +1,13 @@
 // Package store is Boat's durable memory: the observed state of this host's VMs,
-// and the operation journal that makes a retried Atlas Task a replay instead of
-// a double-run. One bbolt file, one transaction per call.
+// the desired state Atlas has asserted, the fence epochs that decide what may
+// boot, and the operation journal that makes a retried Atlas Task a replay
+// instead of a double-run. One bbolt file, one transaction per call.
 //
 // Boat is authoritative for its host's observed state, so this file is the only
 // thing that survives a daemon restart under VMs that never stopped running.
 // Everything here is shaped for the moment an operator has to open it on a
-// wedged host: two buckets with obvious names, keyed by the same identifiers
-// that appear in Atlas, holding indented JSON.
+// wedged host: a handful of buckets with obvious names, keyed by the same
+// identifiers that appear in Atlas, holding indented JSON.
 package store
 
 import (
@@ -21,13 +22,27 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-// The two buckets. VMs are keyed by UUID and operations by the Atlas Task name,
-// so every key an operator reads out of this file is a key they can search for
-// in Atlas.
+// The buckets. VMs, desired records and fence epochs are keyed by UUID and
+// operations by the Atlas Task name, so every key an operator reads out of this
+// file is a key they can search for in Atlas. meta holds the store's own
+// bookkeeping, which today is the observed epoch and nothing else.
 var (
 	virtualMachinesBucket = []byte("virtual-machines")
 	operationsBucket      = []byte("operations")
+	desiredBucket         = []byte("desired")
+	fenceBucket           = []byte("fence")
+	metaBucket            = []byte("meta")
 )
+
+// buckets is the whole set, so that adding one is a single edit rather than an
+// edit plus a matching line in Open that is easy to forget.
+var buckets = [][]byte{
+	virtualMachinesBucket,
+	operationsBucket,
+	desiredBucket,
+	fenceBucket,
+	metaBucket,
+}
 
 // openTimeout bounds the wait for bbolt's exclusive lock on the file. A second
 // boat daemon on one host is a misconfiguration, and it should say so within
@@ -68,7 +83,7 @@ func Open(path string) (*Store, error) {
 
 func createBuckets(database *bbolt.DB) error {
 	return database.Update(func(transaction *bbolt.Tx) error {
-		for _, name := range [][]byte{virtualMachinesBucket, operationsBucket} {
+		for _, name := range buckets {
 			if _, err := transaction.CreateBucketIfNotExists(name); err != nil {
 				return fmt.Errorf("create bucket %s: %w", name, err)
 			}
@@ -86,9 +101,18 @@ func (store *Store) Close() error {
 // PutVirtualMachine records what this host observed about one VM, replacing any
 // earlier observation. Observations are latest-wins, not a journal: only the
 // operations bucket is append-only.
+//
+// The record and the observed-epoch bump land in one transaction. Callers CAS
+// against the epoch they read out of a Snapshot, so an epoch that could lag the
+// write it describes would hand a caller a token for state it never read, and
+// the caller would act on it believing nothing had changed underneath.
 func (store *Store) PutVirtualMachine(record model.VirtualMachine) error {
 	return store.database.Update(func(transaction *bbolt.Tx) error {
-		return putRecord(transaction.Bucket(virtualMachinesBucket), record.UUID, record)
+		if err := putRecord(transaction.Bucket(virtualMachinesBucket), record.UUID, record); err != nil {
+			return err
+		}
+		_, err := bumpObservedEpoch(transaction)
+		return err
 	})
 }
 
@@ -111,16 +135,30 @@ func (store *Store) GetVirtualMachine(uuid string) (model.VirtualMachine, bool, 
 // ListVirtualMachines returns every VM this host has observed, ordered by UUID.
 // bbolt iterates in key order, so `boat vm ls` is stable between calls for free.
 func (store *Store) ListVirtualMachines() ([]model.VirtualMachine, error) {
-	records := []model.VirtualMachine{}
+	var records []model.VirtualMachine
 	err := store.database.View(func(transaction *bbolt.Tx) error {
-		return transaction.Bucket(virtualMachinesBucket).ForEach(func(key, value []byte) error {
-			record, err := decodeRecord[model.VirtualMachine](key, value)
-			if err != nil {
-				return err
-			}
-			records = append(records, record)
-			return nil
-		})
+		var err error
+		records, err = listVirtualMachines(transaction)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+// listVirtualMachines takes the caller's transaction because Snapshot has to
+// read the VMs, the fence epochs and the epoch that describes them at one
+// instant of the file, which it cannot do by calling three exported methods.
+func listVirtualMachines(transaction *bbolt.Tx) ([]model.VirtualMachine, error) {
+	records := []model.VirtualMachine{}
+	err := transaction.Bucket(virtualMachinesBucket).ForEach(func(key, value []byte) error {
+		record, err := decodeRecord[model.VirtualMachine](key, value)
+		if err != nil {
+			return err
+		}
+		records = append(records, record)
+		return nil
 	})
 	if err != nil {
 		return nil, err

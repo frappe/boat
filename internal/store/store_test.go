@@ -33,6 +33,22 @@ func observedVirtualMachine(uuid string, status model.VirtualMachineStatus) mode
 	}
 }
 
+// reopenablePath is for the tests that close the store and open it again, which
+// is the only way to prove a field is durable rather than merely in a struct.
+func reopenablePath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "boat.db")
+}
+
+func observedEpochOrFail(t *testing.T, store *Store) int64 {
+	t.Helper()
+	epoch, err := store.ObservedEpoch()
+	if err != nil {
+		t.Fatalf("read observed epoch: %v", err)
+	}
+	return epoch
+}
+
 func TestOpenCreatesParentDirectoryAndSurvivesReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "var", "lib", "boat", "boat.db")
 	store, err := Open(path)
