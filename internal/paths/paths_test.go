@@ -163,3 +163,28 @@ func TestInJailPathsMatchTheirAbsoluteForms(t *testing.T) {
 		})
 	}
 }
+
+// A UUID is a path segment and a sudoers wildcard's contents, so the shapes
+// that must be refused are the ones that would escape either.
+func TestIsUUIDRefusesAnythingThatIsNotOne(t *testing.T) {
+	valid := "3f2504e0-4f89-41d3-9a0c-0305e82c3301"
+	if !IsUUID(valid) {
+		t.Fatalf("IsUUID(%q) = false, want true", valid)
+	}
+	for _, name := range []string{
+		"",
+		"..",
+		"../../etc/shadow",
+		"3f2504e0-4f89-41d3-9a0c-0305e82c33",      // too short
+		"3f2504e0-4f89-41d3-9a0c-0305e82c330100",  // too long
+		"3f2504e0-4f89-41d3-9a0c-0305e82c33g1",    // not hex
+		"3F2504E0-4F89-41D3-9A0C-0305E82C3301",    // uppercase: a second spelling of one VM
+		"3f2504e0/4f89-41d3-9a0c-0305e82c3301",    // a separator
+		"3f2504e0-4f89-41d3-9a0c-0305e82c3301 rm", // an extra argument
+		"3f2504e0-4f89-41d3-9a0c-0305e82c3301/../x",
+	} {
+		if IsUUID(name) {
+			t.Errorf("IsUUID(%q) = true, want false", name)
+		}
+	}
+}

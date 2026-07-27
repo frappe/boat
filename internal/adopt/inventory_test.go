@@ -154,8 +154,13 @@ func TestCandidatesUnionTheClassesThatCarryAWholeUUID(t *testing.T) {
 
 func TestIsUUID(t *testing.T) {
 	cases := map[string]bool{
-		firstUUID:                              true,
-		"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE": true,
+		firstUUID: true,
+		// Uppercase is refused, and this is a behaviour change made on purpose.
+		// Atlas mints lowercase, so an uppercase directory is not the same VM
+		// spelled differently — accepting it would let one UUID answer to two
+		// names, with two directories, two sets of artifacts, and an adoption
+		// scan that reports the VM twice.
+		"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE": false,
 		"":                                     false,
 		"lost+found":                           false,
 		"pool0":                                false,

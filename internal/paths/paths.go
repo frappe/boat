@@ -234,3 +234,38 @@ func ImageDirectory(imageName string) string {
 func WarmSnapshotDirectory(snapshotName string) string {
 	return SnapshotsDirectory + "/" + snapshotName
 }
+
+// IsUUID reports whether name is the 8-4-4-4-12 lowercase-hex shape every VM on
+// a host is named by.
+//
+// It exists because a UUID is not merely an identifier here — it is a path
+// segment, spliced into every command the daemon runs against a VM, and matched
+// by a `*` in the sudo allow-list. A `*` in a sudoers argument matches `/` and
+// `.` and spaces, so a name containing `..` walks out of /var/lib/atlas and a
+// name containing a space can add arguments to the command it lands in. The
+// allow-list cannot express "and this segment is a UUID"; this can, and it runs
+// before the name is ever rendered.
+//
+// So the rule is: a name that fails this never becomes a path. Anything that
+// learns names from the host rather than from Atlas — the adoption scan reads
+// them out of a directory listing — has to check.
+func IsUUID(name string) bool {
+	const shape = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+	if len(name) != len(shape) {
+		return false
+	}
+	for index := range len(shape) {
+		character, expected := name[index], shape[index]
+		if expected == '-' {
+			if character != '-' {
+				return false
+			}
+			continue
+		}
+		isHex := (character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')
+		if !isHex {
+			return false
+		}
+	}
+	return true
+}

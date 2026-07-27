@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/frappe/boat/internal/model"
+	"github.com/frappe/boat/internal/paths"
 )
 
 // parseListing reads `ls -1`: one name per line.
@@ -118,15 +119,13 @@ func parseVolumes(output string) []model.LogicalVolume {
 // isUUID reports whether name has the 8-4-4-4-12 hex shape Atlas gives every VM.
 // A directory, unit instance or LV suffix that is not one names something else,
 // and something else is not a VM whatever it looks like.
-func isUUID(name string) bool {
-	groups := strings.Split(name, "-")
-	if len(groups) != 5 {
-		return false
-	}
-	for index, size := range [5]int{8, 4, 4, 4, 12} {
-		if len(groups[index]) != size || strings.TrimLeft(groups[index], "0123456789abcdefABCDEF") != "" {
-			return false
-		}
-	}
-	return true
-}
+//
+// Delegated so there is one definition of the shape in the repo. It is also the
+// definition that keeps a name from becoming a path: a UUID is spliced into
+// every command run against a VM and matched by a `*` in the sudo allow-list,
+// where `*` covers `/`, `.` and spaces.
+//
+// Note it is lowercase-only, deliberately. Atlas mints lowercase, and accepting
+// uppercase would make one VM answer to two names — two directories, two sets of
+// artifacts, and an adoption scan that reports it twice.
+func isUUID(name string) bool { return paths.IsUUID(name) }
