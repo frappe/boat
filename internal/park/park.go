@@ -227,7 +227,18 @@ func (parker *parker) restoreReachability(ctx context.Context, address string) e
 	// route and the rule below are still worth installing, and the next re-park
 	// picks up the uplink once the host has one.
 	if uplink := parker.uplink(ctx); uplink != "" {
-		_, err := parker.commands.Run(ctx, "sudo ip -6 neigh replace {} dev {}", address, uplink)
+		// `proxy`, and the word is load-bearing. Without it this is a UNICAST
+		// neighbour entry that maps the VM's address to the uplink's own MAC —
+		// a different kernel table, the same exit code, and no proxy-NDP at all.
+		// The host then stops answering neighbour solicitations for the /128, the
+		// upstream router stops delivering the VM's packets, no SYN ever reaches
+		// the forward chain, and the VM can never be woken by traffic.
+		//
+		// It also leaves a lie behind: teardown only ever runs `neigh del proxy`,
+		// which misses a unicast entry, and reset-server enumerates
+		// `neigh show proxy`, which does not list one — so the entry is permanent
+		// and invisible to every tool that would clean it up.
+		_, err := parker.commands.Run(ctx, "sudo ip -6 neigh replace proxy {} dev {}", address, uplink)
 		if err != nil {
 			return err
 		}

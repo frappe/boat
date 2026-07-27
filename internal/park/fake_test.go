@@ -48,7 +48,7 @@ const (
 		"{ type filter hook forward priority filter; policy accept; }"
 
 	defaultRoute = "ip -j -6 route show default"
-	neighReplace = "sudo ip -6 neigh replace " + testAddress + " dev eth0"
+	neighReplace = "sudo ip -6 neigh replace proxy " + testAddress + " dev eth0"
 	routeReplace = "sudo ip -6 route replace " + testAddress + "/128 dev atlas-park0"
 	routeDelete  = "sudo ip -6 route del " + testAddress + "/128 dev atlas-park0"
 
