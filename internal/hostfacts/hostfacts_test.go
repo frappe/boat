@@ -161,8 +161,8 @@ func TestReadMeasuresTheLiveHost(t *testing.T) {
 		{"MemoryMegabytesFree", facts.MemoryMegabytesFree, 12766},
 		// 209715200000 B / 1 GiB = 195.31, truncated: a host never claims a
 		// gigabyte it cannot hand out.
-		{"PoolDiskGigabytesTotal", facts.PoolDiskGigabytesTotal, 195},
-		{"PoolUsedPercent", facts.PoolUsedPercent, float32(37.42)},
+		{"PoolDiskGigabytesTotal", valueOf(facts.PoolDiskGigabytesTotal), 195},
+		{"PoolUsedPercent", valueOf(facts.PoolUsedPercent), float32(37.42)},
 	} {
 		if check.got != check.want {
 			t.Errorf("%s = %v, want %v", check.field, check.got, check.want)
@@ -246,10 +246,22 @@ func TestReadFailsLoudlyOnEveryUnreadableFact(t *testing.T) {
 // failure to run lvs at all. lvs answering "no such volume group" is the host
 // describing itself; lvs not answering is the host failing to.
 func TestAHostWithNoThinPoolStillReportsItsOtherFacts(t *testing.T) {
-	for _, command := range []string{poolSizeRead, poolUsageRead} {
-		t.Run(command, func(t *testing.T) {
+	// The size is the placement input; the fullness is an alert signal. So a
+	// failed fullness read must NOT discard a size that was measured, and a
+	// failed size read must leave the size absent — never zero, because Atlas
+	// reads a zero pool total as unmeasured and an unmeasured axis as unlimited,
+	// which would let placement keep packing VMs onto a host whose disk it
+	// cannot read.
+	for _, testCase := range []struct {
+		command       string
+		wantSizeKnown bool
+	}{
+		{poolSizeRead, false},
+		{poolUsageRead, true},
+	} {
+		t.Run(testCase.command, func(t *testing.T) {
 			fake := healthyHost()
-			fake.errors[command] = &run.CommandError{
+			fake.errors[testCase.command] = &run.CommandError{
 				Argv:     []string{"lvs"},
 				ExitCode: 5,
 				Output:   `  Volume group "atlas" not found`,
@@ -263,9 +275,25 @@ func TestAHostWithNoThinPoolStillReportsItsOtherFacts(t *testing.T) {
 			if facts.VCPUsTotal == 0 || facts.MemoryMegabytesTotal == 0 {
 				t.Errorf("the readable facts were dropped too: %+v", facts)
 			}
-			if facts.PoolDiskGigabytesTotal != 0 {
-				t.Errorf("pool total = %d, want 0 — absent is not a measurement", facts.PoolDiskGigabytesTotal)
+			if (facts.PoolDiskGigabytesTotal != nil) != testCase.wantSizeKnown {
+				t.Errorf("pool total known = %v, want %v",
+					facts.PoolDiskGigabytesTotal != nil, testCase.wantSizeKnown)
+			}
+			// The fullness read failed in both cases here.
+			if facts.PoolUsedPercent != nil {
+				t.Errorf("pool fullness = %v, want it absent", *facts.PoolUsedPercent)
 			}
 		})
 	}
+}
+
+// valueOf reads an optional fact for comparison. A nil one is reported as the
+// zero value, which is exactly what these tests must NOT accept as a
+// measurement — so a fact that went missing fails the comparison rather than
+// quietly matching a zero expectation.
+func valueOf[Value any](measured *Value) any {
+	if measured == nil {
+		return nil
+	}
+	return *measured
 }

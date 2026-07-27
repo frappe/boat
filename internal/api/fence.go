@@ -32,13 +32,29 @@ func (server *Server) refuseUnfenced(uuid string) *errorResponse {
 
 // allowedToBoot asks the fence what this host may do with uuid.
 //
-// A start request carries no epoch of its own — it is Atlas saying "run what you
-// were told to run" — so the epoch asked for is the one Atlas last asserted in
-// the desired record, and a VM with no desired record asks only for the fence
-// this host already holds. Either way the refusal that matters is the empty one:
-// a Boat that lost its store boots nothing until Atlas re-asserts, because the
-// VM whose artifacts are still on this disk may already be running on the host it
-// was migrated to.
+// READ THIS BEFORE TRUSTING THE FENCE. Today it enforces exactly one rule: a
+// host that holds no epoch for a UUID will not boot it. That rule is real and it
+// is the important one for a Boat that lost its store — the VM whose artifacts
+// are still on this disk may already be running on the host it was migrated to,
+// so it boots nothing until Atlas re-asserts.
+//
+// The epoch COMPARISON, however, is currently a tautology and cannot refuse
+// anything. PUT writes the fence and the desired record from one document
+// (internal/api/desired.go), so heldEpoch and record.BootEpoch are equal by
+// construction on every path that could reach here, and the no-desired-record
+// case compares the held epoch with itself. fence.ErrStaleEpoch is therefore
+// unreachable from this function.
+//
+// Closing it needs two things that do not exist yet, both on the Atlas side:
+// Atlas must BUMP the epoch at a migration's repoint (nothing in Atlas writes
+// boot_epoch except the initial 1), and it must be able to RETRACT or supersede
+// desired state on the host that no longer owns the VM (there is no DELETE, and
+// the source keeps its stale record forever). Until both land, split-brain is
+// prevented by phase ordering and desired_power — which spec/33 §9 says
+// explicitly is NOT what should prevent it.
+//
+// Do not delete this comment when the comparison starts working; delete it when
+// a test proves a stale epoch is refused.
 func (server *Server) allowedToBoot(uuid string) error {
 	heldEpoch, held, err := server.state.FenceEpoch(uuid)
 	if err != nil {

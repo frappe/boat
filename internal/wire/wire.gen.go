@@ -71,10 +71,17 @@ type DesiredVirtualMachine struct {
 	// Epochs start at 1. Boat gates on whether it holds a fence at all, so
 	// a zero would be a held fence rather than the absence of one — do not
 	// use 0 to mean unfenced.
-	BootEpoch         int64   `json:"boot_epoch"`
-	CpuMaxCores       *int    `json:"cpu_max_cores,omitempty"`
-	CpuMode           *string `json:"cpu_mode,omitempty"`
-	DataDiskGigabytes *int    `json:"data_disk_gigabytes,omitempty"`
+	BootEpoch int64 `json:"boot_epoch"`
+
+	// CpuMaxCores A number, not an integer: a share of a core is a real product. Atlas
+	// sells fractional CPU (a Shared 1x VM gets a quarter of a core), its
+	// own field is a float, and Python's JSON encoder always writes a
+	// float with a decimal point — which Go refuses to decode into an
+	// integer, even for 1.0. Typed as an integer, this rejected every
+	// desired-state assertion Atlas could send, for every VM.
+	CpuMaxCores       *float32 `json:"cpu_max_cores,omitempty"`
+	CpuMode           *string  `json:"cpu_mode,omitempty"`
+	DataDiskGigabytes *int     `json:"data_disk_gigabytes,omitempty"`
 
 	// DesiredPower The only power input Boat's reconciler takes. An explicit Stopped
 	// outranks a wake trap: a VM that was told to stop is not woken by

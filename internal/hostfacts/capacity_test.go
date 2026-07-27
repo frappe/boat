@@ -83,7 +83,7 @@ func TestPoolFullnessIsReadFromLvs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Read: %v", err)
 			}
-			if facts.PoolUsedPercent != testCase.want {
+			if facts.PoolUsedPercent == nil || *facts.PoolUsedPercent != testCase.want {
 				t.Errorf("PoolUsedPercent = %v, want %v", facts.PoolUsedPercent, testCase.want)
 			}
 		})
@@ -102,7 +102,7 @@ func TestANearFullPoolIsReportedNotRounded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if facts.PoolUsedPercent != 97.85 || facts.PoolDiskGigabytesTotal != 200 {
+	if facts.PoolUsedPercent == nil || *facts.PoolUsedPercent != 97.85 || facts.PoolDiskGigabytesTotal == nil || *facts.PoolDiskGigabytesTotal != 200 {
 		t.Errorf("pool = %d GB at %v%%, want 200 GB at 97.85%%",
 			facts.PoolDiskGigabytesTotal, facts.PoolUsedPercent)
 	}

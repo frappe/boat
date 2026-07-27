@@ -611,7 +611,14 @@ components:
         vcpus:
           type: integer
         cpu_max_cores:
-          type: integer
+          type: number
+          description: |
+            A number, not an integer: a share of a core is a real product. Atlas
+            sells fractional CPU (a Shared 1x VM gets a quarter of a core), its
+            own field is a float, and Python's JSON encoder always writes a
+            float with a decimal point — which Go refuses to decode into an
+            integer, even for 1.0. Typed as an integer, this rejected every
+            desired-state assertion Atlas could send, for every VM.
         cpu_mode:
           type: string
         memory_megabytes:

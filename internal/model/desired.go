@@ -28,12 +28,12 @@ type DesiredVirtualMachine struct {
 	BootEpoch    int64        `json:"boot_epoch"`
 	DesiredPower DesiredPower `json:"desired_power"`
 
-	VCPUs             int    `json:"vcpus"`
-	CPUMaxCores       int    `json:"cpu_max_cores"`
-	CPUMode           string `json:"cpu_mode"`
-	MemoryMegabytes   int    `json:"memory_megabytes"`
-	DiskGigabytes     int    `json:"disk_gigabytes"`
-	DataDiskGigabytes int    `json:"data_disk_gigabytes"`
+	VCPUs             int     `json:"vcpus"`
+	CPUMaxCores       float32 `json:"cpu_max_cores"`
+	CPUMode           string  `json:"cpu_mode"`
+	MemoryMegabytes   int     `json:"memory_megabytes"`
+	DiskGigabytes     int     `json:"disk_gigabytes"`
+	DataDiskGigabytes int     `json:"data_disk_gigabytes"`
 
 	// SleepOnIdle is enrolment, not policy: Boat runs the reflex, Atlas decides
 	// which VMs are subject to it.
@@ -68,16 +68,23 @@ type LogicalVolume struct {
 // HostFacts is what this host is, as observed now rather than as recorded at
 // bootstrap. Capacity that drifts silently is capacity that overcommits.
 type HostFacts struct {
-	Hostname               string  `json:"hostname"`
-	BoatVersion            string  `json:"boat_version"`
-	KernelVersion          string  `json:"kernel_version"`
-	FirecrackerVersion     string  `json:"firecracker_version"`
-	VCPUsTotal             int     `json:"vcpus_total"`
-	MemoryMegabytesTotal   int     `json:"memory_megabytes_total"`
-	MemoryMegabytesFree    int     `json:"memory_megabytes_free"`
-	PoolDiskGigabytesTotal int     `json:"pool_disk_gigabytes_total"`
-	PoolUsedPercent        float32 `json:"pool_used_percent"`
-	HostSignature          string  `json:"host_signature"`
+	Hostname             string `json:"hostname"`
+	BoatVersion          string `json:"boat_version"`
+	KernelVersion        string `json:"kernel_version"`
+	FirecrackerVersion   string `json:"firecracker_version"`
+	VCPUsTotal           int    `json:"vcpus_total"`
+	MemoryMegabytesTotal int    `json:"memory_megabytes_total"`
+	MemoryMegabytesFree  int    `json:"memory_megabytes_free"`
+	// Pointers, because an unmeasured fact must be ABSENT and not zero. Atlas
+	// treats a zero pool total as "unmeasured" and an unmeasured axis as
+	// UNLIMITED (api/server_capacity.py: `if s.get(...)` is falsy for 0, so the
+	// axis total becomes None and placement stops gating it). Reporting 0 for a
+	// pool this host could not read would therefore let Atlas keep packing VMs
+	// onto a host whose disk it cannot see — strictly worse than the loud
+	// failure it replaced.
+	PoolDiskGigabytesTotal *int     `json:"pool_disk_gigabytes_total,omitempty"`
+	PoolUsedPercent        *float32 `json:"pool_used_percent,omitempty"`
+	HostSignature          string   `json:"host_signature"`
 }
 
 // Export is Boat's entire observed state in one document — the call that lets

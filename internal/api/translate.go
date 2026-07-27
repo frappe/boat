@@ -125,19 +125,33 @@ func exportToWire(export model.Export) wire.Export {
 	return document
 }
 
+// hostFactsToWire reports what this host measured, and says nothing about what
+// it could not.
+//
+// Absent, never zero, for an unmeasured fact. Atlas reads a present-but-zero
+// number as a measurement: `api/server_capacity.py` treats a zero pool total as
+// falsy, which makes the axis total None, which means UNLIMITED to placement.
+// So a host whose thin pool cannot be read would keep accepting VMs forever if
+// this sent 0 — strictly worse than the loud failure that behaviour replaced.
+// The same applies to an empty Firecracker version, which would overwrite the
+// one the Server row already knew.
 func hostFactsToWire(facts model.HostFacts) wire.HostFacts {
-	return wire.HostFacts{
-		Hostname:               facts.Hostname,
-		BoatVersion:            facts.BoatVersion,
-		KernelVersion:          &facts.KernelVersion,
-		FirecrackerVersion:     &facts.FirecrackerVersion,
-		VcpusTotal:             &facts.VCPUsTotal,
-		MemoryMegabytesTotal:   &facts.MemoryMegabytesTotal,
-		MemoryMegabytesFree:    &facts.MemoryMegabytesFree,
-		PoolDiskGigabytesTotal: &facts.PoolDiskGigabytesTotal,
-		PoolUsedPercent:        &facts.PoolUsedPercent,
-		HostSignature:          &facts.HostSignature,
+	document := wire.HostFacts{
+		Hostname:             facts.Hostname,
+		BoatVersion:          facts.BoatVersion,
+		KernelVersion:        &facts.KernelVersion,
+		VcpusTotal:           &facts.VCPUsTotal,
+		MemoryMegabytesTotal: &facts.MemoryMegabytesTotal,
+		MemoryMegabytesFree:  &facts.MemoryMegabytesFree,
+		HostSignature:        &facts.HostSignature,
 	}
+	document.PoolDiskGigabytesTotal = facts.PoolDiskGigabytesTotal
+	document.PoolUsedPercent = facts.PoolUsedPercent
+	if facts.FirecrackerVersion != "" {
+		version := facts.FirecrackerVersion
+		document.FirecrackerVersion = &version
+	}
+	return document
 }
 
 func unitsToWire(units []model.UnitLiveness) []wire.UnitLiveness {

@@ -155,11 +155,17 @@ func addPool(ctx context.Context, commands commands, facts *model.HostFacts) err
 	if err != nil {
 		return tolerateAbsentPool("size", err)
 	}
+	// Recorded as soon as it is known. The fullness read below is advisory — an
+	// alert signal, never a placement predicate — so letting its failure discard
+	// a capacity number that WAS measured would throw away the more important of
+	// the two.
+	gigabytes := int(size / gigabyte)
+	facts.PoolDiskGigabytesTotal = &gigabytes
 	used, err := poolUsedPercent(ctx, commands)
 	if err != nil {
 		return tolerateAbsentPool("fullness", err)
 	}
-	facts.PoolDiskGigabytesTotal, facts.PoolUsedPercent = int(size/gigabyte), used
+	facts.PoolUsedPercent = &used
 	return nil
 }
 
