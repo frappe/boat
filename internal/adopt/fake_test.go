@@ -90,6 +90,9 @@ type fakeHost struct {
 	present     map[string]bool
 	outputs     map[string]string
 	failing     map[string]bool
+	// unstartable is a command that cannot be run at all — a missing binary —
+	// as opposed to one that runs and exits non-zero.
+	unstartable map[string]bool
 	statuses    map[string]model.VirtualMachineStatus
 	observeFail map[string]bool
 
@@ -106,6 +109,7 @@ func newFakeHost() *fakeHost {
 		present:     map[string]bool{},
 		outputs:     map[string]string{},
 		failing:     map[string]bool{},
+		unstartable: map[string]bool{},
 		statuses:    map[string]model.VirtualMachineStatus{},
 		observeFail: map[string]bool{},
 	}
@@ -153,6 +157,7 @@ func (host *fakeHost) scan(t *testing.T) (Result, error) {
 	t.Helper()
 	host.commands = &fakeCommands{
 		outputs: host.outputs, present: host.present, failing: host.failing,
+		unstartable: host.unstartable,
 	}
 	host.commands.outputs[listDirectories] = strings.Join(host.directories, "\n")
 	host.commands.outputs[listUnits] = strings.Join(host.units, "\n")
@@ -172,10 +177,11 @@ func (host *fakeHost) scan(t *testing.T) (Result, error) {
 // fakeCommands answers rendered commands from a script and records every one of
 // them, so a test can assert not only what Boat concluded but what it asked.
 type fakeCommands struct {
-	outputs map[string]string
-	present map[string]bool
-	failing map[string]bool
-	issued  []string
+	outputs     map[string]string
+	present     map[string]bool
+	failing     map[string]bool
+	unstartable map[string]bool
+	issued      []string
 }
 
 func (fake *fakeCommands) record(command string) { fake.issued = append(fake.issued, command) }
@@ -189,12 +195,16 @@ func (fake *fakeCommands) Run(_ context.Context, template string, parameters ...
 	return fake.outputs[command], nil
 }
 
+// RunUnchecked models the real contract: a non-zero exit is DISCARDED, and the
+// error return means the command could not be started at all. A fake that
+// errored on a non-zero exit would make an optional enumeration look fatal, and
+// the scan would appear to fail in a test for a reason it never fails on a host.
 func (fake *fakeCommands) RunUnchecked(
 	_ context.Context, template string, parameters ...any,
 ) (string, error) {
 	command := render(template, parameters...)
 	fake.record(command)
-	if fake.failing[command] {
+	if fake.unstartable[command] {
 		return "", errCommandFailed
 	}
 	return fake.outputs[command], nil

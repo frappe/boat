@@ -74,14 +74,14 @@ type inventory struct {
 func takeInventory(ctx context.Context, commands commands) (inventory, error) {
 	reading := &enumeration{ctx: ctx, commands: commands}
 	taken := inventory{
-		directories: parseListing(reading.read("ls -1 {}", paths.VirtualMachinesDirectory)),
+		directories: parseListing(reading.readOptional("ls -1 {}", paths.VirtualMachinesDirectory)),
 		units: parseUnits(reading.read(
 			"systemctl list-units {} --all --no-legend --plain", virtualMachineUnitPattern,
 		)),
 		namespaces: parseNamespaces(reading.read("ip netns list")),
 		links:      parseLinks(reading.read("ip -o link show")),
 		proxies:    parseProxies(reading.read("ip -6 neigh show proxy")),
-		volumes: parseVolumes(reading.read(
+		volumes: parseVolumes(reading.readOptional(
 			"sudo lvs --noheadings --nosuffix --units b --separator , "+
 				"-o lv_name,lv_size,pool_lv,origin {}", volumeGroup,
 		)),
@@ -107,6 +107,37 @@ func (enumeration *enumeration) read(template string, parameters ...any) string 
 	}
 	output, err := enumeration.commands.Run(enumeration.ctx, template, parameters...)
 	enumeration.err = err
+	return output
+}
+
+// readOptional is read for an enumeration whose subject may legitimately not
+// exist yet, where absence is an answer rather than a failure to get one.
+//
+// Two enumerations qualify, and only two: the VM directory and the `atlas`
+// volume group. A host that has never been bootstrapped has neither, and there
+// "this host holds nothing" is both true and complete. Treating it as a failed
+// scan made the daemon refuse to start and crash-loop on every bare machine —
+// which also makes `boat bootstrap` impossible, since the daemon that would run
+// it cannot come up on the host it is meant to bootstrap.
+//
+// The honest limit: a non-zero exit cannot distinguish "the volume group is not
+// there" from "lvs is broken", so a broken lvs now reads as an empty inventory
+// rather than a failed scan. That is survivable where a silent drop would not
+// be, because a VM whose unit is present and whose volume is missing does not
+// vanish — it fails the coherence check and is quarantined, which is the state
+// an operator is meant to look at.
+//
+// Every other enumeration stays fatal. A scan missing one of those reports a
+// host holding fewer VMs than it holds, and that is indistinguishable from a
+// wiped host.
+func (enumeration *enumeration) readOptional(template string, parameters ...any) string {
+	if enumeration.err != nil {
+		return ""
+	}
+	output, err := enumeration.commands.RunUnchecked(enumeration.ctx, template, parameters...)
+	if err != nil {
+		enumeration.err = err
+	}
 	return output
 }
 

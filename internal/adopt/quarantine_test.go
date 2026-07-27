@@ -152,8 +152,12 @@ func TestAVirtualMachineWithNoReadableNetworkEnvironmentIsQuarantined(t *testing
 	// sidecar before the unit's ExecStopPost runs, so a read that comes back with
 	// nothing is a host mid-teardown either way.
 	for name, breakIt := range map[string]func(*fakeHost){
-		"absent":     func(host *fakeHost) { delete(host.outputs, "sudo cat "+environmentPathOf(firstUUID)) },
-		"unreadable": func(host *fakeHost) { host.failing["sudo cat "+environmentPathOf(firstUUID)] = true },
+		"absent": func(host *fakeHost) { delete(host.outputs, "sudo cat "+environmentPathOf(firstUUID)) },
+		// Unstartable, not merely non-zero: `cat` exiting non-zero on a missing
+		// file already reads back as empty through RunUnchecked, which is the
+		// "absent" case above. This is the other half — a read that could not be
+		// attempted at all.
+		"unreadable": func(host *fakeHost) { host.unstartable["sudo cat "+environmentPathOf(firstUUID)] = true },
 	} {
 		t.Run(name, func(t *testing.T) {
 			host := newFakeHost().withStopped(firstUUID)

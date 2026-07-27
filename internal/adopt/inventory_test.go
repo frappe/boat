@@ -209,3 +209,28 @@ func TestTakeInventoryStopsAtTheFirstFailure(t *testing.T) {
 		t.Errorf("enumerations = %v, want it to stop at the failure", fake.issued)
 	}
 }
+
+// A host that has never been bootstrapped scans clean and reports nothing.
+//
+// There is no /var/lib/atlas on a bare machine, so the VM listing fails. That is
+// not a failed scan: "this host holds no VMs" is both true and complete there.
+// Treating it as a failure made the daemon crash-loop on every bare host — and
+// made `boat bootstrap` impossible, because the daemon that would run it cannot
+// start on the host it is meant to bootstrap. Found by running the real binary
+// on a real unbootstrapped DO host.
+func TestAHostWithNoAtlasDirectoryScansCleanAndEmpty(t *testing.T) {
+	host := newFakeHost()
+	host.directories = nil
+	// `ls` on a path that is not there exits non-zero, which for an optional
+	// enumeration is an answer and not a failure.
+	host.failing[listDirectories] = true
+
+	result, err := host.scan(t)
+
+	if err != nil {
+		t.Fatalf("a bare host failed its scan: %v", err)
+	}
+	if len(result.VirtualMachines) != 0 || len(result.Quarantined) != 0 {
+		t.Errorf("a bare host reported something: %+v", result)
+	}
+}
