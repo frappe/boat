@@ -1,6 +1,10 @@
 package run
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strings"
+)
 
 // FirecrackerAPI calls the Firecracker API over one VM's jailed unix socket.
 //
@@ -14,20 +18,56 @@ import "context"
 // --fail makes a 4xx or 5xx exit non-zero, so a state change Firecracker
 // refused surfaces as a failed operation instead of a silent success.
 //
-// Unlike the Python, method and apiPath are quoted parameters rather than text
-// spliced into the template. They are caller-fixed literals today (PATCH /vm,
-// PUT /snapshot/create), and for such values quoting is a no-op — but the Go
-// signature makes them arguments, and an argument that is not quoted is exactly
-// the hole this package exists to close.
+// THE RENDERING IS BYTE-IDENTICAL TO THE PYTHON, DELIBERATELY, INCLUDING THE
+// SINGLE QUOTES AROUND THE URL. Those quotes are not decoration: the sudoers
+// allow-list pins this line literally, so a rendering that differs by one
+// character is a denied sudo. An earlier version passed the URL through a `{}`
+// hole, which is a no-op for a URL made of safe characters and therefore
+// emitted it unquoted — the call was refused on every host, and because the
+// caller treats a refusal as "the guest declined to shut down", every graceful
+// stop silently became a SIGKILL. Nothing surfaced it: the tests stub this
+// method above the rendering, so a fully green suite said nothing.
+//
+// method and apiPath are spliced rather than quoted because that is what
+// produces the Python's bytes. They are caller-fixed literals, never user
+// input, and they are validated below so that stays true by construction
+// rather than by convention.
 func (runner *Runner) FirecrackerAPI(
 	ctx context.Context, socketDirectory, socketName, method, apiPath, body string,
 ) error {
-	command := "cd {} && curl --fail --silent --show-error --unix-socket {} " +
-		"-X {} {} -H 'Content-Type: application/json' -d {}"
-	rendered, err := Substitute(command, socketDirectory, socketName, method, "http://localhost"+apiPath, body)
+	if err := checkSpliced("method", method); err != nil {
+		return err
+	}
+	if err := checkSpliced("api path", apiPath); err != nil {
+		return err
+	}
+	command := fmt.Sprintf(
+		"cd {} && curl --fail --silent --show-error --unix-socket {} "+
+			"-X %s 'http://localhost%s' -H 'Content-Type: application/json' -d {}",
+		method, apiPath,
+	)
+	rendered, err := Substitute(command, socketDirectory, socketName, body)
 	if err != nil {
 		return err
 	}
 	_, err = runner.Run(ctx, "sudo sh -c {}", rendered)
 	return err
+}
+
+// splicedCharacters is what a method or an API path may contain. Anything else
+// would reach the shell unquoted, so it is refused rather than escaped: these
+// values are literals chosen by this codebase, and one that is not is a bug to
+// be seen rather than a string to be sanitized.
+const splicedCharacters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/-_."
+
+func checkSpliced(what string, value string) error {
+	if value == "" {
+		return fmt.Errorf("the Firecracker API %s is empty", what)
+	}
+	if strings.ContainsFunc(value, func(character rune) bool {
+		return !strings.ContainsRune(splicedCharacters, character)
+	}) {
+		return fmt.Errorf("the Firecracker API %s %q is not a plain literal", what, value)
+	}
+	return nil
 }

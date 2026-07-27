@@ -93,3 +93,48 @@ func assertArgument(t *testing.T, argv []string, flag string, value string) {
 		t.Errorf("%s = %q, want %q as exactly one argument", flag, argv[index+1], value)
 	}
 }
+
+// The exact bytes the Python renders, captured by running
+// scripts/lib/atlas/_run.py's firecracker_api template through _substitute.
+//
+// This is pinned as a literal rather than derived, because the sudoers
+// allow-list on every host is pinned to these same bytes: a rendering that
+// drifts from this string is a denied sudo, and the caller reads a denial as
+// the guest declining to shut down. The failure is silent and it costs the
+// guest's unflushed writes, so the bytes are the contract.
+func TestTheFirecrackerLineMatchesThePythonByteForByte(t *testing.T) {
+	const wanted = `cd /d && curl --fail --silent --show-error --unix-socket firecracker.socket ` +
+		`-X PUT 'http://localhost/actions' -H 'Content-Type: application/json' ` +
+		`-d '{"action_type": "SendCtrlAltDel"}'`
+
+	directory := fakeCommands(t)
+	record := filepath.Join(t.TempDir(), "sudo-argv")
+	fakeCommand(t, directory, "sudo", recordingCommand(record))
+
+	err := NewRunner(nil).FirecrackerAPI(context.Background(), "/d", "firecracker.socket",
+		"PUT", "/actions", `{"action_type": "SendCtrlAltDel"}`)
+	if err != nil {
+		t.Fatalf("FirecrackerAPI: %v", err)
+	}
+
+	argv := recorded(t, record)[1:]
+	if argv[2] != wanted {
+		t.Errorf("the rendered line drifted from the Python:\ngot:  %s\nwant: %s", argv[2], wanted)
+	}
+}
+
+// A method or path that is not a plain literal is refused, not escaped: these
+// are values this codebase chooses, so anything else is a bug worth seeing.
+func TestAnUnliteralMethodOrPathIsRefused(t *testing.T) {
+	runner := NewRunner(nil)
+	for _, broken := range []struct{ method, path string }{
+		{"PUT; rm -rf /", "/actions"},
+		{"PUT", "/actions'; rm -rf /"},
+		{"", "/actions"},
+	} {
+		err := runner.FirecrackerAPI(context.Background(), "/d", "s", broken.method, broken.path, "{}")
+		if err == nil {
+			t.Errorf("method %q path %q was accepted", broken.method, broken.path)
+		}
+	}
+}

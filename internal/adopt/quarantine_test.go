@@ -206,7 +206,7 @@ func TestAnActiveUnitWithNoNetworkNamespaceIsQuarantined(t *testing.T) {
 func TestANamespaceWithNoTapIsQuarantined(t *testing.T) {
 	host := newFakeHost().withRunning(firstUUID)
 	network := networkingOf[firstUUID]
-	host.present["sudo ip netns exec "+network.namespace+" ip link show "+network.tap] = false
+	host.present["sudo ip -n "+network.namespace+" -o link show "+network.tap] = false
 
 	result, err := host.scan(t)
 

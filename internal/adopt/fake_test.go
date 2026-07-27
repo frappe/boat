@@ -122,7 +122,7 @@ func (host *fakeHost) withRunning(uuid string) *fakeHost {
 		fmt.Sprintf("5: %s@if4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500", network.hostVeth))
 	host.proxies = append(host.proxies, network.address+" dev eth0 proxy")
 	host.present["sudo test -S "+apiSocketOf(uuid)] = true
-	host.present["sudo ip netns exec "+network.namespace+" ip link show "+network.tap] = true
+	host.present["sudo ip -n "+network.namespace+" -o link show "+network.tap] = true
 	host.statuses[uuid] = model.StatusRunning
 	return host
 }

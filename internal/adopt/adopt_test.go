@@ -181,11 +181,17 @@ func isReadOnly(command string) bool {
 			return true
 		}
 	}
-	// The one command that enters a namespace: `sudo ip netns exec <ns> ip link
-	// show <device>`. Pinned field by field, because "sudo ip netns exec" with
-	// anything after it is a root shell inside the VM's network.
+	// The one command that reads inside a namespace: `sudo ip -n <ns> -o link
+	// show <device>`.
+	//
+	// Deliberately NOT `ip netns exec <ns> ip link show <device>`, which runs
+	// whatever follows the namespace as root — a netns isolates networking, not
+	// the filesystem, so that form is a root shell wearing a network command's
+	// clothes, and no sudoers pattern can constrain it (a wildcard for the
+	// namespace name also matches a command). `ip -n` takes the namespace as a
+	// flag and can only ever re-execute ip itself.
 	fields := strings.Fields(command)
-	return len(fields) == 9 &&
-		strings.Join(fields[:4], " ") == "sudo ip netns exec" &&
-		strings.Join(fields[5:8], " ") == "ip link show"
+	return len(fields) == 8 &&
+		strings.Join(fields[:3], " ") == "sudo ip -n" &&
+		strings.Join(fields[4:7], " ") == "-o link show"
 }

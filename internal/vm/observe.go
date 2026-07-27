@@ -79,7 +79,14 @@ func statusOf(observed model.VirtualMachine) model.VirtualMachineStatus {
 		return model.StatusSleeping
 	case observed.UnitActiveState == unitActive:
 		return model.StatusRunning
-	case observed.UnitActiveState == unitInactive, observed.UnitActiveState == unitFailed:
+	case observed.UnitActiveState == unitFailed:
+		// Distinct from Stopped, and the distinction is the point: a VM whose
+		// unit failed is one whose guest died or whose start limit tripped, and
+		// reading that as Stopped makes it indistinguishable from a VM an
+		// operator asked to stop. Conflating the two is exactly what setting
+		// status from a command's success used to do.
+		return model.StatusFailed
+	case observed.UnitActiveState == unitInactive:
 		return model.StatusStopped
 	default:
 		return model.StatusUnknown

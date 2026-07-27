@@ -134,7 +134,7 @@ func examineNetwork(ctx context.Context, commands commands, taken inventory, art
 	artifacts.proxy = taken.hasProxy(environment.address)
 	if artifacts.namespace && environment.tap != "" {
 		artifacts.tap = commands.OK(
-			ctx, "sudo ip netns exec {} ip link show {}", environment.namespace, environment.tap,
+			ctx, "sudo ip -n {} -o link show {}", environment.namespace, environment.tap,
 		)
 	}
 }

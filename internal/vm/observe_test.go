@@ -65,13 +65,18 @@ func TestObserveReportsStoppedForAnInactiveUnit(t *testing.T) {
 	}
 }
 
-// A failed unit is stopped, not unknown: the host answered, and the answer was
-// that nothing is running.
-func TestObserveReportsStoppedForAFailedUnit(t *testing.T) {
+// A failed unit reports Failed, not Stopped.
+//
+// The two are different facts and Atlas cannot act on the difference if the
+// observer erases it: Stopped is a VM that was asked to stop and did, while
+// Failed is one whose guest died or whose start limit tripped. Reading a failed
+// unit as Stopped is the same conflation as setting status from whether a
+// command succeeded, which is the thing this whole split exists to end.
+func TestObserveReportsFailedForAFailedUnit(t *testing.T) {
 	observed, _ := observedWith(t, "ActiveState=failed\nSubState=failed\n", false, false)
 
-	if observed.ObservedStatus != model.StatusStopped {
-		t.Errorf("status = %q, want %q", observed.ObservedStatus, model.StatusStopped)
+	if observed.ObservedStatus != model.StatusFailed {
+		t.Errorf("status = %q, want %q", observed.ObservedStatus, model.StatusFailed)
 	}
 }
 

@@ -33,19 +33,21 @@
 # Instance-scoped to firecracker-vm@*.service, so this grants nothing over sshd,
 # over boat.service itself, or over any other unit on the host.
 #
-# `is-active` and `show` are read-only and would work unprivileged. They are
-# listed because the ported verbs carry the `sudo` prefix through from the Python
-# originals and the differential gate compares rendered commands byte for byte;
-# granting a read that changes nothing costs nothing. The `-p` property list is a
-# wildcard because it is only a projection of one unit's state — the unit name is
-# what is pinned.
+# Only the commands the Go actually renders WITH `sudo`. `is-active --quiet` and
+# `systemctl show` are rendered unprivileged, so grants for them were dead — and
+# the `show -p *` one was worse than dead: `*` matches spaces, so
+# `show -p MainPID sshd.service firecracker-vm@x.service` satisfied it and the
+# rule reached units this alias promises never to touch. A grant nothing exercises
+# is a grant nobody notices is wrong.
+#
+# `is-active` is read-only and would work unprivileged too; it stays because the
+# port carries the Python's `sudo` prefix through and granting a read that
+# changes nothing costs nothing.
 Cmnd_Alias BOAT_VIRTUAL_MACHINE_UNIT = \
     /usr/bin/systemctl start firecracker-vm@*.service, \
     /usr/bin/systemctl stop firecracker-vm@*.service, \
     /usr/bin/systemctl reset-failed firecracker-vm@*.service, \
-    /usr/bin/systemctl is-active firecracker-vm@*.service, \
-    /usr/bin/systemctl is-active --quiet firecracker-vm@*.service, \
-    /usr/bin/systemctl show -p * firecracker-vm@*.service
+    /usr/bin/systemctl is-active firecracker-vm@*.service
 
 # --- Observation: the on-disk markers --------------------------------------
 # The VM tree is 0700-owned by the per-VM uid, so even a stat needs root. All
@@ -72,10 +74,18 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_MARKERS = \
 # host's own record of which tap and namespace belong to which VM. Re-deriving
 # those names risks drifting from the writer, and a drift here means adopting a
 # VM holding another VM's tap.
+#
+# The namespace read is `ip -n`, NEVER `ip netns exec`. `ip netns exec <ns> <cmd>`
+# runs <cmd> as root, and a network namespace isolates networking only — the
+# command keeps full root access to the real filesystem. No sudoers pattern can
+# constrain that form, because the wildcard standing in for the namespace name
+# also matches a command: `ip netns exec <ns> sh -c '...' ip link show` satisfies
+# any rule written around it. `ip -n` takes the namespace as a flag and can only
+# ever re-execute ip, so the wildcard has nothing to reach.
 Cmnd_Alias BOAT_ADOPTION = \
     /usr/bin/cat /var/lib/atlas/virtual-machines/*/network.env, \
     /usr/sbin/lvs --noheadings --nosuffix --units b --separator \, -o lv_name\,lv_size\,pool_lv\,origin atlas, \
-    /usr/sbin/ip netns exec * ip link show *
+    /usr/sbin/ip -n * -o link show *
 
 # --- Capacity: the numbers placement reads on every provision --------------
 # Live facts, not a bootstrap snapshot. Capacity that drifts silently is
