@@ -97,13 +97,17 @@ Cmnd_Alias BOAT_HOST_CAPACITY = \
 # --- Liveness: is a Firecracker actually answering? ------------------------
 # A socket inode outlives the process that bound it, so existence proves
 # nothing and only a call through the socket separates live from stale. This is
+# ss lives in /usr/bin on Ubuntu 24.04, not /usr/sbin. sudoers matches the
+# resolved path, so the wrong directory is a silent denial — caught by probing
+# every grant with `sudo -l` on a real host rather than by reading the file.
+#
 # a GET of the API root and is deliberately a separate, fully literal line: the
 # SendCtrlAltDel grant below must not be widened to cover it, because widening
 # the one line that can halt a guest is how a read-only probe acquires the power
 # to stop VMs.
 Cmnd_Alias BOAT_FIRECRACKER_LIVENESS = \
     /usr/bin/sh -c cd\ /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run\ &&\ curl\ --silent\ --show-error\ --max-time\ 2\ --unix-socket\ firecracker.socket\ http\://localhost/, \
-    /usr/sbin/ss --no-header --unix --listening --processes src /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run/firecracker.socket
+    /usr/bin/ss --no-header --unix --listening --processes src /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run/firecracker.socket
 
 # --- Bounded stop: the TimeoutStopSec drop-in ------------------------------
 # A migration-style fast stop bounds the guest's drain WITHOUT skipping the
