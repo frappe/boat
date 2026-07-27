@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -18,6 +19,12 @@ import (
 
 const (
 	BearerTokenScopes = "bearerToken.Scopes"
+)
+
+// Defines values for DesiredPower.
+const (
+	DesiredPowerRunning DesiredPower = "Running"
+	DesiredPowerStopped DesiredPower = "Stopped"
 )
 
 // Defines values for HealthStatus.
@@ -34,16 +41,68 @@ const (
 
 // Defines values for VirtualMachineStatus.
 const (
-	VirtualMachineStatusRunning  VirtualMachineStatus = "Running"
-	VirtualMachineStatusSleeping VirtualMachineStatus = "Sleeping"
-	VirtualMachineStatusStopped  VirtualMachineStatus = "Stopped"
-	VirtualMachineStatusUnknown  VirtualMachineStatus = "Unknown"
+	Running  VirtualMachineStatus = "Running"
+	Sleeping VirtualMachineStatus = "Sleeping"
+	Stopped  VirtualMachineStatus = "Stopped"
+	Unknown  VirtualMachineStatus = "Unknown"
 )
+
+// DesiredPower The only power input Boat's reconciler takes. An explicit Stopped
+// outranks a wake trap: a VM that was told to stop is not woken by
+// traffic.
+type DesiredPower string
+
+// DesiredVirtualMachine defines model for DesiredVirtualMachine.
+type DesiredVirtualMachine struct {
+	// BootEpoch Monotonic per-VM fence, issued only by Atlas and bumped at exactly
+	// one point: a migration's repoint. Boat refuses to boot a UUID whose
+	// local epoch is older than the one on disk, which is what stops two
+	// live copies of one VM after a partition.
+	BootEpoch         int     `json:"boot_epoch"`
+	CpuMaxCores       *int    `json:"cpu_max_cores,omitempty"`
+	CpuMode           *string `json:"cpu_mode,omitempty"`
+	DataDiskGigabytes *int    `json:"data_disk_gigabytes,omitempty"`
+
+	// DesiredPower The only power input Boat's reconciler takes. An explicit Stopped
+	// outranks a wake trap: a VM that was told to stop is not woken by
+	// traffic.
+	DesiredPower       DesiredPower `json:"desired_power"`
+	DiskGigabytes      *int         `json:"disk_gigabytes,omitempty"`
+	IdleTimeoutSeconds *int         `json:"idle_timeout_seconds,omitempty"`
+	Ipv6Address        *string      `json:"ipv6_address,omitempty"`
+	MacAddress         *string      `json:"mac_address,omitempty"`
+	MemoryMegabytes    *int         `json:"memory_megabytes,omitempty"`
+	PrivateAddress     *string      `json:"private_address,omitempty"`
+
+	// SleepOnIdle Enrolment, not policy. Boat runs the sleep reflex; whether a VM is
+	// enrolled in it is Atlas's decision and arrives here.
+	SleepOnIdle *bool   `json:"sleep_on_idle,omitempty"`
+	TapDevice   *string `json:"tap_device,omitempty"`
+	Uuid        string  `json:"uuid"`
+	Vcpus       *int    `json:"vcpus,omitempty"`
+}
 
 // Error defines model for Error.
 type Error struct {
 	// Error What went wrong, in one sentence, at the boundary where it was detected.
 	Error string `json:"error"`
+}
+
+// Export defines model for Export.
+type Export struct {
+	// FenceEpochs Every fence this host holds, by UUID.
+	FenceEpochs    *map[string]int  `json:"fence_epochs,omitempty"`
+	Host           HostFacts        `json:"host"`
+	LogicalVolumes *[]LogicalVolume `json:"logical_volumes,omitempty"`
+
+	// ObservedEpoch Monotonic, bumped on every observed change. A CAS write is matched
+	// against this, so a caller acts on exactly the snapshot it read.
+	ObservedEpoch int64     `json:"observed_epoch"`
+	TakenAt       time.Time `json:"taken_at"`
+
+	// Units The sibling units this Boat supervises, and whether they are up.
+	Units           *[]UnitLiveness  `json:"units,omitempty"`
+	VirtualMachines []VirtualMachine `json:"virtual_machines"`
 }
 
 // Health defines model for Health.
@@ -66,6 +125,33 @@ type Host struct {
 
 	// VirtualMachineCount How many VMs this host currently observes.
 	VirtualMachineCount int `json:"virtual_machine_count"`
+}
+
+// HostFacts defines model for HostFacts.
+type HostFacts struct {
+	BoatVersion        string  `json:"boat_version"`
+	FirecrackerVersion *string `json:"firecracker_version,omitempty"`
+
+	// HostSignature Identifies the CPU, kernel and Firecracker a memory snapshot was
+	// captured on. A snapshot only restores on a matching host.
+	HostSignature          *string  `json:"host_signature,omitempty"`
+	Hostname               string   `json:"hostname"`
+	KernelVersion          *string  `json:"kernel_version,omitempty"`
+	MemoryMegabytesFree    *int     `json:"memory_megabytes_free,omitempty"`
+	MemoryMegabytesTotal   *int     `json:"memory_megabytes_total,omitempty"`
+	PoolDiskGigabytesTotal *int     `json:"pool_disk_gigabytes_total,omitempty"`
+	PoolUsedPercent        *float32 `json:"pool_used_percent,omitempty"`
+	VcpusTotal             *int     `json:"vcpus_total,omitempty"`
+}
+
+// LogicalVolume defines model for LogicalVolume.
+type LogicalVolume struct {
+	Name string `json:"name"`
+
+	// Origin Set when this volume is a snapshot or a clone of another.
+	Origin    *string `json:"origin,omitempty"`
+	Pool      *string `json:"pool,omitempty"`
+	SizeBytes *int64  `json:"size_bytes,omitempty"`
 }
 
 // Operation defines model for Operation.
@@ -118,15 +204,43 @@ type StopRequest struct {
 	StopTimeoutSeconds *int `json:"stop_timeout_seconds,omitempty"`
 }
 
+// UnitLiveness defines model for UnitLiveness.
+type UnitLiveness struct {
+	ActiveState string `json:"active_state"`
+	Name        string `json:"name"`
+	SubState    string `json:"sub_state"`
+}
+
 // VirtualMachine defines model for VirtualMachine.
 type VirtualMachine struct {
+	// BootEpoch The fence epoch this host is permitted to boot the VM at. Absent
+	// means Boat holds no fence for it and will refuse to start it.
+	BootEpoch *int `json:"boot_epoch,omitempty"`
+
+	// FirecrackerPid The running Firecracker process, when Boat has re-attached to one.
+	// Absent means no live process was found, not that the VM is dead.
+	FirecrackerPid *int `json:"firecracker_pid,omitempty"`
+
 	// HasMemorySnapshot A complete memory snapshot is staged, so the next start resumes from RAM.
-	HasMemorySnapshot *bool     `json:"has_memory_snapshot,omitempty"`
-	ObservedAt        time.Time `json:"observed_at"`
+	HasMemorySnapshot         *bool     `json:"has_memory_snapshot,omitempty"`
+	ObservedAt                time.Time `json:"observed_at"`
+	ObservedDataDiskGigabytes *int      `json:"observed_data_disk_gigabytes,omitempty"`
+	ObservedDiskGigabytes     *int      `json:"observed_disk_gigabytes,omitempty"`
+	ObservedMemoryMegabytes   *int      `json:"observed_memory_megabytes,omitempty"`
 
 	// ObservedStatus Boat's observed status, derived from the host — the unit's state and the
 	// on-disk markers — never from a command's success.
 	ObservedStatus VirtualMachineStatus `json:"observed_status"`
+	ObservedVcpus  *int                 `json:"observed_vcpus,omitempty"`
+
+	// QuarantineReason What was incoherent, in one sentence.
+	QuarantineReason *string `json:"quarantine_reason,omitempty"`
+
+	// Quarantined The host holds artifacts for this VM that Boat could not read as a
+	// coherent state — a crash part-way through a terminate, say. It is
+	// reported, never silently ingested as truth, and never acted upon
+	// until a human or Atlas resolves it.
+	Quarantined *bool `json:"quarantined,omitempty"`
 
 	// Sleeping The sleeping marker is present — the VM is parked, not stopped.
 	Sleeping *bool `json:"sleeping,omitempty"`
@@ -158,6 +272,9 @@ type OperationIdentifierConflict = Error
 // Unauthorized defines model for Unauthorized.
 type Unauthorized = Error
 
+// PutVirtualMachineJSONRequestBody defines body for PutVirtualMachine for application/json ContentType.
+type PutVirtualMachineJSONRequestBody = DesiredVirtualMachine
+
 // StartVirtualMachineJSONRequestBody defines body for StartVirtualMachine for application/json ContentType.
 type StartVirtualMachineJSONRequestBody = StartRequest
 
@@ -166,6 +283,9 @@ type StopVirtualMachineJSONRequestBody = StopRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// This host's entire observed state, in one document
+	// (GET /export)
+	GetExport(w http.ResponseWriter, r *http.Request)
 	// Liveness probe
 	// (GET /health)
 	GetHealth(w http.ResponseWriter, r *http.Request)
@@ -181,12 +301,18 @@ type ServerInterface interface {
 	// Observed state of one VM
 	// (GET /vms/{uuid})
 	GetVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
+	// Assert this VM's desired state
+	// (PUT /vms/{uuid})
+	PutVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
 	// Start a provisioned VM
 	// (POST /vms/{uuid}/start)
 	StartVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
 	// Stop a running VM
 	// (POST /vms/{uuid}/stop)
 	StopVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
+	// Stream observed changes as they happen
+	// (GET /watch)
+	Watch(w http.ResponseWriter, r *http.Request)
 }
 
 // ServerInterfaceWrapper converts contexts to parameters.
@@ -197,6 +323,26 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// GetExport operation middleware
+func (siw *ServerInterfaceWrapper) GetExport(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetExport(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // GetHealth operation middleware
 func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Request) {
@@ -314,6 +460,37 @@ func (siw *ServerInterfaceWrapper) GetVirtualMachine(w http.ResponseWriter, r *h
 	handler.ServeHTTP(w, r)
 }
 
+// PutVirtualMachine operation middleware
+func (siw *ServerInterfaceWrapper) PutVirtualMachine(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "uuid" -------------
+	var uuid VirtualMachineUuid
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uuid", r.PathValue("uuid"), &uuid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uuid", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutVirtualMachine(w, r, uuid)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // StartVirtualMachine operation middleware
 func (siw *ServerInterfaceWrapper) StartVirtualMachine(w http.ResponseWriter, r *http.Request) {
 
@@ -367,6 +544,26 @@ func (siw *ServerInterfaceWrapper) StopVirtualMachine(w http.ResponseWriter, r *
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.StopVirtualMachine(w, r, uuid)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// Watch operation middleware
+func (siw *ServerInterfaceWrapper) Watch(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.Watch(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -496,13 +693,16 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 		ErrorHandlerFunc:   options.ErrorHandlerFunc,
 	}
 
+	m.HandleFunc("GET "+options.BaseURL+"/export", wrapper.GetExport)
 	m.HandleFunc("GET "+options.BaseURL+"/health", wrapper.GetHealth)
 	m.HandleFunc("GET "+options.BaseURL+"/host", wrapper.GetHost)
 	m.HandleFunc("GET "+options.BaseURL+"/ops/{operation_id}", wrapper.GetOperation)
 	m.HandleFunc("GET "+options.BaseURL+"/vms", wrapper.ListVirtualMachines)
 	m.HandleFunc("GET "+options.BaseURL+"/vms/{uuid}", wrapper.GetVirtualMachine)
+	m.HandleFunc("PUT "+options.BaseURL+"/vms/{uuid}", wrapper.PutVirtualMachine)
 	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/start", wrapper.StartVirtualMachine)
 	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/stop", wrapper.StopVirtualMachine)
+	m.HandleFunc("GET "+options.BaseURL+"/watch", wrapper.Watch)
 
 	return m
 }
@@ -514,6 +714,31 @@ type OperationAcceptedJSONResponse Operation
 type OperationIdentifierConflictJSONResponse Error
 
 type UnauthorizedJSONResponse Error
+
+type GetExportRequestObject struct {
+}
+
+type GetExportResponseObject interface {
+	VisitGetExportResponse(w http.ResponseWriter) error
+}
+
+type GetExport200JSONResponse Export
+
+func (response GetExport200JSONResponse) VisitGetExportResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type GetExport401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response GetExport401JSONResponse) VisitGetExportResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
 
 type GetHealthRequestObject struct {
 }
@@ -651,6 +876,42 @@ func (response GetVirtualMachine404JSONResponse) VisitGetVirtualMachineResponse(
 	return json.NewEncoder(w).Encode(response)
 }
 
+type PutVirtualMachineRequestObject struct {
+	Uuid VirtualMachineUuid `json:"uuid"`
+	Body *PutVirtualMachineJSONRequestBody
+}
+
+type PutVirtualMachineResponseObject interface {
+	VisitPutVirtualMachineResponse(w http.ResponseWriter) error
+}
+
+type PutVirtualMachine200JSONResponse DesiredVirtualMachine
+
+func (response PutVirtualMachine200JSONResponse) VisitPutVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type PutVirtualMachine401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response PutVirtualMachine401JSONResponse) VisitPutVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type PutVirtualMachine409JSONResponse Error
+
+func (response PutVirtualMachine409JSONResponse) VisitPutVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type StartVirtualMachineRequestObject struct {
 	Uuid VirtualMachineUuid `json:"uuid"`
 	Body *StartVirtualMachineJSONRequestBody
@@ -745,8 +1006,46 @@ func (response StopVirtualMachine409JSONResponse) VisitStopVirtualMachineRespons
 	return json.NewEncoder(w).Encode(response)
 }
 
+type WatchRequestObject struct {
+}
+
+type WatchResponseObject interface {
+	VisitWatchResponse(w http.ResponseWriter) error
+}
+
+type Watch200TexteventStreamResponse struct {
+	Body          io.Reader
+	ContentLength int64
+}
+
+func (response Watch200TexteventStreamResponse) VisitWatchResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "text/event-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
+	return err
+}
+
+type Watch401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response Watch401JSONResponse) VisitWatchResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
+	// This host's entire observed state, in one document
+	// (GET /export)
+	GetExport(ctx context.Context, request GetExportRequestObject) (GetExportResponseObject, error)
 	// Liveness probe
 	// (GET /health)
 	GetHealth(ctx context.Context, request GetHealthRequestObject) (GetHealthResponseObject, error)
@@ -762,12 +1061,18 @@ type StrictServerInterface interface {
 	// Observed state of one VM
 	// (GET /vms/{uuid})
 	GetVirtualMachine(ctx context.Context, request GetVirtualMachineRequestObject) (GetVirtualMachineResponseObject, error)
+	// Assert this VM's desired state
+	// (PUT /vms/{uuid})
+	PutVirtualMachine(ctx context.Context, request PutVirtualMachineRequestObject) (PutVirtualMachineResponseObject, error)
 	// Start a provisioned VM
 	// (POST /vms/{uuid}/start)
 	StartVirtualMachine(ctx context.Context, request StartVirtualMachineRequestObject) (StartVirtualMachineResponseObject, error)
 	// Stop a running VM
 	// (POST /vms/{uuid}/stop)
 	StopVirtualMachine(ctx context.Context, request StopVirtualMachineRequestObject) (StopVirtualMachineResponseObject, error)
+	// Stream observed changes as they happen
+	// (GET /watch)
+	Watch(ctx context.Context, request WatchRequestObject) (WatchResponseObject, error)
 }
 
 type StrictHandlerFunc = strictnethttp.StrictHTTPHandlerFunc
@@ -797,6 +1102,30 @@ type strictHandler struct {
 	ssi         StrictServerInterface
 	middlewares []StrictMiddlewareFunc
 	options     StrictHTTPServerOptions
+}
+
+// GetExport operation middleware
+func (sh *strictHandler) GetExport(w http.ResponseWriter, r *http.Request) {
+	var request GetExportRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetExport(ctx, request.(GetExportRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetExport")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetExportResponseObject); ok {
+		if err := validResponse.VisitGetExportResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
 }
 
 // GetHealth operation middleware
@@ -923,6 +1252,39 @@ func (sh *strictHandler) GetVirtualMachine(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// PutVirtualMachine operation middleware
+func (sh *strictHandler) PutVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid) {
+	var request PutVirtualMachineRequestObject
+
+	request.Uuid = uuid
+
+	var body PutVirtualMachineJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PutVirtualMachine(ctx, request.(PutVirtualMachineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PutVirtualMachine")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PutVirtualMachineResponseObject); ok {
+		if err := validResponse.VisitPutVirtualMachineResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // StartVirtualMachine operation middleware
 func (sh *strictHandler) StartVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid) {
 	var request StartVirtualMachineRequestObject
@@ -982,6 +1344,30 @@ func (sh *strictHandler) StopVirtualMachine(w http.ResponseWriter, r *http.Reque
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(StopVirtualMachineResponseObject); ok {
 		if err := validResponse.VisitStopVirtualMachineResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// Watch operation middleware
+func (sh *strictHandler) Watch(w http.ResponseWriter, r *http.Request) {
+	var request WatchRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.Watch(ctx, request.(WatchRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "Watch")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(WatchResponseObject); ok {
+		if err := validResponse.VisitWatchResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

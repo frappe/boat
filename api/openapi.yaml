@@ -96,6 +96,85 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+    put:
+      summary: Assert this VM's desired state
+      description: |
+        The durable primitive. Atlas states what it wants; Boat diffs against
+        its store and runs forward to converge. This is how intent is
+        re-asserted after a partition, so it is idempotent by construction —
+        a PUT that matches the stored desired state changes nothing.
+
+        It also carries the fence epoch, which is the only channel by which a
+        Boat learns it may boot a UUID at all. Atlas is the sole issuer.
+      operationId: putVirtualMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DesiredVirtualMachine"
+      responses:
+        "200":
+          description: The desired state as stored, after the diff was applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DesiredVirtualMachine"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: |
+            Either the caller's If-Match did not name Boat's current observed
+            epoch, or the epoch offered is older than the one already fenced.
+            An epoch never goes backwards.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /export:
+    get:
+      summary: This host's entire observed state, in one document
+      description: |
+        Boat re-asserting fact, the mirror image of Atlas re-asserting intent
+        with PUT. Those two calls run back to back fully resynchronize a host
+        from any state, which is why this supersedes a periodic polling sweep.
+
+        It is a consistent snapshot: materialized inside one short read
+        transaction and released before it is written out, never held under
+        the write lock, so a busy host is never mistaken for a partitioned one.
+
+        The observed epoch it carries is what a later CAS write is matched
+        against, so a caller can act on exactly the snapshot it read.
+      operationId: getExport
+      responses:
+        "200":
+          description: The whole-host document
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Export"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /watch:
+    get:
+      summary: Stream observed changes as they happen
+      description: |
+        Server-sent events, for latency rather than truth: a dropped stream
+        costs freshness, and the export restores it. Each event carries the
+        observed epoch it was emitted at, so a client that reconnects knows
+        whether it missed anything.
+      operationId: watch
+      responses:
+        "200":
+          description: An event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /vms/{uuid}/start:
     parameters:
@@ -285,6 +364,173 @@ components:
         sleeping:
           type: boolean
           description: The sleeping marker is present — the VM is parked, not stopped.
+        boot_epoch:
+          type: integer
+          description: |
+            The fence epoch this host is permitted to boot the VM at. Absent
+            means Boat holds no fence for it and will refuse to start it.
+        firecracker_pid:
+          type: integer
+          description: |
+            The running Firecracker process, when Boat has re-attached to one.
+            Absent means no live process was found, not that the VM is dead.
+        quarantined:
+          type: boolean
+          description: |
+            The host holds artifacts for this VM that Boat could not read as a
+            coherent state — a crash part-way through a terminate, say. It is
+            reported, never silently ingested as truth, and never acted upon
+            until a human or Atlas resolves it.
+        quarantine_reason:
+          type: string
+          description: What was incoherent, in one sentence.
+        observed_vcpus:
+          type: integer
+        observed_memory_megabytes:
+          type: integer
+        observed_disk_gigabytes:
+          type: integer
+        observed_data_disk_gigabytes:
+          type: integer
+
+    DesiredPower:
+      type: string
+      description: |
+        The only power input Boat's reconciler takes. An explicit Stopped
+        outranks a wake trap: a VM that was told to stop is not woken by
+        traffic.
+      enum: [Running, Stopped]
+
+    DesiredVirtualMachine:
+      type: object
+      required: [uuid, boot_epoch, desired_power]
+      properties:
+        uuid:
+          type: string
+        boot_epoch:
+          type: integer
+          description: |
+            Monotonic per-VM fence, issued only by Atlas and bumped at exactly
+            one point: a migration's repoint. Boat refuses to boot a UUID whose
+            local epoch is older than the one on disk, which is what stops two
+            live copies of one VM after a partition.
+        desired_power:
+          $ref: "#/components/schemas/DesiredPower"
+        vcpus:
+          type: integer
+        cpu_max_cores:
+          type: integer
+        cpu_mode:
+          type: string
+        memory_megabytes:
+          type: integer
+        disk_gigabytes:
+          type: integer
+        data_disk_gigabytes:
+          type: integer
+        sleep_on_idle:
+          type: boolean
+          description: |
+            Enrolment, not policy. Boat runs the sleep reflex; whether a VM is
+            enrolled in it is Atlas's decision and arrives here.
+        idle_timeout_seconds:
+          type: integer
+        ipv6_address:
+          type: string
+        private_address:
+          type: string
+        mac_address:
+          type: string
+        tap_device:
+          type: string
+
+    UnitLiveness:
+      type: object
+      required: [name, active_state, sub_state]
+      properties:
+        name:
+          type: string
+        active_state:
+          type: string
+        sub_state:
+          type: string
+
+    LogicalVolume:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        pool:
+          type: string
+        origin:
+          type: string
+          description: Set when this volume is a snapshot or a clone of another.
+
+    HostFacts:
+      type: object
+      required: [hostname, boat_version]
+      properties:
+        hostname:
+          type: string
+        boat_version:
+          type: string
+        kernel_version:
+          type: string
+        firecracker_version:
+          type: string
+        vcpus_total:
+          type: integer
+        memory_megabytes_total:
+          type: integer
+        memory_megabytes_free:
+          type: integer
+        pool_disk_gigabytes_total:
+          type: integer
+        pool_used_percent:
+          type: number
+        host_signature:
+          type: string
+          description: |
+            Identifies the CPU, kernel and Firecracker a memory snapshot was
+            captured on. A snapshot only restores on a matching host.
+
+    Export:
+      type: object
+      required: [observed_epoch, taken_at, host, virtual_machines]
+      properties:
+        observed_epoch:
+          type: integer
+          format: int64
+          description: |
+            Monotonic, bumped on every observed change. A CAS write is matched
+            against this, so a caller acts on exactly the snapshot it read.
+        taken_at:
+          type: string
+          format: date-time
+        host:
+          $ref: "#/components/schemas/HostFacts"
+        virtual_machines:
+          type: array
+          items:
+            $ref: "#/components/schemas/VirtualMachine"
+        units:
+          type: array
+          items:
+            $ref: "#/components/schemas/UnitLiveness"
+          description: The sibling units this Boat supervises, and whether they are up.
+        logical_volumes:
+          type: array
+          items:
+            $ref: "#/components/schemas/LogicalVolume"
+        fence_epochs:
+          type: object
+          additionalProperties:
+            type: integer
+          description: Every fence this host holds, by UUID.
 
     OperationStatus:
       type: string
