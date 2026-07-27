@@ -73,7 +73,7 @@ func NewServer(operations OperationStore, virtualMachines VirtualMachines, start
 // has not been handed a token yet. It therefore says only that Boat is up and
 // which build is up — nothing about the host or its VMs.
 func (server *Server) GetHealth(ctx context.Context, request wire.GetHealthRequestObject) (wire.GetHealthResponseObject, error) {
-	return wire.GetHealth200JSONResponse{Status: wire.Ok, BoatVersion: version.Version}, nil
+	return wire.GetHealth200JSONResponse{Status: wire.HealthStatusOk, BoatVersion: version.Version}, nil
 }
 
 // GetHost reports the observed facts of this host. boat_version is here rather

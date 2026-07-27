@@ -9,3 +9,11 @@ generate:
   strict-server: true
 output-options:
   skip-prune: true
+compatibility:
+  # Always spell an enum constant as <Type><Value>. Without this the generator
+  # drops the prefix when a value is unique across the document and restores it
+  # when it stops being — so adding an unrelated enum that happens to share a
+  # value silently renames another enum's constants, and every use of them
+  # breaks. Generated names must be a function of the schema they came from,
+  # not of what else happens to exist beside it.
+  always-prefix-enum-values: true

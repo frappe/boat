@@ -20,7 +20,7 @@ func TestHealthSaysOnlyThatBoatIsUp(t *testing.T) {
 	}
 	var health wire.Health
 	decode(t, recorder, &health)
-	if health.Status != wire.Ok || health.BoatVersion != version.Version {
+	if health.Status != wire.HealthStatusOk || health.BoatVersion != version.Version {
 		t.Errorf("got %+v, want ok and %q", health, version.Version)
 	}
 }

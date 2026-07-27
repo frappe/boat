@@ -29,7 +29,7 @@ const (
 
 // Defines values for HealthStatus.
 const (
-	Ok HealthStatus = "ok"
+	HealthStatusOk HealthStatus = "ok"
 )
 
 // Defines values for OperationStatus.
@@ -41,10 +41,10 @@ const (
 
 // Defines values for VirtualMachineStatus.
 const (
-	Running  VirtualMachineStatus = "Running"
-	Sleeping VirtualMachineStatus = "Sleeping"
-	Stopped  VirtualMachineStatus = "Stopped"
-	Unknown  VirtualMachineStatus = "Unknown"
+	VirtualMachineStatusRunning  VirtualMachineStatus = "Running"
+	VirtualMachineStatusSleeping VirtualMachineStatus = "Sleeping"
+	VirtualMachineStatusStopped  VirtualMachineStatus = "Stopped"
+	VirtualMachineStatusUnknown  VirtualMachineStatus = "Unknown"
 )
 
 // DesiredPower The only power input Boat's reconciler takes. An explicit Stopped
