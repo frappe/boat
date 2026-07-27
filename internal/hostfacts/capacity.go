@@ -2,7 +2,10 @@ package hostfacts
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/frappe/boat/internal/run"
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -134,16 +137,50 @@ func column(header, row []string, name string) (int, error) {
 	return 0, fmt.Errorf("free: no %q column in its output", name)
 }
 
+// addPool reads the thin pool, and does NOT fail the host's facts when it
+// cannot.
+//
+// A host with no `atlas` volume group is a real and ordinary state: one that has
+// not been bootstrapped yet, one mid-bootstrap, and — the case that matters —
+// one whose pool has broken. Failing the whole read there made `GET /export`
+// answer 500, so the single host state where an operator most needs to see what
+// the machine looks like was the one state Boat refused to describe. Observed
+// state is meant to report what is there; "there is no pool" is an observation,
+// not an error.
+//
+// The totals are left at zero rather than guessed, and zero is how Atlas's
+// mirror already recognises a fact it must not overwrite a measured value with.
 func addPool(ctx context.Context, commands commands, facts *model.HostFacts) error {
 	size, err := poolSize(ctx, commands)
 	if err != nil {
-		return err
+		return tolerateAbsentPool("size", err)
 	}
 	used, err := poolUsedPercent(ctx, commands)
 	if err != nil {
-		return err
+		return tolerateAbsentPool("fullness", err)
 	}
 	facts.PoolDiskGigabytesTotal, facts.PoolUsedPercent = int(size/gigabyte), used
+	return nil
+}
+
+// tolerateAbsentPool separates a pool that is not there from one that answered
+// something unreadable.
+//
+// lvs exiting non-zero is how a host says "no such volume group", which is the
+// ordinary state of a machine that has not been bootstrapped, is mid-bootstrap,
+// or whose pool has broken — and the last of those is exactly when an operator
+// most needs the rest of the host's facts. That is reported and tolerated.
+//
+// A parse failure is not tolerated. lvs answering with something this code
+// cannot read means the host's inventory is not what it claims to be, and
+// guessing past that is how a placement decision gets made against a number
+// nobody actually measured.
+func tolerateAbsentPool(what string, err error) error {
+	var commandError *run.CommandError
+	if !errors.As(err, &commandError) {
+		return err
+	}
+	slog.Warn("this host has no readable thin pool", "fact", what, "error", err)
 	return nil
 }
 

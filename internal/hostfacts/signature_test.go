@@ -82,18 +82,35 @@ func TestParseFirecrackerVersion(t *testing.T) {
 // that both failed to answer would otherwise produce signatures that match each
 // other, and a warm restore onto the wrong CPU is exactly what the signature
 // exists to prevent.
-func TestReadFailsWhenFirecrackerIsMissing(t *testing.T) {
+// A host with no Firecracker still reports its facts.
+//
+// This is a machine that has not been bootstrapped, and it still has a CPU, a
+// kernel, RAM and a name worth reporting. Failing the whole read made
+// GET /export answer 500 for every pre-bootstrap host — found by running the
+// daemon on a real one.
+//
+// The signature is still written with an empty Firecracker field, and that is
+// the point: a warm snapshot only restores onto the Firecracker it was captured
+// on, so a host that cannot name its own must FAIL that comparison rather than
+// pass it by omission.
+func TestAHostWithNoFirecrackerStillReportsItsFacts(t *testing.T) {
 	fake := healthyHost()
 	fake.errors[firecrackerRead] = errors.New(
 		"fork/exec /usr/local/bin/firecracker: no such file or directory")
 
 	facts, err := readWith(t, fake)
 
-	if err == nil {
-		t.Fatalf("Read succeeded with no Firecracker installed, and returned %+v", facts)
+	if err != nil {
+		t.Fatalf("a host with no Firecracker failed its whole read: %v", err)
 	}
-	if !strings.Contains(err.Error(), firecrackerBinary) {
-		t.Errorf("error %q does not name the binary it could not run", err)
+	if facts.VCPUsTotal == 0 || facts.KernelVersion == "" {
+		t.Errorf("the readable facts were dropped too: %+v", facts)
+	}
+	if facts.FirecrackerVersion != "" {
+		t.Errorf("FirecrackerVersion = %q, want empty — absent is not a version", facts.FirecrackerVersion)
+	}
+	if !strings.Contains(facts.HostSignature, `"firecracker":""`) {
+		t.Errorf("signature %q should name an empty Firecracker so it matches no snapshot", facts.HostSignature)
 	}
 }
 

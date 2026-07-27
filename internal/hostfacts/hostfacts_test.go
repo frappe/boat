@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/frappe/boat/internal/run"
 	"strings"
 	"testing"
 
@@ -228,6 +229,42 @@ func TestReadFailsLoudlyOnEveryUnreadableFact(t *testing.T) {
 			}
 			if (facts != model.HostFacts{}) {
 				t.Errorf("Read returned a half-measured host: %+v", facts)
+			}
+		})
+	}
+}
+
+// A host with no `atlas` volume group still reports every other fact.
+//
+// This is the ordinary state of a machine that has not been bootstrapped, one
+// mid-bootstrap, and one whose pool has broken — and the last is exactly when an
+// operator most needs to see the rest of the host. Failing the whole read there
+// made GET /export answer 500 on a real unbootstrapped host, which is how this
+// was found.
+//
+// Note what is NOT tolerated, and is covered by the test above: a generic
+// failure to run lvs at all. lvs answering "no such volume group" is the host
+// describing itself; lvs not answering is the host failing to.
+func TestAHostWithNoThinPoolStillReportsItsOtherFacts(t *testing.T) {
+	for _, command := range []string{poolSizeRead, poolUsageRead} {
+		t.Run(command, func(t *testing.T) {
+			fake := healthyHost()
+			fake.errors[command] = &run.CommandError{
+				Argv:     []string{"lvs"},
+				ExitCode: 5,
+				Output:   `  Volume group "atlas" not found`,
+			}
+
+			facts, err := readWith(t, fake)
+
+			if err != nil {
+				t.Fatalf("a host with no thin pool failed its whole read: %v", err)
+			}
+			if facts.VCPUsTotal == 0 || facts.MemoryMegabytesTotal == 0 {
+				t.Errorf("the readable facts were dropped too: %+v", facts)
+			}
+			if facts.PoolDiskGigabytesTotal != 0 {
+				t.Errorf("pool total = %d, want 0 — absent is not a measurement", facts.PoolDiskGigabytesTotal)
 			}
 		})
 	}

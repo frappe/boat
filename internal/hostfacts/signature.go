@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 
@@ -18,6 +19,10 @@ import (
 // VMs are actually running under, and a PATH lookup could answer with a
 // different build entirely.
 const firecrackerBinary = "/usr/local/bin/firecracker"
+
+// errFirecrackerAbsent marks a host that has no Firecracker at all, which is an
+// un-bootstrapped machine describing itself rather than a fault.
+var errFirecrackerAbsent = errors.New("no Firecracker is installed")
 
 // signature identifies the CPU, kernel and Firecracker a memory snapshot was
 // captured on. A warm snapshot only restores on a matching host — Intel↔AMD is
@@ -55,7 +60,26 @@ func addSignature(ctx context.Context, commands commands, facts *model.HostFacts
 	}
 	firecracker, err := readFirecrackerVersion(ctx, commands)
 	if err != nil {
-		return err
+		// A host with no Firecracker installed is one that has not been
+		// bootstrapped, and it still has a CPU, a kernel and a name worth
+		// reporting. Failing the whole read here left `GET /export` answering
+		// 500 for every pre-bootstrap host, which is the same mistake the thin
+		// pool made: observed state is meant to describe what is there, and
+		// "there is no Firecracker" is a description.
+		//
+		// The signature is still written, with an empty Firecracker field. That
+		// is deliberately NOT a signature that matches anything: a warm snapshot
+		// only restores onto the CPU, kernel and Firecracker it was captured on,
+		// so a host that cannot name its Firecracker must fail that comparison
+		// rather than pass it by omission.
+		// Only absence is tolerated. A Firecracker that is installed but cannot
+		// state its version is a host whose snapshot compatibility is unknowable
+		// while claiming to be able to run VMs, and that is worth failing over.
+		if !errors.Is(err, errFirecrackerAbsent) {
+			return err
+		}
+		slog.Warn("this host has no Firecracker installed", "path", firecrackerBinary, "error", err)
+		firecracker = ""
 	}
 	signature := parseCPUSignature(cpuinfo)
 	signature.Kernel, signature.Firecracker = facts.KernelVersion, firecracker
@@ -78,7 +102,11 @@ func addSignature(ctx context.Context, commands commands, facts *model.HostFacts
 func readFirecrackerVersion(ctx context.Context, commands commands) (string, error) {
 	output, err := commands.RunUnchecked(ctx, "{} --version", firecrackerBinary)
 	if err != nil {
-		return "", fmt.Errorf("running %s --version: %w", firecrackerBinary, err)
+		// Wrapped so the caller can tell "not installed" from "installed and
+		// unreadable". RunUnchecked only errors when the command could not be
+		// started at all, which for a fixed absolute path means the binary is
+		// not there.
+		return "", fmt.Errorf("running %s --version: %w: %w", firecrackerBinary, errFirecrackerAbsent, err)
 	}
 	version := parseFirecrackerVersion(output)
 	if version == "" {
