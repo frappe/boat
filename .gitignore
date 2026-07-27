@@ -1,0 +1,14 @@
+# Build output.
+/bin/
+/boat
+
+# Test and coverage output.
+coverage.out
+*.test
+
+# Editor and OS droppings.
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
