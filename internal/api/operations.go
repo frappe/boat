@@ -83,12 +83,18 @@ func stopRequestFrom(body *wire.StopRequest) vm.StopRequest {
 	return request
 }
 
-// perform is the shared body of start and stop: claim, run, record — in that
-// order, and never any other.
+// perform is the shared body of every verb: claim, take the VM's turn, run,
+// record — in that order, and never any other.
 //
 // The claim comes first because the identifier is the Atlas Task name: a
 // retried Task must return its first result rather than boot the VM a second
-// time. Only a caller that wins the claim runs anything.
+// time. Only a caller that wins the claim runs anything, and it runs it as the
+// VM's actor. Claiming inside the turn instead would make a replay — a read of a
+// record that already exists — queue behind whatever boot is in progress.
+//
+// Every verb in this package goes through here, which is what makes "a verb
+// never touches the host directly" structural rather than a rule each new
+// handler has to remember.
 func (server *Server) perform(ctx context.Context, identifier, verb, uuid string, execute func(*run.Runner) error) (model.Operation, *errorResponse) {
 	operation, claimed, err := server.operations.ClaimOperation(identifier, verb, uuid)
 	switch {
@@ -99,7 +105,43 @@ func (server *Server) perform(ctx context.Context, identifier, verb, uuid string
 	case !claimed:
 		return operation, nil
 	}
-	return server.runClaimed(ctx, operation, uuid, execute)
+	return server.asActor(ctx, operation, uuid, execute)
+}
+
+// asActor runs the claimed verb inside the reconciler, so that this verb, any
+// other verb for the same UUID and any reconcile pass over it are one queue.
+//
+// The runner is built inside the turn too, because runClaimed builds it: a
+// verb's trace then covers its own commands and not the tail of the operation
+// it was waiting for.
+func (server *Server) asActor(
+	ctx context.Context, operation model.Operation, uuid string, execute func(*run.Runner) error,
+) (model.Operation, *errorResponse) {
+	recorded, failure := operation, (*errorResponse)(nil)
+	err := server.reconciler.Do(ctx, uuid, func(ctx context.Context) error {
+		recorded, failure = server.runClaimed(ctx, operation, uuid, execute)
+		return nil
+	})
+	if err != nil {
+		return server.abandoned(operation, uuid, err)
+	}
+	return recorded, failure
+}
+
+// abandoned records a verb that never got its turn — the client hung up, or the
+// daemon is shutting down.
+//
+// The claim is already in the journal by then, so it owes a terminal record
+// whatever happened to the caller: an operation left Running is one the Atlas
+// Task behind it waits on forever, and the retry that would rescue it reads the
+// same non-terminal record and waits again.
+func (server *Server) abandoned(operation model.Operation, uuid string, cause error) (model.Operation, *errorResponse) {
+	var trace bytes.Buffer
+	recorded, failure := server.record(operation, &trace, fmt.Errorf("waiting for a turn on %s: %w", uuid, cause))
+	if failure == nil {
+		failure = internalFault("This request was abandoned before it could run.", cause)
+	}
+	return recorded, failure
 }
 
 // runClaimed runs the verb behind a claim and journals the outcome before the

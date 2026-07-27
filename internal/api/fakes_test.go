@@ -7,6 +7,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/frappe/boat/internal/model"
@@ -21,7 +22,13 @@ import (
 // against different work is a conflict, a fence epoch never moves backwards, and
 // every observed write bumps the epoch. Those rules are what these tests are
 // about, so a fake that let them slide would prove nothing.
+//
+// Every method takes the mutex, because *store.Store is safe for concurrent use
+// and the tests that matter most here are the ones with two requests in flight
+// at once: a fake that raced where the real store does not would make the
+// serialization tests untestable rather than passing.
 type fakeStore struct {
+	mutex           sync.Mutex
 	operations      map[string]model.Operation
 	virtualMachines map[string]model.VirtualMachine
 	desired         map[string]model.DesiredVirtualMachine
@@ -51,10 +58,14 @@ func newFakeStore() *fakeStore {
 // every test that expects a VM to boot has to say Atlas asserted it — which is
 // the fence doing its job, not test ceremony.
 func (fake *fakeStore) fence(uuid string, epoch int64) {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
 	fake.fences[uuid] = epoch
 }
 
 func (fake *fakeStore) ClaimOperation(identifier, verb, uuid string) (model.Operation, bool, error) {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
 	if fake.claimError != nil {
 		return model.Operation{}, false, fake.claimError
 	}
@@ -76,6 +87,8 @@ func (fake *fakeStore) ClaimOperation(identifier, verb, uuid string) (model.Oper
 }
 
 func (fake *fakeStore) CompleteOperation(operation model.Operation) error {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
 	if fake.completeError != nil {
 		return fake.completeError
 	}
@@ -84,6 +97,8 @@ func (fake *fakeStore) CompleteOperation(operation model.Operation) error {
 }
 
 func (fake *fakeStore) GetOperation(identifier string) (model.Operation, bool, error) {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
 	if fake.readError != nil {
 		return model.Operation{}, false, fake.readError
 	}
@@ -94,6 +109,8 @@ func (fake *fakeStore) GetOperation(identifier string) (model.Operation, bool, e
 // PutVirtualMachine bumps the observed epoch with the write, as the real store
 // does in one transaction: a snapshot and its epoch may never disagree.
 func (fake *fakeStore) PutVirtualMachine(record model.VirtualMachine) error {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
 	if fake.writeError != nil {
 		return fake.writeError
 	}
@@ -103,6 +120,8 @@ func (fake *fakeStore) PutVirtualMachine(record model.VirtualMachine) error {
 }
 
 func (fake *fakeStore) GetVirtualMachine(uuid string) (model.VirtualMachine, bool, error) {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
 	if fake.readError != nil {
 		return model.VirtualMachine{}, false, fake.readError
 	}
@@ -111,6 +130,8 @@ func (fake *fakeStore) GetVirtualMachine(uuid string) (model.VirtualMachine, boo
 }
 
 func (fake *fakeStore) ListVirtualMachines() ([]model.VirtualMachine, error) {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
 	if fake.readError != nil {
 		return nil, fake.readError
 	}
@@ -131,6 +152,8 @@ func (fake *fakeStore) observed() []model.VirtualMachine {
 }
 
 func (fake *fakeStore) PutDesired(record model.DesiredVirtualMachine) error {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
 	if fake.writeError != nil {
 		return fake.writeError
 	}
@@ -140,6 +163,8 @@ func (fake *fakeStore) PutDesired(record model.DesiredVirtualMachine) error {
 }
 
 func (fake *fakeStore) GetDesired(uuid string) (model.DesiredVirtualMachine, bool, error) {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
 	if fake.readError != nil {
 		return model.DesiredVirtualMachine{}, false, fake.readError
 	}
@@ -150,6 +175,8 @@ func (fake *fakeStore) GetDesired(uuid string) (model.DesiredVirtualMachine, boo
 // SetFenceEpoch keeps the store's rule: an epoch that can go backwards is not a
 // fence.
 func (fake *fakeStore) SetFenceEpoch(uuid string, epoch int64) error {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
 	if fake.writeError != nil {
 		return fake.writeError
 	}
@@ -162,6 +189,8 @@ func (fake *fakeStore) SetFenceEpoch(uuid string, epoch int64) error {
 }
 
 func (fake *fakeStore) FenceEpoch(uuid string) (int64, bool, error) {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
 	if fake.readError != nil {
 		return 0, false, fake.readError
 	}
@@ -170,6 +199,8 @@ func (fake *fakeStore) FenceEpoch(uuid string) (int64, bool, error) {
 }
 
 func (fake *fakeStore) ObservedEpoch() (int64, error) {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
 	if fake.readError != nil {
 		return 0, fake.readError
 	}
@@ -177,6 +208,8 @@ func (fake *fakeStore) ObservedEpoch() (int64, error) {
 }
 
 func (fake *fakeStore) Snapshot() (model.Export, error) {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
 	if fake.snapshotError != nil {
 		return model.Export{}, fake.snapshotError
 	}
@@ -203,19 +236,58 @@ type fakeVirtualMachines struct {
 	missing      bool
 	observed     model.VirtualMachine
 	observeError error
+
+	// hold is how long a verb pretends to take, and overlapped is whether a
+	// second one ever ran while it did. Counters alone cannot see the failure the
+	// serialization tests are about — a stop and a start that both ran, correctly
+	// counted, having interleaved vm-network-down with vm-network-up — so the fake
+	// watches for the overlap itself.
+	concurrency sync.Mutex
+	hold        time.Duration
+	inFlight    int
+	overlapped  bool
 }
 
 func (fake *fakeVirtualMachines) Start(ctx context.Context, runner *run.Runner, uuid string) (bool, error) {
+	defer fake.enter()()
 	fake.starts++
 	fake.writeTrace()
 	return false, fake.startError
 }
 
 func (fake *fakeVirtualMachines) Stop(ctx context.Context, runner *run.Runner, uuid string, request vm.StopRequest) error {
+	defer fake.enter()()
 	fake.stops++
 	fake.stopRequests = append(fake.stopRequests, request)
 	fake.writeTrace()
 	return fake.stopError
+}
+
+// enter records that a verb is running on the host and returns the function
+// that records it leaving. It sleeps for hold while it is in, so two verbs that
+// were not serialized are certain to be caught overlapping rather than merely
+// likely to be.
+func (fake *fakeVirtualMachines) enter() func() {
+	fake.concurrency.Lock()
+	fake.inFlight++
+	if fake.inFlight > 1 {
+		fake.overlapped = true
+	}
+	hold := fake.hold
+	fake.concurrency.Unlock()
+	time.Sleep(hold)
+	return func() {
+		fake.concurrency.Lock()
+		defer fake.concurrency.Unlock()
+		fake.inFlight--
+	}
+}
+
+// everOverlapped reports whether two verbs were ever inside the host at once.
+func (fake *fakeVirtualMachines) everOverlapped() bool {
+	fake.concurrency.Lock()
+	defer fake.concurrency.Unlock()
+	return fake.overlapped
 }
 
 func (fake *fakeVirtualMachines) Observe(ctx context.Context, runner *run.Runner, uuid string) (model.VirtualMachine, error) {

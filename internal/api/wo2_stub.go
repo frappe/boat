@@ -9,6 +9,11 @@ import (
 
 // STUB: the WO-2 verb surface, so the repo compiles while it is written.
 // Replace each with a real handler and delete this file when it empties.
+//
+// Every replacement goes through server.perform, which is where the claim, the
+// VM's turn and the terminal journal record all live. A handler that reaches
+// server.virtualMachines on its own is a second driver of the host: it can run
+// while a reconcile pass is mid-boot, and it leaves no record behind.
 
 var errVerbNotImplemented = errors.New("not implemented")
 

@@ -73,6 +73,11 @@ type Dependencies struct {
 	Operations      OperationStore
 	State           StateStore
 	VirtualMachines VirtualMachines
+	// Reconciler is what every verb takes its turn from, so a verb and a
+	// reconcile pass can never drive one machine at once. A nil Reconciler is
+	// legal and means the Server serializes against itself — see localSerializer
+	// for what that costs and why the daemon never does it.
+	Reconciler Reconciler
 	// Watch is where observed changes are announced. A nil hub is legitimate:
 	// watch carries freshness and the export carries truth, so a Server built
 	// without one serves a stream that says nothing rather than dereferencing nil
@@ -86,6 +91,7 @@ type Server struct {
 	operations      OperationStore
 	state           StateStore
 	virtualMachines VirtualMachines
+	reconciler      Reconciler
 	watch           *watch.Hub
 	startedAt       time.Time
 	// newRunner builds the runner a verb traces through. It is a field rather
@@ -109,10 +115,18 @@ func NewServer(dependencies Dependencies) *Server {
 	if hub == nil {
 		hub = watch.NewHub()
 	}
+	// A missing Reconciler is substituted rather than tolerated: the handlers
+	// have exactly one path to the host and it goes through a turn, so there is
+	// no branch anywhere below that could run a verb outside one.
+	serializer := dependencies.Reconciler
+	if serializer == nil {
+		serializer = newLocalSerializer()
+	}
 	return &Server{
 		operations:      dependencies.Operations,
 		state:           dependencies.State,
 		virtualMachines: dependencies.VirtualMachines,
+		reconciler:      serializer,
 		watch:           hub,
 		startedAt:       dependencies.StartedAt,
 		newRunner:       run.NewRunner,
