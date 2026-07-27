@@ -1,0 +1,173 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/frappe/boat/internal/model"
+	"github.com/frappe/boat/internal/run"
+	"github.com/frappe/boat/internal/store"
+	"github.com/frappe/boat/internal/vm"
+	"github.com/frappe/boat/internal/wire"
+)
+
+// The verbs are named in the host CLI's grammar, so an operation record reads
+// the same after the port as the Task row it replaces did before it.
+const (
+	verbStartVirtualMachine = "start-vm"
+	verbStopVirtualMachine  = "stop-vm"
+)
+
+// errUnknownVirtualMachine is a failure like any other as far as the journal is
+// concerned: the operation was claimed, so it owes a terminal record even when
+// the answer to the caller is 404.
+var errUnknownVirtualMachine = errors.New("this host has no such virtual machine")
+
+func (server *Server) StartVirtualMachine(ctx context.Context, request wire.StartVirtualMachineRequestObject) (wire.StartVirtualMachineResponseObject, error) {
+	if request.Body == nil || request.Body.OperationId == "" {
+		return missingOperationIdentifier(), nil
+	}
+	start := func(runner *run.Runner) error {
+		_, err := server.virtualMachines.Start(ctx, runner, request.Uuid)
+		return err
+	}
+	operation, failure := server.perform(ctx, request.Body.OperationId, verbStartVirtualMachine, request.Uuid, start)
+	if failure != nil {
+		return failure, nil
+	}
+	return wire.StartVirtualMachine200JSONResponse{
+		OperationAcceptedJSONResponse: wire.OperationAcceptedJSONResponse(operationToWire(operation)),
+	}, nil
+}
+
+func (server *Server) StopVirtualMachine(ctx context.Context, request wire.StopVirtualMachineRequestObject) (wire.StopVirtualMachineResponseObject, error) {
+	if request.Body == nil || request.Body.OperationId == "" {
+		return missingOperationIdentifier(), nil
+	}
+	stopRequest := stopRequestFrom(request.Body)
+	stop := func(runner *run.Runner) error {
+		return server.virtualMachines.Stop(ctx, runner, request.Uuid, stopRequest)
+	}
+	operation, failure := server.perform(ctx, request.Body.OperationId, verbStopVirtualMachine, request.Uuid, stop)
+	if failure != nil {
+		return failure, nil
+	}
+	return wire.StopVirtualMachine200JSONResponse{
+		OperationAcceptedJSONResponse: wire.OperationAcceptedJSONResponse(operationToWire(operation)),
+	}, nil
+}
+
+// stopRequestFrom applies the IDL's defaults: a stop is cooperative unless the
+// caller says otherwise, and an unset timeout leaves systemd's drain alone.
+//
+// This is the one place the polarity flips. The wire says `graceful` because
+// that is what Atlas and the Python verb have always called it; vm.StopRequest
+// says `Forced` so its zero value is the stop that does not lose writes. An
+// absent field therefore means a cooperative stop on both sides, which is what
+// the IDL's `default: true` promises.
+func stopRequestFrom(body *wire.StopRequest) vm.StopRequest {
+	request := vm.StopRequest{}
+	if body.Graceful != nil {
+		request.Forced = !*body.Graceful
+	}
+	if body.StopTimeoutSeconds != nil {
+		request.TimeoutSeconds = *body.StopTimeoutSeconds
+	}
+	return request
+}
+
+// perform is the shared body of start and stop: claim, run, record — in that
+// order, and never any other.
+//
+// The claim comes first because the identifier is the Atlas Task name: a
+// retried Task must return its first result rather than boot the VM a second
+// time. Only a caller that wins the claim runs anything.
+func (server *Server) perform(ctx context.Context, identifier, verb, uuid string, execute func(*run.Runner) error) (model.Operation, *errorResponse) {
+	operation, claimed, err := server.operations.ClaimOperation(identifier, verb, uuid)
+	switch {
+	case errors.Is(err, store.ErrOperationConflict):
+		return operation, conflict("Operation " + identifier + " is already recorded against different work.")
+	case err != nil:
+		return operation, internalFault("The operation could not be claimed.", err)
+	case !claimed:
+		return operation, nil
+	}
+	return server.runClaimed(ctx, operation, uuid, execute)
+}
+
+// runClaimed runs the verb behind a claim and journals the outcome before the
+// response is written: nothing may outlive the request without a record behind
+// it, or a crash would leave Atlas holding an answer the host never kept.
+func (server *Server) runClaimed(ctx context.Context, operation model.Operation, uuid string, execute func(*run.Runner) error) (model.Operation, *errorResponse) {
+	var trace bytes.Buffer
+	runner := server.newRunner(&trace)
+	if !server.virtualMachines.Exists(ctx, runner, uuid) {
+		recorded, failure := server.record(operation, &trace, errUnknownVirtualMachine)
+		if failure == nil {
+			failure = notFound("This host has no virtual machine " + uuid + ".")
+		}
+		return recorded, failure
+	}
+	verbError := execute(runner)
+	if verbError == nil {
+		server.observe(ctx, runner, uuid, &trace)
+	}
+	return server.record(operation, &trace, verbError)
+}
+
+// record writes the terminal journal entry. The trace buffer becomes Output, so
+// the Task row Atlas shows carries the same `+ command` lines it always has.
+func (server *Server) record(operation model.Operation, trace *bytes.Buffer, verbError error) (model.Operation, *errorResponse) {
+	operation.EndedAt = time.Now().UTC()
+	operation.Output = trace.String()
+	operation.Status = model.OperationSuccess
+	if verbError != nil {
+		operation.Status = model.OperationFailure
+		operation.Error = verbError.Error()
+		operation.ExitCode = exitCodeOf(verbError)
+	}
+	if err := server.operations.CompleteOperation(operation); err != nil {
+		return operation, internalFault("The operation could not be recorded.", err)
+	}
+	return operation, nil
+}
+
+// exitCodeOf mirrors the exit code the equivalent Task carried. A failure that
+// never reached a command has no exit code of its own, so it reports 1.
+func exitCodeOf(verbError error) int {
+	var commandError *run.CommandError
+	if errors.As(verbError, &commandError) {
+		return commandError.ExitCode
+	}
+	return 1
+}
+
+// observe persists what the host says now, so Boat's store reflects the host
+// rather than the request. A verb that succeeded stays succeeded even if the
+// observation afterwards did not: the record says so instead of lying either
+// way.
+func (server *Server) observe(ctx context.Context, runner *run.Runner, uuid string, trace *bytes.Buffer) {
+	record, err := server.virtualMachines.Observe(ctx, runner, uuid)
+	if err == nil {
+		err = server.operations.PutVirtualMachine(record)
+	}
+	if err != nil {
+		fmt.Fprintf(trace, "# could not observe %s after the verb: %v\n", uuid, err)
+		slog.Error("could not observe virtual machine after a verb", "uuid", uuid, "error", err)
+	}
+}
+
+// missingOperationIdentifier refuses work that could not be replayed. The IDL
+// makes operation_id required and the generated server does not enforce it, so
+// the boundary does: without it a retry would boot the VM twice.
+func missingOperationIdentifier() *errorResponse {
+	return &errorResponse{
+		statusCode: http.StatusBadRequest,
+		message:    "This request needs an operation_id, so a retry can be recognised as a replay.",
+	}
+}
