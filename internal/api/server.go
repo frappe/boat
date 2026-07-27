@@ -6,6 +6,11 @@
 // command can never hold a power the API lacks — which is what makes the CLI a
 // truthful tool rather than a second implementation of the host's mechanics.
 //
+// Two of the operations define the relationship with Atlas: PUT /vms/{uuid} is
+// Atlas re-asserting intent, and GET /export is Boat re-asserting fact. Run back
+// to back they resynchronize a host from any state, which is why WO-1 could
+// delete a polling sweep rather than add to it.
+//
 // The handlers take interfaces rather than the concrete store and manager so
 // they can be exercised against fakes: an HTTP test here needs neither a bbolt
 // file nor a host with systemd on it.
@@ -17,10 +22,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/frappe/boat/internal/hostfacts"
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/version"
 	"github.com/frappe/boat/internal/vm"
+	"github.com/frappe/boat/internal/watch"
 	"github.com/frappe/boat/internal/wire"
 )
 
@@ -34,6 +41,20 @@ type OperationStore interface {
 	ListVirtualMachines() ([]model.VirtualMachine, error)
 }
 
+// StateStore is the slice of the store that holds the two states Boat keeps
+// apart: what Atlas asked for, with the fence that permits this host to act on
+// it, and what the host has been observed to be. One implementation serves both
+// this and OperationStore, because a snapshot and the epoch it was taken at have
+// to come out of one transaction to mean anything.
+type StateStore interface {
+	PutDesired(record model.DesiredVirtualMachine) error
+	GetDesired(uuid string) (model.DesiredVirtualMachine, bool, error)
+	SetFenceEpoch(uuid string, epoch int64) error
+	FenceEpoch(uuid string) (int64, bool, error)
+	ObservedEpoch() (int64, error)
+	Snapshot() (model.Export, error)
+}
+
 // VirtualMachines is the slice of the VM manager the handlers need.
 type VirtualMachines interface {
 	Start(ctx context.Context, runner *run.Runner, uuid string) (bool, error)
@@ -42,30 +63,60 @@ type VirtualMachines interface {
 	Exists(ctx context.Context, runner *run.Runner, uuid string) bool
 }
 
+// Dependencies are the collaborators a Server answers with.
+//
+// They are a struct rather than positional parameters because WO-1 took the
+// count past what a call site can be read for: three stores-and-managers in a
+// row, all interfaces, is a place where two arguments swap and nothing complains
+// until a host misbehaves.
+type Dependencies struct {
+	Operations      OperationStore
+	State           StateStore
+	VirtualMachines VirtualMachines
+	// Watch is where observed changes are announced. A nil hub is legitimate:
+	// watch carries freshness and the export carries truth, so a Server built
+	// without one serves a stream that says nothing rather than dereferencing nil
+	// in the middle of a verb.
+	Watch     *watch.Hub
+	StartedAt time.Time
+}
+
 // Server answers every documented operation.
 type Server struct {
 	operations      OperationStore
+	state           StateStore
 	virtualMachines VirtualMachines
+	watch           *watch.Hub
 	startedAt       time.Time
 	// newRunner builds the runner a verb traces through. It is a field rather
 	// than a direct call to run.NewRunner because the runner's trace writer and
 	// the operation record have to be the same buffer, and because a test needs
 	// to write into that buffer the way a real verb does.
 	newRunner func(trace io.Writer) *run.Runner
+	// hostFacts is a field for the same reason: an export has to be answerable in
+	// a test that has no host under it.
+	hostFacts func(ctx context.Context, runner *run.Runner) (model.HostFacts, error)
 }
 
 // The generated contract is the compile-time check that nothing here drifts
 // from api/openapi.yaml.
 var _ wire.StrictServerInterface = (*Server)(nil)
 
-// NewServer builds the surface. startedAt is the daemon's start time, which
+// NewServer builds the surface. StartedAt is the daemon's start time, which
 // /host reports so a restart is visible to Atlas.
-func NewServer(operations OperationStore, virtualMachines VirtualMachines, startedAt time.Time) *Server {
+func NewServer(dependencies Dependencies) *Server {
+	hub := dependencies.Watch
+	if hub == nil {
+		hub = watch.NewHub()
+	}
 	return &Server{
-		operations:      operations,
-		virtualMachines: virtualMachines,
-		startedAt:       startedAt,
+		operations:      dependencies.Operations,
+		state:           dependencies.State,
+		virtualMachines: dependencies.VirtualMachines,
+		watch:           hub,
+		startedAt:       dependencies.StartedAt,
 		newRunner:       run.NewRunner,
+		hostFacts:       hostfacts.Read,
 	}
 }
 

@@ -9,7 +9,7 @@ import (
 const testToken = "a-short-lived-per-host-token"
 
 func newTestTunnel(token string) http.Handler {
-	return newTestServer(newFakeOperationStore(), &fakeVirtualMachines{}).TunnelHandler(token)
+	return newTestServer(newFakeStore(), &fakeVirtualMachines{}).TunnelHandler(token)
 }
 
 func TestTunnelRefusesAMissingOrWrongToken(t *testing.T) {
@@ -65,9 +65,9 @@ func TestATunnelWithoutATokenAdmitsNobody(t *testing.T) {
 // On the socket the peer's credentials are the authentication, so no request
 // there carries a token at all.
 func TestSocketHandlerNeedsNoToken(t *testing.T) {
-	socket := newTestServer(newFakeOperationStore(), &fakeVirtualMachines{}).SocketHandler()
+	socket := newTestServer(newFakeStore(), &fakeVirtualMachines{}).SocketHandler()
 
-	for _, path := range []string{"/health", "/host", "/vms"} {
+	for _, path := range []string{"/health", "/host", "/vms", "/export"} {
 		if recorder := get(t, socket, path); recorder.Code != http.StatusOK {
 			t.Errorf("%s: got %d, want 200: %s", path, recorder.Code, recorder.Body)
 		}
@@ -78,7 +78,7 @@ func TestSocketHandlerNeedsNoToken(t *testing.T) {
 // generated router registers the bare paths; both have to answer or a client
 // written from the IDL talks to nothing.
 func TestTheDocumentedBasePathAlsoRoutes(t *testing.T) {
-	socket := newTestServer(newFakeOperationStore(), &fakeVirtualMachines{}).SocketHandler()
+	socket := newTestServer(newFakeStore(), &fakeVirtualMachines{}).SocketHandler()
 
 	if recorder := get(t, socket, versionPrefix+"/vms"); recorder.Code != http.StatusOK {
 		t.Errorf("got %d, want 200: %s", recorder.Code, recorder.Body)
@@ -86,7 +86,7 @@ func TestTheDocumentedBasePathAlsoRoutes(t *testing.T) {
 }
 
 func TestAnUndocumentedPathIsRefusedAsJson(t *testing.T) {
-	socket := newTestServer(newFakeOperationStore(), &fakeVirtualMachines{}).SocketHandler()
+	socket := newTestServer(newFakeStore(), &fakeVirtualMachines{}).SocketHandler()
 
 	recorder := get(t, socket, "/vms/one/evacuate")
 

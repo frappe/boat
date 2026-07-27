@@ -1,6 +1,9 @@
 package api
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/wire"
 )
@@ -28,6 +31,149 @@ func virtualMachineToWire(record model.VirtualMachine) wire.VirtualMachine {
 		HasMemorySnapshot: &record.HasMemorySnapshot,
 		Sleeping:          &record.Sleeping,
 	}
+}
+
+// desiredFromWire reads one assertion of desired state.
+//
+// The path names the VM. A body naming a different one is refused rather than
+// reconciled: a PUT that quietly wrote to the UUID in the body would let one
+// typo re-fence a VM the caller never meant to touch.
+func desiredFromWire(uuid string, document wire.DesiredVirtualMachine) (model.DesiredVirtualMachine, error) {
+	if document.Uuid != "" && document.Uuid != uuid {
+		return model.DesiredVirtualMachine{}, fmt.Errorf(
+			"this request names %s in its path and %s in its body, so it is not clear which VM it asserts", uuid, document.Uuid)
+	}
+	power := model.DesiredPower(document.DesiredPower)
+	if power != model.PowerRunning && power != model.PowerStopped {
+		return model.DesiredVirtualMachine{}, fmt.Errorf(
+			"desired_power must be %q or %q, and this request carried %q", model.PowerRunning, model.PowerStopped, document.DesiredPower)
+	}
+	return model.DesiredVirtualMachine{
+		UUID:               uuid,
+		BootEpoch:          int64(document.BootEpoch),
+		DesiredPower:       power,
+		VCPUs:              optional(document.Vcpus),
+		CPUMaxCores:        optional(document.CpuMaxCores),
+		CPUMode:            optional(document.CpuMode),
+		MemoryMegabytes:    optional(document.MemoryMegabytes),
+		DiskGigabytes:      optional(document.DiskGigabytes),
+		DataDiskGigabytes:  optional(document.DataDiskGigabytes),
+		SleepOnIdle:        optional(document.SleepOnIdle),
+		IdleTimeoutSeconds: optional(document.IdleTimeoutSeconds),
+		IPv6Address:        optional(document.Ipv6Address),
+		PrivateAddress:     optional(document.PrivateAddress),
+		MACAddress:         optional(document.MacAddress),
+		TapDevice:          optional(document.TapDevice),
+		// AssertedAt is the host's note of when it heard this, and the wire
+		// carries no such field on purpose: a timestamp the asserting side
+		// controls is a timestamp that can be backdated.
+		AssertedAt: time.Now().UTC(),
+	}, nil
+}
+
+func desiredToWire(record model.DesiredVirtualMachine) wire.DesiredVirtualMachine {
+	return wire.DesiredVirtualMachine{
+		Uuid:               record.UUID,
+		BootEpoch:          record.BootEpoch,
+		DesiredPower:       wire.DesiredPower(record.DesiredPower),
+		Vcpus:              &record.VCPUs,
+		CpuMaxCores:        &record.CPUMaxCores,
+		CpuMode:            &record.CPUMode,
+		MemoryMegabytes:    &record.MemoryMegabytes,
+		DiskGigabytes:      &record.DiskGigabytes,
+		DataDiskGigabytes:  &record.DataDiskGigabytes,
+		SleepOnIdle:        &record.SleepOnIdle,
+		IdleTimeoutSeconds: &record.IdleTimeoutSeconds,
+		Ipv6Address:        &record.IPv6Address,
+		PrivateAddress:     &record.PrivateAddress,
+		MacAddress:         &record.MACAddress,
+		TapDevice:          &record.TapDevice,
+	}
+}
+
+// exportToWire renders the whole-host document.
+//
+// Units and logical volumes are carried only when the snapshot holds them. An
+// empty array would say "this host has no logical volumes", which is a claim
+// nothing in WO-1 has looked at the host closely enough to make.
+func exportToWire(export model.Export) wire.Export {
+	document := wire.Export{
+		ObservedEpoch:   export.ObservedEpoch,
+		TakenAt:         export.TakenAt,
+		Host:            hostFactsToWire(export.Host),
+		VirtualMachines: virtualMachinesToWire(export.VirtualMachines),
+	}
+	if export.Units != nil {
+		units := unitsToWire(export.Units)
+		document.Units = &units
+	}
+	if export.LogicalVolumes != nil {
+		volumes := logicalVolumesToWire(export.LogicalVolumes)
+		document.LogicalVolumes = &volumes
+	}
+	if export.FenceEpochs != nil {
+		epochs := fenceEpochsToWire(export.FenceEpochs)
+		document.FenceEpochs = &epochs
+	}
+	return document
+}
+
+func hostFactsToWire(facts model.HostFacts) wire.HostFacts {
+	return wire.HostFacts{
+		Hostname:               facts.Hostname,
+		BoatVersion:            facts.BoatVersion,
+		KernelVersion:          &facts.KernelVersion,
+		FirecrackerVersion:     &facts.FirecrackerVersion,
+		VcpusTotal:             &facts.VCPUsTotal,
+		MemoryMegabytesTotal:   &facts.MemoryMegabytesTotal,
+		MemoryMegabytesFree:    &facts.MemoryMegabytesFree,
+		PoolDiskGigabytesTotal: &facts.PoolDiskGigabytesTotal,
+		PoolUsedPercent:        &facts.PoolUsedPercent,
+		HostSignature:          &facts.HostSignature,
+	}
+}
+
+func unitsToWire(units []model.UnitLiveness) []wire.UnitLiveness {
+	documents := make([]wire.UnitLiveness, 0, len(units))
+	for _, unit := range units {
+		documents = append(documents, wire.UnitLiveness{Name: unit.Name, ActiveState: unit.ActiveState, SubState: unit.SubState})
+	}
+	return documents
+}
+
+func logicalVolumesToWire(volumes []model.LogicalVolume) []wire.LogicalVolume {
+	documents := make([]wire.LogicalVolume, 0, len(volumes))
+	for _, volume := range volumes {
+		documents = append(documents, wire.LogicalVolume{
+			Name:      volume.Name,
+			SizeBytes: &volume.SizeBytes,
+			Pool:      &volume.Pool,
+			Origin:    &volume.Origin,
+		})
+	}
+	return documents
+}
+
+// fenceEpochsToWire narrows int64 to the int the IDL asks for. An epoch is a
+// counter Atlas bumps once per migration, so nothing this side of the heat death
+// of the datacentre overflows it — see the report on api/openapi.yaml.
+func fenceEpochsToWire(epochs map[string]int64) map[string]int64 {
+	document := make(map[string]int64, len(epochs))
+	for uuid, epoch := range epochs {
+		document[uuid] = epoch
+	}
+	return document
+}
+
+// optional reads a field the IDL made optional. An absent number is zero and an
+// absent flag is false, which is what every one of these fields means when Atlas
+// leaves it out.
+func optional[Value any](field *Value) Value {
+	if field == nil {
+		var absent Value
+		return absent
+	}
+	return *field
 }
 
 // operationToWire omits what a still-running operation does not have yet: an

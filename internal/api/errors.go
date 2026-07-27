@@ -50,8 +50,24 @@ func (response *errorResponse) VisitStopVirtualMachineResponse(writer http.Respo
 	return response.write(writer)
 }
 
+func (response *errorResponse) VisitPutVirtualMachineResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
+func (response *errorResponse) VisitGetExportResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
 func notFound(message string) *errorResponse {
 	return &errorResponse{statusCode: http.StatusNotFound, message: message}
+}
+
+// badRequest refuses a request the boundary understood and will not act on. The
+// generated server checks shapes; the rules a shape cannot express — an
+// operation with no identifier, a document naming two different VMs — are
+// checked here, because the alternative is acting on them.
+func badRequest(message string) *errorResponse {
+	return &errorResponse{statusCode: http.StatusBadRequest, message: message}
 }
 
 // conflict answers an identifier reused for different work. Replay is only

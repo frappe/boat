@@ -11,7 +11,7 @@ import (
 )
 
 func TestHealthSaysOnlyThatBoatIsUp(t *testing.T) {
-	handler := newTestServer(newFakeOperationStore(), &fakeVirtualMachines{}).SocketHandler()
+	handler := newTestServer(newFakeStore(), &fakeVirtualMachines{}).SocketHandler()
 
 	recorder := get(t, handler, "/health")
 
@@ -26,7 +26,7 @@ func TestHealthSaysOnlyThatBoatIsUp(t *testing.T) {
 }
 
 func TestHostReportsTheDaemonsStartAndItsVirtualMachineCount(t *testing.T) {
-	operations := newFakeOperationStore()
+	operations := newFakeStore()
 	operations.virtualMachines["one"] = model.VirtualMachine{UUID: "one"}
 	operations.virtualMachines["two"] = model.VirtualMachine{UUID: "two"}
 	server := newTestServer(operations, &fakeVirtualMachines{})
@@ -50,7 +50,7 @@ func TestHostReportsTheDaemonsStartAndItsVirtualMachineCount(t *testing.T) {
 }
 
 func TestVirtualMachineListAndDocumentComeFromTheStore(t *testing.T) {
-	operations := newFakeOperationStore()
+	operations := newFakeStore()
 	operations.virtualMachines[testUuid] = model.VirtualMachine{
 		UUID:            testUuid,
 		ObservedStatus:  model.StatusSleeping,
@@ -77,7 +77,7 @@ func TestVirtualMachineListAndDocumentComeFromTheStore(t *testing.T) {
 }
 
 func TestUnknownVirtualMachineAndOperationAreNotFound(t *testing.T) {
-	handler := newTestServer(newFakeOperationStore(), &fakeVirtualMachines{}).SocketHandler()
+	handler := newTestServer(newFakeStore(), &fakeVirtualMachines{}).SocketHandler()
 
 	for _, path := range []string{"/vms/" + testUuid, "/ops/Task-404"} {
 		recorder := get(t, handler, path)
@@ -93,7 +93,7 @@ func TestUnknownVirtualMachineAndOperationAreNotFound(t *testing.T) {
 // The journal outlives the request that wrote it: that is what makes it
 // crash-recovery truth rather than a response cache.
 func TestOperationRecordIsReadableAfterTheRun(t *testing.T) {
-	operations := newFakeOperationStore()
+	operations := newFakeStore()
 	handler := newTestServer(operations, &fakeVirtualMachines{traceText: "+ systemctl stop\n"}).SocketHandler()
 	postJSON(t, handler, "/vms/"+testUuid+"/stop", wire.StopRequest{OperationId: "Task-9"})
 

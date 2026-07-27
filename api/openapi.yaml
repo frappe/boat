@@ -124,9 +124,9 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "409":
           description: |
-            Either the caller's If-Match did not name Boat's current observed
-            epoch, or the epoch offered is older than the one already fenced.
-            An epoch never goes backwards.
+            The epoch offered is older than the one this host already holds. An
+            epoch never goes backwards, because a fence that can regress
+            re-opens the window it exists to close.
           content:
             application/json:
               schema:
@@ -202,7 +202,20 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/OperationIdentifierConflict"
+          description: |
+            Either the `op_id` names different work, or this host holds no
+            usable fence for the VM. The two need opposite responses from the
+            caller — a colliding identifier must not be retried, while an
+            unfenced start becomes possible the moment Atlas PUTs the epoch —
+            so `reason` distinguishes them rather than leaving the caller to
+            parse a sentence.
+
+            An unfenced start does not consume the operation identifier, so the
+            retry after the PUT may reuse it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /vms/{uuid}/stop:
     parameters:
@@ -339,7 +352,7 @@ components:
       description: |
         Boat's observed status, derived from the host — the unit's state and the
         on-disk markers — never from a command's success.
-      enum: [Running, Stopped, Sleeping, Unknown]
+      enum: [Running, Stopped, Paused, Sleeping, Failed, Unknown]
 
     VirtualMachine:
       type: object
@@ -366,6 +379,7 @@ components:
           description: The sleeping marker is present — the VM is parked, not stopped.
         boot_epoch:
           type: integer
+          format: int64
           description: |
             The fence epoch this host is permitted to boot the VM at. Absent
             means Boat holds no fence for it and will refuse to start it.
@@ -409,11 +423,17 @@ components:
           type: string
         boot_epoch:
           type: integer
+          format: int64
+          minimum: 1
           description: |
             Monotonic per-VM fence, issued only by Atlas and bumped at exactly
             one point: a migration's repoint. Boat refuses to boot a UUID whose
             local epoch is older than the one on disk, which is what stops two
             live copies of one VM after a partition.
+
+            Epochs start at 1. Boat gates on whether it holds a fence at all, so
+            a zero would be a held fence rather than the absence of one — do not
+            use 0 to mean unfenced.
         desired_power:
           $ref: "#/components/schemas/DesiredPower"
         vcpus:
@@ -443,6 +463,28 @@ components:
           type: string
         tap_device:
           type: string
+
+    Quarantine:
+      type: object
+      required: [identifier, reason]
+      properties:
+        identifier:
+          type: string
+          description: |
+            Whatever the host retained to name this artifact set — usually a VM
+            UUID, but a stranded namespace or address keeps only its own name,
+            and inventing a UUID for it would be a guess.
+        reason:
+          type: string
+          description: What was incoherent, in one sentence.
+        evidence:
+          type: array
+          items:
+            type: string
+          description: The observations that made it ambiguous rather than simply absent.
+        seen_at:
+          type: string
+          format: date-time
 
     UnitLiveness:
       type: object
@@ -511,6 +553,7 @@ components:
         taken_at:
           type: string
           format: date-time
+          description: Always UTC, with a trailing Z. A naive stamp cannot be ordered across hosts.
         host:
           $ref: "#/components/schemas/HostFacts"
         virtual_machines:
@@ -530,7 +573,16 @@ components:
           type: object
           additionalProperties:
             type: integer
+            format: int64
           description: Every fence this host holds, by UUID.
+        quarantine:
+          type: array
+          items:
+            $ref: "#/components/schemas/Quarantine"
+          description: |
+            Artifact sets this host holds that could not be read as a coherent
+            VM. Reported so an operator can resolve them; never acted upon, and
+            never counted as a VM.
 
     OperationStatus:
       type: string
@@ -580,6 +632,12 @@ components:
         error:
           type: string
           description: What went wrong, in one sentence, at the boundary where it was detected.
+        reason:
+          type: string
+          description: |
+            A stable token for the cases a caller must tell apart by code rather
+            than by prose. Absent when the sentence is the whole answer.
+          enum: [operation-identifier-conflict, no-fence, stale-fence]
 
     StartRequest:
       type: object

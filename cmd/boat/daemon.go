@@ -22,6 +22,7 @@ import (
 	"github.com/frappe/boat/internal/store"
 	"github.com/frappe/boat/internal/version"
 	"github.com/frappe/boat/internal/vm"
+	"github.com/frappe/boat/internal/watch"
 )
 
 const (
@@ -111,7 +112,16 @@ func serve(options daemonOptions, token string) error {
 	if err != nil {
 		return fmt.Errorf("could not open the store at %s: %w", options.storePath, err)
 	}
-	server := api.NewServer(database, vm.NewManager(), time.Now().UTC())
+	// One *store.Store satisfies both the operation and the state interfaces;
+	// they are separate at the API boundary so a handler declares which half of
+	// the store it actually needs.
+	server := api.NewServer(api.Dependencies{
+		Operations:      database,
+		State:           database,
+		VirtualMachines: vm.NewManager(),
+		Watch:           watch.NewHub(),
+		StartedAt:       time.Now().UTC(),
+	})
 	active, err := openListeners(options, server, token)
 	if err != nil {
 		database.Close()

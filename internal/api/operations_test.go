@@ -14,7 +14,8 @@ import (
 const testUuid = "1f8e0a2c-0000-4000-8000-000000000001"
 
 func TestStartRecordsSuccessAndObservesTheHost(t *testing.T) {
-	operations := newFakeOperationStore()
+	operations := newFakeStore()
+	operations.fence(testUuid, 1)
 	machines := &fakeVirtualMachines{
 		traceText: "+ systemctl start firecracker-vm@" + testUuid + ".service\n",
 		observed:  model.VirtualMachine{ObservedStatus: model.StatusRunning, UnitActiveState: "active"},
@@ -46,7 +47,8 @@ func TestStartRecordsSuccessAndObservesTheHost(t *testing.T) {
 
 // A retried Atlas Task carries the same name, and must not boot the VM twice.
 func TestStartReplayReturnsTheFirstResultAndRunsNothing(t *testing.T) {
-	operations := newFakeOperationStore()
+	operations := newFakeStore()
+	operations.fence(testUuid, 1)
 	machines := &fakeVirtualMachines{traceText: "+ systemctl start\n"}
 	handler := newTestServer(operations, machines).SocketHandler()
 	body := wire.StartRequest{OperationId: "Task-2"}
@@ -67,7 +69,8 @@ func TestStartReplayReturnsTheFirstResultAndRunsNothing(t *testing.T) {
 }
 
 func TestStartRefusesAnIdentifierAlreadyUsedForOtherWork(t *testing.T) {
-	operations := newFakeOperationStore()
+	operations := newFakeStore()
+	operations.fence(testUuid, 1)
 	machines := &fakeVirtualMachines{}
 	handler := newTestServer(operations, machines).SocketHandler()
 	postJSON(t, handler, "/vms/"+testUuid+"/stop", wire.StopRequest{OperationId: "Task-3"})
@@ -86,7 +89,8 @@ func TestStartRefusesAnIdentifierAlreadyUsedForOtherWork(t *testing.T) {
 }
 
 func TestFailingVerbIsRecordedWithItsTrace(t *testing.T) {
-	operations := newFakeOperationStore()
+	operations := newFakeStore()
+	operations.fence(testUuid, 1)
 	machines := &fakeVirtualMachines{
 		traceText:  "+ systemctl start firecracker-vm@x.service\n",
 		startError: errors.New("the unit did not become active"),
@@ -134,7 +138,8 @@ func TestExitCodeComesFromTheCommandThatFailed(t *testing.T) {
 // A failed verb must still leave a terminal record: the response is never
 // written ahead of the journal.
 func TestUnknownVirtualMachineIsRefusedAndStillJournalled(t *testing.T) {
-	operations := newFakeOperationStore()
+	operations := newFakeStore()
+	operations.fence(testUuid, 1)
 	machines := &fakeVirtualMachines{missing: true}
 	handler := newTestServer(operations, machines).SocketHandler()
 
@@ -153,7 +158,7 @@ func TestUnknownVirtualMachineIsRefusedAndStillJournalled(t *testing.T) {
 }
 
 func TestStopAppliesTheContractsDefaults(t *testing.T) {
-	operations := newFakeOperationStore()
+	operations := newFakeStore()
 	machines := &fakeVirtualMachines{}
 	handler := newTestServer(operations, machines).SocketHandler()
 
@@ -171,7 +176,7 @@ func TestStopAppliesTheContractsDefaults(t *testing.T) {
 }
 
 func TestStopCarriesGracefulAndTimeoutThrough(t *testing.T) {
-	operations := newFakeOperationStore()
+	operations := newFakeStore()
 	machines := &fakeVirtualMachines{}
 	handler := newTestServer(operations, machines).SocketHandler()
 	graceful := false
@@ -192,7 +197,7 @@ func TestStopCarriesGracefulAndTimeoutThrough(t *testing.T) {
 }
 
 func TestStartWithoutAnOperationIdentifierIsRefused(t *testing.T) {
-	operations := newFakeOperationStore()
+	operations := newFakeStore()
 	machines := &fakeVirtualMachines{}
 	handler := newTestServer(operations, machines).SocketHandler()
 
@@ -207,7 +212,7 @@ func TestStartWithoutAnOperationIdentifierIsRefused(t *testing.T) {
 }
 
 func TestMalformedBodyIsRefusedInTheContractsShape(t *testing.T) {
-	handler := newTestServer(newFakeOperationStore(), &fakeVirtualMachines{}).SocketHandler()
+	handler := newTestServer(newFakeStore(), &fakeVirtualMachines{}).SocketHandler()
 
 	recorder := postBody(handler, "/vms/"+testUuid+"/start", "{not json")
 
@@ -222,7 +227,8 @@ func TestMalformedBodyIsRefusedInTheContractsShape(t *testing.T) {
 // An unjournalled outcome is not an outcome: if the record cannot be written,
 // the caller must not be told the operation succeeded.
 func TestAnUnwritableJournalIsAnInternalFault(t *testing.T) {
-	operations := newFakeOperationStore()
+	operations := newFakeStore()
+	operations.fence(testUuid, 1)
 	operations.completeError = errors.New("/var/lib/boat/boat.db: no space left on device")
 	handler := newTestServer(operations, &fakeVirtualMachines{}).SocketHandler()
 

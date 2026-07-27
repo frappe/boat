@@ -2,42 +2,59 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
+	"maps"
+	"slices"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/store"
 	"github.com/frappe/boat/internal/vm"
-	"github.com/frappe/boat/internal/wire"
+	"github.com/frappe/boat/internal/watch"
 )
 
-// fakeOperationStore is the journal without bbolt. ClaimOperation keeps the
-// real rule — a second claim of one identifier is a replay, and a claim against
-// different work is a conflict — because the handlers' idempotency is exactly
-// what these tests are about.
-type fakeOperationStore struct {
+// fakeStore is the store without bbolt. The rules the handlers lean on are kept
+// rather than stubbed: a second claim of one identifier is a replay, a claim
+// against different work is a conflict, a fence epoch never moves backwards, and
+// every observed write bumps the epoch. Those rules are what these tests are
+// about, so a fake that let them slide would prove nothing.
+type fakeStore struct {
 	operations      map[string]model.Operation
 	virtualMachines map[string]model.VirtualMachine
+	desired         map[string]model.DesiredVirtualMachine
+	fences          map[string]int64
+	epoch           int64
+	units           []model.UnitLiveness
+	logicalVolumes  []model.LogicalVolume
+	desiredWrites   int
+	fenceWrites     int
 	claimError      error
 	completeError   error
 	readError       error
+	writeError      error
+	snapshotError   error
 }
 
-func newFakeOperationStore() *fakeOperationStore {
-	return &fakeOperationStore{
+func newFakeStore() *fakeStore {
+	return &fakeStore{
 		operations:      map[string]model.Operation{},
 		virtualMachines: map[string]model.VirtualMachine{},
+		desired:         map[string]model.DesiredVirtualMachine{},
+		fences:          map[string]int64{},
 	}
 }
 
-func (fake *fakeOperationStore) ClaimOperation(identifier, verb, uuid string) (model.Operation, bool, error) {
+// fence records an epoch the way a PUT would. A start is refused without one, so
+// every test that expects a VM to boot has to say Atlas asserted it — which is
+// the fence doing its job, not test ceremony.
+func (fake *fakeStore) fence(uuid string, epoch int64) {
+	fake.fences[uuid] = epoch
+}
+
+func (fake *fakeStore) ClaimOperation(identifier, verb, uuid string) (model.Operation, bool, error) {
 	if fake.claimError != nil {
 		return model.Operation{}, false, fake.claimError
 	}
@@ -58,7 +75,7 @@ func (fake *fakeOperationStore) ClaimOperation(identifier, verb, uuid string) (m
 	return claimed, true, nil
 }
 
-func (fake *fakeOperationStore) CompleteOperation(operation model.Operation) error {
+func (fake *fakeStore) CompleteOperation(operation model.Operation) error {
 	if fake.completeError != nil {
 		return fake.completeError
 	}
@@ -66,7 +83,7 @@ func (fake *fakeOperationStore) CompleteOperation(operation model.Operation) err
 	return nil
 }
 
-func (fake *fakeOperationStore) GetOperation(identifier string) (model.Operation, bool, error) {
+func (fake *fakeStore) GetOperation(identifier string) (model.Operation, bool, error) {
 	if fake.readError != nil {
 		return model.Operation{}, false, fake.readError
 	}
@@ -74,12 +91,18 @@ func (fake *fakeOperationStore) GetOperation(identifier string) (model.Operation
 	return operation, found, nil
 }
 
-func (fake *fakeOperationStore) PutVirtualMachine(record model.VirtualMachine) error {
+// PutVirtualMachine bumps the observed epoch with the write, as the real store
+// does in one transaction: a snapshot and its epoch may never disagree.
+func (fake *fakeStore) PutVirtualMachine(record model.VirtualMachine) error {
+	if fake.writeError != nil {
+		return fake.writeError
+	}
 	fake.virtualMachines[record.UUID] = record
+	fake.epoch++
 	return nil
 }
 
-func (fake *fakeOperationStore) GetVirtualMachine(uuid string) (model.VirtualMachine, bool, error) {
+func (fake *fakeStore) GetVirtualMachine(uuid string) (model.VirtualMachine, bool, error) {
 	if fake.readError != nil {
 		return model.VirtualMachine{}, false, fake.readError
 	}
@@ -87,15 +110,84 @@ func (fake *fakeOperationStore) GetVirtualMachine(uuid string) (model.VirtualMac
 	return record, found, nil
 }
 
-func (fake *fakeOperationStore) ListVirtualMachines() ([]model.VirtualMachine, error) {
+func (fake *fakeStore) ListVirtualMachines() ([]model.VirtualMachine, error) {
 	if fake.readError != nil {
 		return nil, fake.readError
 	}
+	return fake.observed(), nil
+}
+
+// observed is the listing in a fixed order, so a document assembled from it can
+// be compared field by field instead of searched.
+func (fake *fakeStore) observed() []model.VirtualMachine {
 	records := make([]model.VirtualMachine, 0, len(fake.virtualMachines))
 	for _, record := range fake.virtualMachines {
 		records = append(records, record)
 	}
-	return records, nil
+	slices.SortFunc(records, func(first, second model.VirtualMachine) int {
+		return strings.Compare(first.UUID, second.UUID)
+	})
+	return records
+}
+
+func (fake *fakeStore) PutDesired(record model.DesiredVirtualMachine) error {
+	if fake.writeError != nil {
+		return fake.writeError
+	}
+	fake.desired[record.UUID] = record
+	fake.desiredWrites++
+	return nil
+}
+
+func (fake *fakeStore) GetDesired(uuid string) (model.DesiredVirtualMachine, bool, error) {
+	if fake.readError != nil {
+		return model.DesiredVirtualMachine{}, false, fake.readError
+	}
+	record, found := fake.desired[uuid]
+	return record, found, nil
+}
+
+// SetFenceEpoch keeps the store's rule: an epoch that can go backwards is not a
+// fence.
+func (fake *fakeStore) SetFenceEpoch(uuid string, epoch int64) error {
+	if fake.writeError != nil {
+		return fake.writeError
+	}
+	if held, found := fake.fences[uuid]; found && epoch < held {
+		return fmt.Errorf("%w: %s holds epoch %d, refusing %d", store.ErrFenceRegression, uuid, held, epoch)
+	}
+	fake.fences[uuid] = epoch
+	fake.fenceWrites++
+	return nil
+}
+
+func (fake *fakeStore) FenceEpoch(uuid string) (int64, bool, error) {
+	if fake.readError != nil {
+		return 0, false, fake.readError
+	}
+	epoch, found := fake.fences[uuid]
+	return epoch, found, nil
+}
+
+func (fake *fakeStore) ObservedEpoch() (int64, error) {
+	if fake.readError != nil {
+		return 0, fake.readError
+	}
+	return fake.epoch, nil
+}
+
+func (fake *fakeStore) Snapshot() (model.Export, error) {
+	if fake.snapshotError != nil {
+		return model.Export{}, fake.snapshotError
+	}
+	return model.Export{
+		ObservedEpoch:   fake.epoch,
+		TakenAt:         time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC),
+		VirtualMachines: fake.observed(),
+		Units:           fake.units,
+		LogicalVolumes:  fake.logicalVolumes,
+		FenceEpochs:     maps.Clone(fake.fences),
+	}, nil
 }
 
 // fakeVirtualMachines counts what it was asked to do, so a test can prove a
@@ -150,55 +242,27 @@ func (fake *fakeVirtualMachines) writeTrace() {
 
 // newTestServer wires the fakes together and lets the fake verb write the
 // operation's trace, which is what proves the trace reaches Operation.Output.
-func newTestServer(operations *fakeOperationStore, machines *fakeVirtualMachines) *Server {
-	server := NewServer(operations, machines, time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC))
+//
+// One fake serves both store interfaces because one bbolt file serves both in
+// the daemon: the journal, the observed records, the fences and the epoch are
+// the same store, and a test that split them could not catch a handler reading
+// an epoch that belongs to another snapshot.
+func newTestServer(operations *fakeStore, machines *fakeVirtualMachines) *Server {
+	server := NewServer(Dependencies{
+		Operations:      operations,
+		State:           operations,
+		VirtualMachines: machines,
+		Watch:           watch.NewHub(),
+		StartedAt:       time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC),
+	})
 	server.newRunner = func(trace io.Writer) *run.Runner {
 		machines.trace = trace
 		return run.NewRunner(trace)
 	}
+	// The real reader runs lsblk, free and firecracker --version. A handler test
+	// has no host, so it is told what the host is.
+	server.hostFacts = func(ctx context.Context, runner *run.Runner) (model.HostFacts, error) {
+		return model.HostFacts{Hostname: "boat-test-host", KernelVersion: "6.19.0"}, nil
+	}
 	return server
-}
-
-func postJSON(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {
-	t.Helper()
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		t.Fatalf("could not encode the request body: %v", err)
-	}
-	return postBody(handler, path, string(encoded))
-}
-
-func postBody(handler http.Handler, path string, body string) *httptest.ResponseRecorder {
-	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
-	return recorder
-}
-
-func get(t *testing.T, handler http.Handler, path string) *httptest.ResponseRecorder {
-	t.Helper()
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
-	return recorder
-}
-
-func decodeOperation(t *testing.T, recorder *httptest.ResponseRecorder) wire.Operation {
-	t.Helper()
-	var operation wire.Operation
-	decode(t, recorder, &operation)
-	return operation
-}
-
-func decodeError(t *testing.T, recorder *httptest.ResponseRecorder) wire.Error {
-	t.Helper()
-	var failure wire.Error
-	decode(t, recorder, &failure)
-	return failure
-}
-
-func decode(t *testing.T, recorder *httptest.ResponseRecorder, into any) {
-	t.Helper()
-	if err := json.Unmarshal(recorder.Body.Bytes(), into); err != nil {
-		t.Fatalf("could not decode %q: %v", recorder.Body.String(), err)
-	}
 }

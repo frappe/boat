@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/frappe/boat/internal/model"
@@ -31,6 +30,9 @@ var errUnknownVirtualMachine = errors.New("this host has no such virtual machine
 func (server *Server) StartVirtualMachine(ctx context.Context, request wire.StartVirtualMachineRequestObject) (wire.StartVirtualMachineResponseObject, error) {
 	if request.Body == nil || request.Body.OperationId == "" {
 		return missingOperationIdentifier(), nil
+	}
+	if failure := server.refuseUnfenced(request.Uuid); failure != nil {
+		return failure, nil
 	}
 	start := func(runner *run.Runner) error {
 		_, err := server.virtualMachines.Start(ctx, runner, request.Uuid)
@@ -159,15 +161,16 @@ func (server *Server) observe(ctx context.Context, runner *run.Runner, uuid stri
 	if err != nil {
 		fmt.Fprintf(trace, "# could not observe %s after the verb: %v\n", uuid, err)
 		slog.Error("could not observe virtual machine after a verb", "uuid", uuid, "error", err)
+		return
 	}
+	// Announced only once it is written down. A watcher told of a transition the
+	// store does not hold would read the export next and see it undone.
+	server.publishObserved(record)
 }
 
 // missingOperationIdentifier refuses work that could not be replayed. The IDL
 // makes operation_id required and the generated server does not enforce it, so
 // the boundary does: without it a retry would boot the VM twice.
 func missingOperationIdentifier() *errorResponse {
-	return &errorResponse{
-		statusCode: http.StatusBadRequest,
-		message:    "This request needs an operation_id, so a retry can be recognised as a replay.",
-	}
+	return badRequest("This request needs an operation_id, so a retry can be recognised as a replay.")
 }

@@ -27,6 +27,13 @@ const (
 	DesiredPowerStopped DesiredPower = "Stopped"
 )
 
+// Defines values for ErrorReason.
+const (
+	ErrorReasonNoFence                     ErrorReason = "no-fence"
+	ErrorReasonOperationIdentifierConflict ErrorReason = "operation-identifier-conflict"
+	ErrorReasonStaleFence                  ErrorReason = "stale-fence"
+)
+
 // Defines values for HealthStatus.
 const (
 	HealthStatusOk HealthStatus = "ok"
@@ -41,6 +48,8 @@ const (
 
 // Defines values for VirtualMachineStatus.
 const (
+	VirtualMachineStatusFailed   VirtualMachineStatus = "Failed"
+	VirtualMachineStatusPaused   VirtualMachineStatus = "Paused"
 	VirtualMachineStatusRunning  VirtualMachineStatus = "Running"
 	VirtualMachineStatusSleeping VirtualMachineStatus = "Sleeping"
 	VirtualMachineStatusStopped  VirtualMachineStatus = "Stopped"
@@ -58,7 +67,11 @@ type DesiredVirtualMachine struct {
 	// one point: a migration's repoint. Boat refuses to boot a UUID whose
 	// local epoch is older than the one on disk, which is what stops two
 	// live copies of one VM after a partition.
-	BootEpoch         int     `json:"boot_epoch"`
+	//
+	// Epochs start at 1. Boat gates on whether it holds a fence at all, so
+	// a zero would be a held fence rather than the absence of one — do not
+	// use 0 to mean unfenced.
+	BootEpoch         int64   `json:"boot_epoch"`
 	CpuMaxCores       *int    `json:"cpu_max_cores,omitempty"`
 	CpuMode           *string `json:"cpu_mode,omitempty"`
 	DataDiskGigabytes *int    `json:"data_disk_gigabytes,omitempty"`
@@ -86,19 +99,34 @@ type DesiredVirtualMachine struct {
 type Error struct {
 	// Error What went wrong, in one sentence, at the boundary where it was detected.
 	Error string `json:"error"`
+
+	// Reason A stable token for the cases a caller must tell apart by code rather
+	// than by prose. Absent when the sentence is the whole answer.
+	Reason *ErrorReason `json:"reason,omitempty"`
 }
+
+// ErrorReason A stable token for the cases a caller must tell apart by code rather
+// than by prose. Absent when the sentence is the whole answer.
+type ErrorReason string
 
 // Export defines model for Export.
 type Export struct {
 	// FenceEpochs Every fence this host holds, by UUID.
-	FenceEpochs    *map[string]int  `json:"fence_epochs,omitempty"`
-	Host           HostFacts        `json:"host"`
-	LogicalVolumes *[]LogicalVolume `json:"logical_volumes,omitempty"`
+	FenceEpochs    *map[string]int64 `json:"fence_epochs,omitempty"`
+	Host           HostFacts         `json:"host"`
+	LogicalVolumes *[]LogicalVolume  `json:"logical_volumes,omitempty"`
 
 	// ObservedEpoch Monotonic, bumped on every observed change. A CAS write is matched
 	// against this, so a caller acts on exactly the snapshot it read.
-	ObservedEpoch int64     `json:"observed_epoch"`
-	TakenAt       time.Time `json:"taken_at"`
+	ObservedEpoch int64 `json:"observed_epoch"`
+
+	// Quarantine Artifact sets this host holds that could not be read as a coherent
+	// VM. Reported so an operator can resolve them; never acted upon, and
+	// never counted as a VM.
+	Quarantine *[]Quarantine `json:"quarantine,omitempty"`
+
+	// TakenAt Always UTC, with a trailing Z. A naive stamp cannot be ordered across hosts.
+	TakenAt time.Time `json:"taken_at"`
 
 	// Units The sibling units this Boat supervises, and whether they are up.
 	Units           *[]UnitLiveness  `json:"units,omitempty"`
@@ -185,6 +213,21 @@ type Operation struct {
 // OperationStatus defines model for OperationStatus.
 type OperationStatus string
 
+// Quarantine defines model for Quarantine.
+type Quarantine struct {
+	// Evidence The observations that made it ambiguous rather than simply absent.
+	Evidence *[]string `json:"evidence,omitempty"`
+
+	// Identifier Whatever the host retained to name this artifact set — usually a VM
+	// UUID, but a stranded namespace or address keeps only its own name,
+	// and inventing a UUID for it would be a guess.
+	Identifier string `json:"identifier"`
+
+	// Reason What was incoherent, in one sentence.
+	Reason string     `json:"reason"`
+	SeenAt *time.Time `json:"seen_at,omitempty"`
+}
+
 // StartRequest defines model for StartRequest.
 type StartRequest struct {
 	// OperationId The Atlas Task name. Re-posting one returns its recorded result.
@@ -215,7 +258,7 @@ type UnitLiveness struct {
 type VirtualMachine struct {
 	// BootEpoch The fence epoch this host is permitted to boot the VM at. Absent
 	// means Boat holds no fence for it and will refuse to start it.
-	BootEpoch *int `json:"boot_epoch,omitempty"`
+	BootEpoch *int64 `json:"boot_epoch,omitempty"`
 
 	// FirecrackerPid The running Firecracker process, when Boat has re-attached to one.
 	// Absent means no live process was found, not that the VM is dead.
@@ -948,9 +991,7 @@ func (response StartVirtualMachine404JSONResponse) VisitStartVirtualMachineRespo
 	return json.NewEncoder(w).Encode(response)
 }
 
-type StartVirtualMachine409JSONResponse struct {
-	OperationIdentifierConflictJSONResponse
-}
+type StartVirtualMachine409JSONResponse Error
 
 func (response StartVirtualMachine409JSONResponse) VisitStartVirtualMachineResponse(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "application/json")
