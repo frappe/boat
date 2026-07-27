@@ -13,7 +13,13 @@
 //   - a stop that skips ExecStopPost, which leaves the host answering proxy-NDP
 //     for a /128 it no longer owns and collides with the next migration.
 //
-// Ported from scripts/start-vm.py and scripts/stop-vm.py, comments and all.
+// Ported from scripts/start-vm.py, stop-vm.py, pause-vm.py, resume-vm.py,
+// sleep-vm.py, wake-vm.py, resize-vm.py, rebuild-vm.py and terminate-vm.py,
+// comments and all. Two verbs go around the unit rather than through it, and
+// both say so where they do: pause and resume speak to the Firecracker API
+// (which is why a paused VM keeps its RAM), and resize, rebuild and terminate
+// reach past it to the VM's LVM volumes.
+//
 // Observe is new, and is the reason Boat exists: Atlas used to set a VM's
 // status from whether its Task succeeded, which recorded the controller's
 // intentions rather than the host's state. Observe reads the host.
@@ -23,6 +29,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/frappe/boat/internal/park"
 	"github.com/frappe/boat/internal/paths"
 	"github.com/frappe/boat/internal/run"
 )
@@ -36,7 +43,12 @@ type commands interface {
 	Run(ctx context.Context, template string, parameters ...any) (string, error)
 	RunUnchecked(ctx context.Context, template string, parameters ...any) (string, error)
 	OK(ctx context.Context, template string, parameters ...any) bool
+	// Input feeds a command's stdin. It is here for the two appends a rebuild
+	// makes into a mounted rootfs (`tee -a` on /etc/hosts and /etc/fstab), where
+	// the content is data and must not become part of a command line.
+	Input(ctx context.Context, stdin string, template string, parameters ...any) (string, error)
 	InstallFile(ctx context.Context, content string, destination string, mode string) error
+	InstallDirectory(ctx context.Context, destination string, mode string) error
 	FirecrackerAPI(ctx context.Context, socketDirectory, socketName, method, apiPath, body string) error
 }
 
@@ -47,25 +59,41 @@ var _ commands = (*run.Runner)(nil)
 // function, so a test can state the layout it expects as literal strings
 // instead of reaching into another package's derivation.
 type virtualMachineFiles struct {
-	unit                 string
-	directory            string
-	memorySnapshotMarker string
-	sleepingMarker       string
-	apiSocket            string
-	apiSocketDirectory   string
-	apiSocketName        string
+	unit                    string
+	directory               string
+	jailRoot                string
+	jailerLaunch            string
+	firecrackerConfig       string
+	rootFilesystemNode      string
+	dataNode                string
+	memorySnapshotDirectory string
+	memorySnapshotMarker    string
+	memorySnapshotVMState   string
+	memorySnapshotMemory    string
+	sleepingMarker          string
+	apiSocket               string
+	apiSocketDirectory      string
+	apiSocketName           string
 }
 
 func filesFor(uuid string) virtualMachineFiles {
 	virtualMachine := paths.ForVirtualMachine(uuid)
 	return virtualMachineFiles{
-		unit:                 virtualMachine.SystemdUnit(),
-		directory:            virtualMachine.Directory(),
-		memorySnapshotMarker: virtualMachine.MemorySnapshotMarker(),
-		sleepingMarker:       virtualMachine.SleepingMarker(),
-		apiSocket:            virtualMachine.APISocket(),
-		apiSocketDirectory:   virtualMachine.APISocketDirectory(),
-		apiSocketName:        virtualMachine.APISocketName(),
+		unit:                    virtualMachine.SystemdUnit(),
+		directory:               virtualMachine.Directory(),
+		jailRoot:                virtualMachine.JailRoot(),
+		jailerLaunch:            virtualMachine.JailerLaunch(),
+		firecrackerConfig:       virtualMachine.FirecrackerConfig(),
+		rootFilesystemNode:      virtualMachine.RootFilesystemNode(),
+		dataNode:                virtualMachine.DataNode(),
+		memorySnapshotDirectory: virtualMachine.MemorySnapshotDirectory(),
+		memorySnapshotMarker:    virtualMachine.MemorySnapshotMarker(),
+		memorySnapshotVMState:   virtualMachine.MemorySnapshotVMState(),
+		memorySnapshotMemory:    virtualMachine.MemorySnapshotMemory(),
+		sleepingMarker:          virtualMachine.SleepingMarker(),
+		apiSocket:               virtualMachine.APISocket(),
+		apiSocketDirectory:      virtualMachine.APISocketDirectory(),
+		apiSocketName:           virtualMachine.APISocketName(),
 	}
 }
 
@@ -87,6 +115,10 @@ type Manager struct {
 	commandsFor func(runner *run.Runner) commands
 	filesFor    func(uuid string) virtualMachineFiles
 	clock       clock
+	// park arms the SYN trap that makes a sleeping VM reachable again. It is a
+	// field for the same reason the others are: it runs real ip and nft commands,
+	// and a test that could not substitute it would have to touch the host.
+	park func(ctx context.Context, runner *run.Runner, uuid string) error
 }
 
 // NewManager returns a Manager wired to the real host.
@@ -95,6 +127,7 @@ func NewManager() *Manager {
 		commandsFor: func(runner *run.Runner) commands { return runner },
 		filesFor:    filesFor,
 		clock:       systemClock{},
+		park:        park.ParkVirtualMachine,
 	}
 }
 

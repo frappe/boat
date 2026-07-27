@@ -32,13 +32,21 @@ func testFiles(uuid string) virtualMachineFiles {
 	directory := "/var/lib/atlas/virtual-machines/" + uuid
 	jailRoot := directory + "/jail/firecracker/" + uuid + "/root"
 	return virtualMachineFiles{
-		unit:                 "firecracker-vm@" + uuid + ".service",
-		directory:            directory,
-		memorySnapshotMarker: jailRoot + "/snapshot/READY",
-		sleepingMarker:       directory + "/sleeping",
-		apiSocket:            jailRoot + "/run/firecracker.socket",
-		apiSocketDirectory:   jailRoot + "/run",
-		apiSocketName:        "firecracker.socket",
+		unit:                    "firecracker-vm@" + uuid + ".service",
+		directory:               directory,
+		jailRoot:                jailRoot,
+		jailerLaunch:            directory + "/jailer-launch.sh",
+		firecrackerConfig:       jailRoot + "/firecracker.json",
+		rootFilesystemNode:      jailRoot + "/rootfs.ext4",
+		dataNode:                jailRoot + "/data.ext4",
+		memorySnapshotDirectory: jailRoot + "/snapshot",
+		memorySnapshotMarker:    jailRoot + "/snapshot/READY",
+		memorySnapshotVMState:   jailRoot + "/snapshot/vmstate.bin",
+		memorySnapshotMemory:    jailRoot + "/snapshot/mem.bin",
+		sleepingMarker:          directory + "/sleeping",
+		apiSocket:               jailRoot + "/run/firecracker.socket",
+		apiSocketDirectory:      jailRoot + "/run",
+		apiSocketName:           "firecracker.socket",
 	}
 }
 
@@ -54,6 +62,9 @@ type fakeCommands struct {
 	replies map[string][]bool
 	calls   map[string]int
 	outputs map[string]string
+	// parkError lets a test make arming the wake trap fail, which must fail the
+	// sleep: a VM that is stopped and untrapped can never come back on its own.
+	parkError error
 }
 
 func newFakeCommands() *fakeCommands {
@@ -116,10 +127,36 @@ func (fake *fakeCommands) OK(_ context.Context, template string, parameters ...a
 	return fake.succeeds(command)
 }
 
+// Input records the command together with what was fed to its standard input,
+// because for the two appends a rebuild makes the content IS the behaviour: a
+// test that only checked the `tee -a` line would not notice the wrong bytes
+// going into /etc/fstab.
+func (fake *fakeCommands) Input(
+	_ context.Context, stdin string, template string, parameters ...any,
+) (string, error) {
+	command := fmt.Sprintf("%s <<%q", render(template, parameters...), stdin)
+	fake.record("", command)
+	if !fake.succeeds(command) {
+		return "", errCommandFailed
+	}
+	return fake.outputs[command], nil
+}
+
 func (fake *fakeCommands) InstallFile(
 	_ context.Context, content string, destination string, mode string,
 ) error {
 	command := fmt.Sprintf("install -m %s %q %s", mode, content, destination)
+	fake.record("", command)
+	if !fake.succeeds(command) {
+		return errCommandFailed
+	}
+	return nil
+}
+
+func (fake *fakeCommands) InstallDirectory(
+	_ context.Context, destination string, mode string,
+) error {
+	command := fmt.Sprintf("install -d -m %s %s", mode, destination)
 	fake.record("", command)
 	if !fake.succeeds(command) {
 		return errCommandFailed
@@ -172,6 +209,12 @@ func newTestManager(fake *fakeCommands) *Manager {
 		commandsFor: func(*run.Runner) commands { return fake },
 		filesFor:    testFiles,
 		clock:       &fakeClock{now: time.Unix(1700000000, 0).UTC()},
+		// Recorded on the same trace as everything else, so a sleep that forgets
+		// to arm the wake trap shows up as a missing line rather than as nothing.
+		park: func(_ context.Context, _ *run.Runner, uuid string) error {
+			fake.trace = append(fake.trace, "park "+uuid)
+			return fake.parkError
+		},
 	}
 }
 
