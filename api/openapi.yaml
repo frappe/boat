@@ -1,0 +1,364 @@
+openapi: 3.0.3
+
+# The Atlas <-> Boat contract. This document is the source of truth: the typed Go
+# server (internal/wire) is generated from it and checked in (`make generate`).
+# Nothing in Boat is reachable except through an operation described here —
+# the CLI and the systemd units are clients of this same surface, never
+# alternate paths with powers the API lacks (spec/33-boat.md §2.1).
+#
+# WO-0 scope: start, stop, observe. Adoption, export, watch, bootstrap and
+# self-update arrive in WO-1/WO-1b/WO-5b and extend this document in place.
+
+info:
+  title: Boat
+  description: |
+    The per-host daemon that owns VM lifecycle mechanics and is authoritative
+    for its host's observed state. Atlas holds desired state; Boat holds fact.
+
+    Boat knows a VM only as a UUID plus resource numbers. It never learns who
+    owns a VM or what runs inside it.
+  version: 0.1.0
+
+servers:
+  - url: http://boat/v1
+    description: |
+      Reachable only over the Central-managed mgmt tunnel or the local unix
+      socket at /run/boat/boat.sock. Boat never binds a public interface.
+
+security:
+  - bearerToken: []
+
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      description: |
+        Unauthenticated, so a supervisor can probe a Boat that has not yet been
+        handed a token. Reports nothing an unauthenticated caller should not see.
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Boat is up
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /host:
+    get:
+      summary: Host facts and the running Boat version
+      description: |
+        The observed facts of this host. `boat_version` is what makes desired-vs-
+        observed version drift ordinary observed state rather than a separate
+        bookkeeping channel (spec/33-boat.md §2.5).
+      operationId: getHost
+      responses:
+        "200":
+          description: Host facts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Host"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /vms:
+    get:
+      summary: List every VM this host observes
+      operationId: listVirtualMachines
+      responses:
+        "200":
+          description: The observed set
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/VirtualMachine"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /vms/{uuid}:
+    parameters:
+      - $ref: "#/components/parameters/VirtualMachineUuid"
+    get:
+      summary: Observed state of one VM
+      operationId: getVirtualMachine
+      responses:
+        "200":
+          description: The observed VM document
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VirtualMachine"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /vms/{uuid}/start:
+    parameters:
+      - $ref: "#/components/parameters/VirtualMachineUuid"
+    post:
+      summary: Start a provisioned VM
+      description: |
+        Idempotent: starting a running VM is a no-op, and re-posting a completed
+        `op_id` returns the first result without re-running (§2.7).
+
+        A VM that stopped with a complete memory snapshot resumes from it; the
+        host decides that from the on-disk marker, not from the request.
+      operationId: startVirtualMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/OperationIdentifierConflict"
+
+  /vms/{uuid}/stop:
+    parameters:
+      - $ref: "#/components/parameters/VirtualMachineUuid"
+    post:
+      summary: Stop a running VM
+      description: |
+        Cooperative by default: the guest is asked to power itself off through
+        the Firecracker API so its kernel syncs filesystems before the unit is
+        stopped. Networking teardown is fired by the unit's ExecStopPost either
+        way.
+      operationId: stopVirtualMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StopRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/OperationIdentifierConflict"
+
+  /ops/{operation_id}:
+    parameters:
+      - name: operation_id
+        in: path
+        required: true
+        description: The Atlas Task name this operation was created under.
+        schema:
+          type: string
+    get:
+      summary: One operation's journal record
+      description: |
+        Crash-recovery truth. Atlas's operator-facing audit record is still the
+        Task row; the two share this identifier (§2.7).
+      operationId: getOperation
+      responses:
+        "200":
+          description: The operation record
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Operation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    bearerToken:
+      type: http
+      scheme: bearer
+      description: |
+        A short-lived per-host token minted by Atlas. Requests arriving over
+        /run/boat/boat.sock are authenticated by unix peer credentials instead — the
+        socket is 0660 and group-owned by the boat service user.
+
+  parameters:
+    VirtualMachineUuid:
+      name: uuid
+      in: path
+      required: true
+      description: The VM's UUID — the same name the Atlas Virtual Machine row carries.
+      schema:
+        type: string
+
+  responses:
+    OperationAccepted:
+      description: |
+        The operation record. Returned for a fresh run, for a still-running
+        operation, and for a replay of a completed `op_id` alike.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Operation"
+    Unauthorized:
+      description: Missing or invalid token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: No such VM or operation on this host
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    OperationIdentifierConflict:
+      description: |
+        The `op_id` is already recorded against a different verb or VM. Replay is
+        only replay when it is the same operation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Health:
+      type: object
+      required: [status, boat_version]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        boat_version:
+          type: string
+          description: The version of the running binary — every unit on this host is this build.
+
+    Host:
+      type: object
+      required: [hostname, boat_version, started_at, virtual_machine_count]
+      properties:
+        hostname:
+          type: string
+        boat_version:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+          description: When this daemon process started. A restart is visible here.
+        virtual_machine_count:
+          type: integer
+          description: How many VMs this host currently observes.
+
+    VirtualMachineStatus:
+      type: string
+      description: |
+        Boat's observed status, derived from the host — the unit's state and the
+        on-disk markers — never from a command's success.
+      enum: [Running, Stopped, Sleeping, Unknown]
+
+    VirtualMachine:
+      type: object
+      required: [uuid, observed_status, observed_at]
+      properties:
+        uuid:
+          type: string
+        observed_status:
+          $ref: "#/components/schemas/VirtualMachineStatus"
+        observed_at:
+          type: string
+          format: date-time
+        unit_active_state:
+          type: string
+          description: The systemd ActiveState of firecracker-vm@<uuid>.service, verbatim.
+        unit_sub_state:
+          type: string
+          description: The systemd SubState of the unit, verbatim.
+        has_memory_snapshot:
+          type: boolean
+          description: A complete memory snapshot is staged, so the next start resumes from RAM.
+        sleeping:
+          type: boolean
+          description: The sleeping marker is present — the VM is parked, not stopped.
+
+    OperationStatus:
+      type: string
+      enum: [Running, Success, Failure]
+
+    Operation:
+      type: object
+      required: [operation_id, verb, uuid, status, started_at]
+      properties:
+        operation_id:
+          type: string
+          description: Equal to the Atlas Task name that drove this operation.
+        verb:
+          type: string
+          description: The verb that ran, in the host CLI's grammar (start-vm, stop-vm).
+        uuid:
+          type: string
+        status:
+          $ref: "#/components/schemas/OperationStatus"
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        exit_code:
+          type: integer
+          description: |
+            0 on success. Mirrors the exit code the equivalent Task carried.
+
+            Absent means the operation has not finished — an operation still
+            Running has no exit code, and reporting 0 for one would tell a
+            client it succeeded. Any terminal operation carries this field.
+        output:
+          type: string
+          description: |
+            The operation's combined trace and output — the same text a Task row's
+            stdout carries today, so the operator surface is unchanged.
+        error:
+          type: string
+          description: Set when status is Failure. The failure, stated once.
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: What went wrong, in one sentence, at the boundary where it was detected.
+
+    StartRequest:
+      type: object
+      required: [operation_id]
+      properties:
+        operation_id:
+          type: string
+          description: The Atlas Task name. Re-posting one returns its recorded result.
+
+    StopRequest:
+      type: object
+      required: [operation_id]
+      properties:
+        operation_id:
+          type: string
+        graceful:
+          type: boolean
+          default: true
+          description: |
+            Ask the guest to power itself off first, so anything dirty in its page
+            cache is written. False discards guest RAM — for callers that capture
+            the disk another way, such as a migration cold stop.
+        stop_timeout_seconds:
+          type: integer
+          default: 0
+          description: |
+            Bound the graceful drain without skipping the unit's ExecStopPost.
+            0 leaves systemd's default drain in place.

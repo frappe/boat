@@ -1,0 +1,11 @@
+# oapi-codegen configuration. The generated file is checked in; regenerate with
+# `make generate` after any change to openapi.yaml. Hand-editing internal/wire is
+# not a thing — the IDL is the source of truth.
+package: wire
+output: ../internal/wire/wire.gen.go
+generate:
+  models: true
+  std-http-server: true
+  strict-server: true
+output-options:
+  skip-prune: true
