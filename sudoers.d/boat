@@ -1,0 +1,119 @@
+# /etc/sudoers.d/boat
+#
+# The privileged commands the non-root `boat` service user may run. The daemon
+# (systemd/boat.service) runs as `boat`; the individual host mutations need root,
+# the daemon does not. That gap is this file, and it is the single biggest
+# blast-radius reduction in the Atlas -> Boat split (spec/33-boat.md §12).
+#
+# Modelled on Atlas's scripts/sudoers.d/atlas-tunnel: every command is enumerated
+# with its arguments. There is no wildcard shell, no ALL, and no bare
+# /usr/bin/systemctl — a line that grants an unconstrained shell or an
+# unconstrained systemctl grants root, and then running the daemon non-root buys
+# nothing at all.
+#
+# Install (operator step; Boat never edits sudoers):
+#   sudo useradd --system --home-dir /var/lib/boat --shell /usr/sbin/nologin boat
+#   sudo install -m 0440 -o root -g root sudoers.d/boat /etc/sudoers.d/boat
+#   sudo visudo -cf /etc/sudoers.d/boat
+#
+# Paths below are Ubuntu 26.04 with merged /usr. Adjust per distro:
+#   command -v systemctl test install mkdir rm rmdir dmsetup sh
+#
+# On wildcards: in a sudoers command PATH a `*` does not match `/`, but in a
+# command ARGUMENT it does. Every `*` here stands for a VM UUID inside a fixed
+# path shape or unit name; the literal text around it is what does the pinning.
+# Boat validates the UUID at the API boundary before any of these are rendered —
+# sudoers is the second line of defence, not the first.
+#
+# Scope is WO-0: start, stop, observe. Each later work order adds its own verbs'
+# commands here explicitly. Widening an existing line to cover a new verb is not
+# a smaller change than adding a line; it is an unreviewable one.
+
+# --- Lifecycle: the per-VM unit, and only the per-VM unit -------------------
+# Instance-scoped to firecracker-vm@*.service, so this grants nothing over sshd,
+# over boat.service itself, or over any other unit on the host.
+#
+# `is-active` and `show` are read-only and would work unprivileged. They are
+# listed because the ported verbs carry the `sudo` prefix through from the Python
+# originals and the differential gate compares rendered commands byte for byte;
+# granting a read that changes nothing costs nothing. The `-p` property list is a
+# wildcard because it is only a projection of one unit's state — the unit name is
+# what is pinned.
+Cmnd_Alias BOAT_VIRTUAL_MACHINE_UNIT = \
+    /usr/bin/systemctl start firecracker-vm@*.service, \
+    /usr/bin/systemctl stop firecracker-vm@*.service, \
+    /usr/bin/systemctl reset-failed firecracker-vm@*.service, \
+    /usr/bin/systemctl is-active firecracker-vm@*.service, \
+    /usr/bin/systemctl is-active --quiet firecracker-vm@*.service, \
+    /usr/bin/systemctl show -p * firecracker-vm@*.service
+
+# --- Observation: the on-disk markers --------------------------------------
+# The VM tree is 0700-owned by the per-VM uid, so even a stat needs root. All
+# three are `test`: they return a boolean and change nothing, which is why a
+# trailing wildcard on the directory check is acceptable here and would not be
+# on a command that writes.
+Cmnd_Alias BOAT_VIRTUAL_MACHINE_MARKERS = \
+    /usr/bin/test -d /var/lib/atlas/virtual-machines/*, \
+    /usr/bin/test -f /var/lib/atlas/virtual-machines/*/sleeping, \
+    /usr/bin/test -f /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot/READY, \
+    /usr/bin/test -f /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run/firecracker.socket
+
+# --- Bounded stop: the TimeoutStopSec drop-in ------------------------------
+# A migration-style fast stop bounds the guest's drain WITHOUT skipping the
+# unit's ExecStopPost (which tears down netns, veth and proxy-NDP; a
+# `systemctl kill -SIGKILL` would skip it and leave the source answering NDP for
+# a /128). TimeoutStopSec is a load-time property, so the bound arrives as a
+# runtime drop-in under /run and is removed again after the stop.
+#
+# CANNOT BE PINNED TIGHTLY, and the residual risk is named rather than hidden:
+# the `install` line's SOURCE is a wildcard, because it is a spool file the
+# daemon just wrote. Since the daemon controls that path (and could point it at a
+# symlink), this line lets `boat` copy any root-readable file to one known
+# location with mode 0644 — i.e. make it readable to itself. It is bounded by the
+# pinned mode, the single pinned destination filename, a tmpfs path that
+# evaporates on reboot, and the daemon deleting the file immediately after the
+# stop. The tighter fix is for the port to stop using install(1) here and render
+# the two-line drop-in through a pinned writer instead; that is a change to
+# internal/run, recorded here rather than papered over.
+Cmnd_Alias BOAT_VIRTUAL_MACHINE_STOP_TIMEOUT = \
+    /usr/bin/mkdir -p /run/systemd/system/firecracker-vm@*.service.d, \
+    /usr/bin/install -m 0644 * /run/systemd/system/firecracker-vm@*.service.d/atlas-migration-faststop.conf, \
+    /usr/bin/rm -f /run/systemd/system/firecracker-vm@*.service.d/atlas-migration-faststop.conf, \
+    /usr/bin/rmdir /run/systemd/system/firecracker-vm@*.service.d, \
+    /usr/bin/systemctl daemon-reload
+
+# --- Clone convergence after a stop ----------------------------------------
+# A boot-then-hydrate migration leaves a dm-clone device holding the plain LV
+# busy; removing it once the guest's fd is released lets the next start use the
+# LV directly and lets a later lvremove succeed. Pinned to the atlas-vm-*-clone
+# name shape, so this cannot touch the plain LV's own device-mapper entry or any
+# other dm device on the host.
+Cmnd_Alias BOAT_VIRTUAL_MACHINE_CLONE = \
+    /usr/sbin/dmsetup info atlas-vm-*-clone, \
+    /usr/sbin/dmsetup remove atlas-vm-*-clone
+
+# --- The Firecracker API socket --------------------------------------------
+# The one `sh -c` on the list, and the reason it exists: the jailed socket's
+# absolute path is longer than AF_UNIX's 108-byte sun_path allows, so the caller
+# must cd into the socket's directory and address it by its short relative name —
+# and that directory is 0700-owned by the per-VM uid, so the cd must be root.
+# The cd and the curl are therefore one shell line by construction.
+#
+# It is pinned to the ONE call WO-0 makes: SendCtrlAltDel, the cooperative
+# power-off that lets the guest sync before the unit stops. Method, path,
+# headers and body are all literal here. A trailing `*` instead would have been
+# far easier and would have been a root shell — `*` matches spaces and
+# semicolons in an argument, so anything appended to that pipeline would run.
+#
+# Two consequences, both intended:
+#   - Later verbs (pause, resume, snapshot) each add their OWN pinned line for
+#     their own method/path/body. Nobody widens this one.
+#   - This line is byte-coupled to the template in internal/run's Firecracker
+#     API call. If that template's flag order or spacing changes, this changes in
+#     the same commit. A mismatch is a denied sudo, which fails the stop loudly —
+#     the right failure mode, but only if someone reads the error.
+Cmnd_Alias BOAT_FIRECRACKER_API = \
+    /usr/bin/sh -c cd\ /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run\ &&\ curl\ --fail\ --silent\ --show-error\ --unix-socket\ firecracker.socket\ -X\ PUT\ 'http\://localhost/actions'\ -H\ 'Content-Type\:\ application/json'\ -d\ '{"action_type"\:\ "SendCtrlAltDel"}'
+
+boat ALL=(root) NOPASSWD: BOAT_VIRTUAL_MACHINE_UNIT, BOAT_VIRTUAL_MACHINE_MARKERS, \
+    BOAT_VIRTUAL_MACHINE_STOP_TIMEOUT, BOAT_VIRTUAL_MACHINE_CLONE, BOAT_FIRECRACKER_API

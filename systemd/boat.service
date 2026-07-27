@@ -1,0 +1,111 @@
+# boat.service — the Boat API daemon (spec/33-boat.md).
+#
+# THE RULE: every host-side service on this machine is this same
+# /usr/local/bin/boat binary under a different subcommand. This unit runs
+# `boat daemon` — the API and, later, the reconciler; `boat networkd`,
+# `boat pool`, `boat wake-trap` and the firecracker-vm@ hooks are separate units
+# off the same build. One artifact means one version per host, and one binary
+# swap re-points every unit at once.
+#
+# The daemon serves one HTTP/JSON surface on two listeners: the local unix socket
+# (the `boat vm ...` subcommands and operator break-glass) and, once the host is
+# registered, the Central-managed management tunnel address. It never binds a
+# public interface — the tunnel is the transport-security boundary.
+#
+# Install (operator step; Boat never edits its own unit):
+#   sudo install -m 0755 bin/boat /usr/local/bin/boat
+#   sudo useradd --system --home-dir /var/lib/boat --shell /usr/sbin/nologin boat
+#   sudo install -m 0440 -o root -g root sudoers.d/boat /etc/sudoers.d/boat
+#   sudo install -m 0644 systemd/boat.service /etc/systemd/system/boat.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now boat.service
+
+[Unit]
+Description=Boat per-host VM daemon
+Documentation=https://github.com/frappe/boat
+Documentation=file:///usr/share/doc/atlas/spec/33-boat.md
+After=network-online.target local-fs.target
+Wants=network-online.target
+# Deliberately NOT ordered Before=firecracker-vm@.service. Boat adopts what it
+# finds on the host instead of owning its boot order: a VM's unit rebuilds its
+# own netns, routes and disk from network.env, and a sleeping VM suppresses
+# itself with ConditionPathNotExists. Ordering Boat first would assert a
+# dependency that does not exist and would hold every VM behind the daemon.
+#
+# Bound the restart rate so a genuinely fatal fault — an unreadable token file, a
+# corrupted store, a socket it cannot bind — leaves the unit `failed` and visible
+# to the operator instead of hot-looping every RestartSec and filling the
+# journal. 5 starts in 60 s sits far above any transient flap and trips fast on a
+# persistent crash.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+# Type=exec, not Type=notify. atlas-networkd.service uses notify because that
+# daemon calls sd_notify; this one does not yet, and a unit that claims notify
+# never reaches `active` — systemd waits for a READY=1 that never arrives and
+# times the start out. Type=exec is the honest maximum available today: systemd
+# holds the start until the binary has actually been exec'd, so a missing binary
+# or a bad service user fails the start (which Type=simple would report as
+# success). When the daemon learns sd_notify this becomes Type=notify with a
+# WatchdogSec, matching atlas-networkd — a readiness and liveness guarantee we
+# have not earned yet and will not pretend to. WatchdogSec is omitted for the
+# same reason: without a process patting it, it is a timed kill, not a watchdog.
+Type=exec
+User=boat
+Group=boat
+
+# systemd creates both directories owned by the service user BEFORE ExecStart.
+# Without them a non-root daemon has nowhere to put its socket or its database,
+# and the failure surfaces as an opaque namespace error on every fresh boot
+# rather than a clear one. 0750 on the runtime directory lets a member of the
+# `boat` group reach the socket inside it; 0700 keeps the store to the daemon.
+RuntimeDirectory=boat
+RuntimeDirectoryMode=0750
+StateDirectory=boat
+StateDirectoryMode=0700
+
+# --socket is /run/boat/boat.sock, not /run/boat.sock: /run is root-owned 0755,
+# so a non-root daemon cannot create a socket at its top level. The alternatives
+# were running the daemon as root or granting it CAP_DAC_OVERRIDE, and both hand
+# back exactly the blast radius that non-root + pinned sudoers exists to remove.
+# RuntimeDirectory= gives the service user a directory it owns and the socket
+# lives inside it. Restoring the shorter path needs socket activation — a
+# boat.socket unit with ListenStream=/run/boat.sock, systemd creating the socket
+# as root and passing the fd — which is a later change, not a WO-0 one. The CLI's
+# default must match this path.
+#
+# --token-file points at the short-lived per-host token Atlas mints. /etc/boat is
+# operator-created 0750 root:boat with the token 0640 root:boat: root writes it,
+# the daemon only reads it, and nothing here writes to /etc.
+#
+# --listen is deliberately absent. The management-tunnel address is host-specific
+# and is handed over with the token at registration; until then this Boat serves
+# the local socket only, and an operator adds the tunnel listener with a drop-in
+# rather than this unit guessing an address.
+ExecStart=/usr/local/bin/boat daemon \
+    --socket /run/boat/boat.sock \
+    --store /var/lib/boat/boat.db \
+    --token-file /etc/boat/token
+
+Restart=on-failure
+RestartSec=2
+
+# SIGTERM plus a real window: on stop the daemon stops accepting, lets in-flight
+# operations reach a journal checkpoint, and closes the store. Killing it sooner
+# does not endanger a VM — Firecracker is not our child and keeps running — but
+# it does leave operations to be replayed on the next start for no reason.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# No sandboxing directives beyond User= and Group=, and that is deliberate.
+# NoNewPrivileges=yes would break sudo outright (it is setuid), and
+# ProtectSystem=/ProtectHome=/PrivateTmp= confine the root children sudo spawns
+# too, because they inherit this unit's mount namespace — a Boat that cannot
+# write /run/systemd/system or read /dev/mapper is a Boat that cannot do its job,
+# and the failure would surface as a mystery permission error in the middle of a
+# VM operation. The privilege boundary for this daemon is the pinned allow-list
+# in /etc/sudoers.d/boat, which enumerates every root command by name. Anything
+# added here has to be checked against that list rather than assumed free.
+
+[Install]
+WantedBy=multi-user.target
