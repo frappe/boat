@@ -27,6 +27,13 @@ const (
 	// StatusSleeping means the sleeping marker is present: the VM was parked to free
 	// RAM and an inbound SYN wakes it. Distinct from Stopped, which stays stopped.
 	StatusSleeping VirtualMachineStatus = "Sleeping"
+	// StatusPaused means the guest is frozen through the Firecracker API while its
+	// unit stays active. The unit alone cannot tell this from Running, so nothing
+	// reports it until the pause verb lands and the API state is read.
+	StatusPaused VirtualMachineStatus = "Paused"
+	// StatusFailed means the unit reached its failed state — a distinct fact from
+	// Stopped, which is a VM that was asked to stop and did.
+	StatusFailed VirtualMachineStatus = "Failed"
 	// StatusUnknown means the host could not be read — not that the VM is dead.
 	// Boat reports what it saw; it never guesses on the host's behalf.
 	StatusUnknown VirtualMachineStatus = "Unknown"
@@ -88,4 +95,18 @@ func (operation Operation) Finished() bool {
 // must be refused, not silently answered with someone else's result.
 func (operation Operation) Matches(verb string, virtualMachineUuid string) bool {
 	return operation.Verb == verb && operation.VirtualMachineUUID == virtualMachineUuid
+}
+
+// Quarantine is an artifact set the host holds that Boat could not read as a
+// coherent VM — a crash part-way through a terminate, an LV with no unit, a
+// unit with no disk.
+//
+// It is reported and never ingested as truth. The alternative — guessing which
+// half of a torn-down VM is real — is how a controller ends up booting a VM
+// whose disk it already released.
+type Quarantine struct {
+	UUID     string    `json:"uuid"`
+	Reason   string    `json:"reason"`
+	Evidence []string  `json:"evidence"`
+	SeenAt   time.Time `json:"seen_at"`
 }
