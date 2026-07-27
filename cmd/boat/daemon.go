@@ -19,10 +19,7 @@ import (
 
 	"github.com/frappe/boat/internal/api"
 	"github.com/frappe/boat/internal/paths"
-	"github.com/frappe/boat/internal/store"
 	"github.com/frappe/boat/internal/version"
-	"github.com/frappe/boat/internal/vm"
-	"github.com/frappe/boat/internal/watch"
 )
 
 const (
@@ -107,29 +104,25 @@ type listening struct {
 	listener net.Listener
 }
 
+// serve is the whole daemon: build it, learn what the host already holds, run
+// the loops that drive it, answer requests until the service manager asks for a
+// stop, and put it all down in the order the pieces depend on each other.
 func serve(options daemonOptions, token string) error {
-	database, err := store.Open(options.storePath)
+	parts, err := build(options)
 	if err != nil {
-		return fmt.Errorf("could not open the store at %s: %w", options.storePath, err)
-	}
-	// One *store.Store satisfies both the operation and the state interfaces;
-	// they are separate at the API boundary so a handler declares which half of
-	// the store it actually needs.
-	server := api.NewServer(api.Dependencies{
-		Operations:      database,
-		State:           database,
-		VirtualMachines: vm.NewManager(),
-		Watch:           watch.NewHub(),
-		StartedAt:       time.Now().UTC(),
-	})
-	active, err := openListeners(options, server, token)
-	if err != nil {
-		database.Close()
 		return err
 	}
+	// Adoption runs inside startUp, before a listener exists to accept on.
+	active, err := parts.startUp(context.Background(), options, token)
+	if err != nil {
+		return errors.Join(err, parts.close())
+	}
+	work := parts.runBackground()
 	slog.Info("boat is serving", "socket", options.socketPath, "listen", options.listenAddress, "version", version.Version)
 	served := serveUntilSignal(active)
-	return errors.Join(served, shutdown(active, database, options.socketPath))
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+	defer cancel()
+	return errors.Join(served, shutdown(ctx, active, work, parts, options.socketPath))
 }
 
 // openListeners binds the socket always and the tunnel only when asked. The two
@@ -229,21 +222,49 @@ func serveUntilSignal(active []listening) error {
 	}
 }
 
-// shutdown drains in-flight requests before anything they depend on goes away:
-// a verb still running must not find the store closed under it, and the socket
-// file is removed only once nothing can arrive on it.
-func shutdown(active []listening, database *store.Store, socketPath string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
-	defer cancel()
-	failures := []error{}
+// shutdown puts the daemon down in the order its pieces depend on each other:
+// the listeners drain first, so no new verb starts and every verb in flight
+// finishes; then the loops that drive the host; and only then the files both of
+// them were writing into.
+//
+// The store is closed ONLY when that quiesce actually completed. A verb that
+// outlasted the drain still holds a claimed operation, and closing the store
+// under it fails its CompleteOperation: the record stays non-terminal forever,
+// the Atlas Task behind it never completes, and the retry reads the same
+// Running record and waits again. That is reachable on the ordinary
+// binary-swap path — systemd stops the old daemon while a stop verb is inside
+// its guest's 30-second drain — so the file is left open instead and the
+// process exits with it open. bbolt commits every transaction to disk as it
+// goes, so an unclosed file is a file the next start opens unharmed.
+// ctx is the grace, and it is the caller's rather than this function's so that
+// the branch below — the one that decides whether the store may be closed — is
+// reachable from a test without a ten-second wait in it.
+func shutdown(ctx context.Context, active []listening, work *background, parts *daemonParts, socketPath string) error {
+	quiet := errors.Join(drain(ctx, active), work.stopAndWait(ctx))
+	if quiet != nil {
+		slog.Error("boat is exiting with work still in flight, and is leaving its store open so that work can still record its outcome", "error", quiet)
+		return errors.Join(quiet, removeSocket(socketPath))
+	}
+	return errors.Join(parts.close(), removeSocket(socketPath))
+}
+
+// drain stops both listeners accepting and waits for the requests already
+// inside them. A Shutdown that returns ctx.Err() is a verb that outlasted the
+// grace, which is the one thing the caller has to know.
+func drain(ctx context.Context, active []listening) error {
+	failures := make([]error, 0, len(active))
 	for _, each := range active {
 		failures = append(failures, each.server.Shutdown(ctx))
 	}
-	failures = append(failures, database.Close())
-	// Go unlinks the socket when its listener closes; remove it anyway, because
-	// a file left behind is what blocks the next start.
-	if err := os.Remove(socketPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		failures = append(failures, err)
-	}
 	return errors.Join(failures...)
+}
+
+// removeSocket unlinks the control socket once nothing can arrive on it. Go
+// unlinks it when its listener closes; it is removed anyway, because a file left
+// behind is what blocks the next start.
+func removeSocket(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }

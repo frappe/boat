@@ -51,7 +51,7 @@ func TestVmLsPrintsWhatTheHostObserved(t *testing.T) {
 	startFakeDaemon(t, mux)
 	var output, errorOutput bytes.Buffer
 
-	if code := run([]string{"vm", "ls"}, &output, &errorOutput); code != exitSuccess {
+	if code := dispatch([]string{"vm", "ls"}, &output, &errorOutput); code != exitSuccess {
 		t.Fatalf("got exit %d, want 0: %s", code, errorOutput.String())
 	}
 	for _, want := range []string{"UUID", "vm-one", "Running", "active"} {
@@ -74,7 +74,7 @@ func TestVmStartPrintsTheHostsTrace(t *testing.T) {
 	startFakeDaemon(t, mux)
 	var output, errorOutput bytes.Buffer
 
-	if code := run([]string{"vm", "start", "vm-one"}, &output, &errorOutput); code != exitSuccess {
+	if code := dispatch([]string{"vm", "start", "vm-one"}, &output, &errorOutput); code != exitSuccess {
 		t.Fatalf("got exit %d, want 0: %s", code, errorOutput.String())
 	}
 	if !strings.Contains(output.String(), trace) {
@@ -96,7 +96,7 @@ func TestVmStartExitsNonZeroWhenTheOperationFailed(t *testing.T) {
 	startFakeDaemon(t, mux)
 	var output, errorOutput bytes.Buffer
 
-	if code := run([]string{"vm", "start", "vm-one"}, &output, &errorOutput); code != exitFailure {
+	if code := dispatch([]string{"vm", "start", "vm-one"}, &output, &errorOutput); code != exitFailure {
 		t.Fatalf("got exit %d, want %d", code, exitFailure)
 	}
 	if !strings.Contains(errorOutput.String(), failure) {
@@ -116,7 +116,7 @@ func TestVmStopSendsTheFlagsItWasGiven(t *testing.T) {
 	startFakeDaemon(t, mux)
 	var output, errorOutput bytes.Buffer
 
-	code := run([]string{"vm", "stop", "vm-one", "--graceful=false", "--stop-timeout-seconds", "45"}, &output, &errorOutput)
+	code := dispatch([]string{"vm", "stop", "vm-one", "--graceful=false", "--stop-timeout-seconds", "45"}, &output, &errorOutput)
 
 	if code != exitSuccess {
 		t.Fatalf("got exit %d, want 0: %s", code, errorOutput.String())
@@ -144,7 +144,7 @@ func TestVmShowAndHostFactsPrintTheirFields(t *testing.T) {
 	startFakeDaemon(t, mux)
 
 	var shown, errorOutput bytes.Buffer
-	if code := run([]string{"vm", "show", "vm-one"}, &shown, &errorOutput); code != exitSuccess {
+	if code := dispatch([]string{"vm", "show", "vm-one"}, &shown, &errorOutput); code != exitSuccess {
 		t.Fatalf("vm show: got exit %d: %s", code, errorOutput.String())
 	}
 	for _, want := range []string{"vm-one", "Sleeping", "yes"} {
@@ -154,7 +154,7 @@ func TestVmShowAndHostFactsPrintTheirFields(t *testing.T) {
 	}
 
 	var facts bytes.Buffer
-	if code := run([]string{"host", "facts"}, &facts, &errorOutput); code != exitSuccess {
+	if code := dispatch([]string{"host", "facts"}, &facts, &errorOutput); code != exitSuccess {
 		t.Fatalf("host facts: got exit %d: %s", code, errorOutput.String())
 	}
 	for _, want := range []string{"atlas-host-1", "0.1.0", "7"} {
@@ -174,7 +174,7 @@ func TestARefusalIsReportedInTheDaemonsWords(t *testing.T) {
 	startFakeDaemon(t, mux)
 	var output, errorOutput bytes.Buffer
 
-	if code := run([]string{"vm", "show", "ghost"}, &output, &errorOutput); code != exitFailure {
+	if code := dispatch([]string{"vm", "show", "ghost"}, &output, &errorOutput); code != exitFailure {
 		t.Fatalf("got exit %d, want %d", code, exitFailure)
 	}
 	if !strings.Contains(errorOutput.String(), "has not observed a virtual machine ghost") {
@@ -186,7 +186,7 @@ func TestAnUnreachableDaemonSaysSo(t *testing.T) {
 	t.Setenv("BOAT_SOCKET", filepath.Join(t.TempDir(), "absent.sock"))
 	var output, errorOutput bytes.Buffer
 
-	if code := run([]string{"vm", "ls"}, &output, &errorOutput); code != exitFailure {
+	if code := dispatch([]string{"vm", "ls"}, &output, &errorOutput); code != exitFailure {
 		t.Fatalf("got exit %d, want %d", code, exitFailure)
 	}
 	if !strings.Contains(errorOutput.String(), "could not reach the boat daemon") {

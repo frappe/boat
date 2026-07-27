@@ -20,7 +20,7 @@ func TestUsageListsEveryVerbAndExitsTwo(t *testing.T) {
 
 	for _, arguments := range unusable {
 		var output, errorOutput bytes.Buffer
-		if code := run(arguments, &output, &errorOutput); code != exitUsage {
+		if code := dispatch(arguments, &output, &errorOutput); code != exitUsage {
 			t.Errorf("%v: got exit %d, want %d", arguments, code, exitUsage)
 		}
 		for _, verb := range []string{"daemon", "vm start", "vm stop", "vm ls", "vm show", "host facts", "version"} {
@@ -36,7 +36,7 @@ func TestUsageListsEveryVerbAndExitsTwo(t *testing.T) {
 func TestVersionPrintsThisBuild(t *testing.T) {
 	var output, errorOutput bytes.Buffer
 
-	if code := run([]string{"version"}, &output, &errorOutput); code != exitSuccess {
+	if code := dispatch([]string{"version"}, &output, &errorOutput); code != exitSuccess {
 		t.Fatalf("got exit %d, want 0", code)
 	}
 	if strings.TrimSpace(output.String()) != version.Version {
@@ -47,7 +47,7 @@ func TestVersionPrintsThisBuild(t *testing.T) {
 func TestVmVerbsNeedTheirUuidBeforeTheirFlags(t *testing.T) {
 	for _, arguments := range [][]string{{"vm", "stop"}, {"vm", "stop", "--graceful=false"}, {"vm", "show"}} {
 		var output, errorOutput bytes.Buffer
-		if code := run(arguments, &output, &errorOutput); code != exitUsage {
+		if code := dispatch(arguments, &output, &errorOutput); code != exitUsage {
 			t.Errorf("%v: got exit %d, want %d", arguments, code, exitUsage)
 		}
 		if !strings.Contains(errorOutput.String(), "UUID") {

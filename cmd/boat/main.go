@@ -38,10 +38,10 @@ socket (default /run/boat/boat.sock, override with BOAT_SOCKET).
 `
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(dispatch(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func run(arguments []string, output io.Writer, errorOutput io.Writer) int {
+func dispatch(arguments []string, output io.Writer, errorOutput io.Writer) int {
 	if len(arguments) == 0 {
 		return usage(errorOutput)
 	}
