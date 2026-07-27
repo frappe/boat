@@ -52,5 +52,8 @@ func snapshot(transaction *bbolt.Tx) (model.Export, error) {
 	if export.FenceEpochs, err = fenceEpochs(transaction); err != nil {
 		return model.Export{}, err
 	}
+	if export.Quarantined, err = quarantined(transaction); err != nil {
+		return model.Export{}, err
+	}
 	return export, nil
 }

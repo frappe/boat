@@ -28,16 +28,21 @@ import (
 // bookkeeping, which today is the observed epoch and nothing else.
 var (
 	virtualMachinesBucket = []byte("virtual-machines")
-	operationsBucket      = []byte("operations")
-	desiredBucket         = []byte("desired")
-	fenceBucket           = []byte("fence")
-	metaBucket            = []byte("meta")
+	// quarantineBucket holds artifact sets that could not be read as a VM. It is
+	// latest-wins per scan rather than a journal: quarantine describes the host
+	// as it is now, and a resolved one must stop being reported.
+	quarantineBucket = []byte("quarantine")
+	operationsBucket = []byte("operations")
+	desiredBucket    = []byte("desired")
+	fenceBucket      = []byte("fence")
+	metaBucket       = []byte("meta")
 )
 
 // buckets is the whole set, so that adding one is a single edit rather than an
 // edit plus a matching line in Open that is easy to forget.
 var buckets = [][]byte{
 	virtualMachinesBucket,
+	quarantineBucket,
 	operationsBucket,
 	desiredBucket,
 	fenceBucket,

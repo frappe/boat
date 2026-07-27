@@ -169,6 +169,9 @@ func (parts *daemonParts) adopt(ctx context.Context) error {
 	if err := parts.ingest(result.VirtualMachines); err != nil {
 		return err
 	}
+	if err := parts.store.ReplaceQuarantine(result.Quarantined); err != nil {
+		return fmt.Errorf("could not record what this host holds that is not a virtual machine: %w", err)
+	}
 	reportQuarantined(result.Quarantined)
 	slog.Info("adopted what this host already holds",
 		"virtual_machines", len(result.VirtualMachines), "quarantined", len(result.Quarantined),
@@ -189,13 +192,13 @@ func (parts *daemonParts) ingest(adopted []model.VirtualMachine) error {
 	return nil
 }
 
-// reportQuarantined records each artifact set that did not read as a VM, with
-// the evidence that made it ambiguous.
+// reportQuarantined puts each ambiguous artifact set in the daemon's log as
+// well as the store, because the two are read by different people at different
+// times: the export is how Atlas and an operator find out, the journal is what
+// someone reads when the host will not answer its own API.
 //
-// The record is this daemon's log rather than the store, because internal/store
-// has no quarantine bucket to put it in — see the report against the WO-2
-// wiring contract. Warn and not Error: a quarantine is a host state an operator
-// resolves, not a fault of the daemon reporting it.
+// Warn and not Error: a quarantine is a host state an operator resolves, not a
+// fault of the daemon reporting it.
 func reportQuarantined(quarantined []model.Quarantine) {
 	for _, each := range quarantined {
 		slog.Warn("quarantined an artifact set that does not read as a virtual machine",

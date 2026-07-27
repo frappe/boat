@@ -93,4 +93,11 @@ type Export struct {
 	Units           []UnitLiveness   `json:"units"`
 	LogicalVolumes  []LogicalVolume  `json:"logical_volumes"`
 	FenceEpochs     map[string]int64 `json:"fence_epochs"`
+	// Quarantined is what this host holds that could not be read as a VM. It
+	// belongs in the export because it is the state an operator most needs to
+	// see and the one Atlas can least afford to infer: a half-terminated VM is
+	// invisible from the VM list by construction, so a host reporting no VMs and
+	// a host reporting no VMs plus three quarantined artifact sets are the same
+	// document without it.
+	Quarantined []Quarantine `json:"quarantine"`
 }

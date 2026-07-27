@@ -111,6 +111,13 @@ func exportToWire(export model.Export) wire.Export {
 		volumes := logicalVolumesToWire(export.LogicalVolumes)
 		document.LogicalVolumes = &volumes
 	}
+	if len(export.Quarantined) > 0 {
+		// Only when there is some. An empty array and an absent key both mean
+		// "nothing quarantined", and the absent one keeps a healthy host's export
+		// free of a field that only ever matters when it is non-empty.
+		quarantine := quarantineToWire(export.Quarantined)
+		document.Quarantine = &quarantine
+	}
 	if export.FenceEpochs != nil {
 		epochs := fenceEpochsToWire(export.FenceEpochs)
 		document.FenceEpochs = &epochs
@@ -196,6 +203,27 @@ func operationToWire(operation model.Operation) wire.Operation {
 	}
 	if operation.Error != "" {
 		document.Error = &operation.Error
+	}
+	return document
+}
+
+// quarantineToWire reports each artifact set that could not be read as a VM.
+//
+// Identifier, not UUID: a stranded namespace or address keeps only its own
+// name, and inventing a UUID for it would record a guess as a fact.
+func quarantineToWire(records []model.Quarantine) []wire.Quarantine {
+	document := make([]wire.Quarantine, 0, len(records))
+	for _, record := range records {
+		entry := wire.Quarantine{Identifier: record.UUID, Reason: record.Reason}
+		if len(record.Evidence) > 0 {
+			evidence := record.Evidence
+			entry.Evidence = &evidence
+		}
+		if !record.SeenAt.IsZero() {
+			seenAt := record.SeenAt
+			entry.SeenAt = &seenAt
+		}
+		document = append(document, entry)
 	}
 	return document
 }
