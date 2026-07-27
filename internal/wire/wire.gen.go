@@ -210,6 +210,13 @@ type Operation struct {
 	Verb string `json:"verb"`
 }
 
+// OperationRequest defines model for OperationRequest.
+type OperationRequest struct {
+	// OperationId The Atlas Task name. Re-posting one returns its recorded result
+	// rather than running the verb again.
+	OperationId string `json:"operation_id"`
+}
+
 // OperationStatus defines model for OperationStatus.
 type OperationStatus string
 
@@ -318,11 +325,32 @@ type Unauthorized = Error
 // PutVirtualMachineJSONRequestBody defines body for PutVirtualMachine for application/json ContentType.
 type PutVirtualMachineJSONRequestBody = DesiredVirtualMachine
 
+// PauseVirtualMachineJSONRequestBody defines body for PauseVirtualMachine for application/json ContentType.
+type PauseVirtualMachineJSONRequestBody = OperationRequest
+
+// RebuildVirtualMachineJSONRequestBody defines body for RebuildVirtualMachine for application/json ContentType.
+type RebuildVirtualMachineJSONRequestBody = OperationRequest
+
+// ResizeVirtualMachineJSONRequestBody defines body for ResizeVirtualMachine for application/json ContentType.
+type ResizeVirtualMachineJSONRequestBody = OperationRequest
+
+// ResumeVirtualMachineJSONRequestBody defines body for ResumeVirtualMachine for application/json ContentType.
+type ResumeVirtualMachineJSONRequestBody = OperationRequest
+
+// SleepVirtualMachineJSONRequestBody defines body for SleepVirtualMachine for application/json ContentType.
+type SleepVirtualMachineJSONRequestBody = OperationRequest
+
 // StartVirtualMachineJSONRequestBody defines body for StartVirtualMachine for application/json ContentType.
 type StartVirtualMachineJSONRequestBody = StartRequest
 
 // StopVirtualMachineJSONRequestBody defines body for StopVirtualMachine for application/json ContentType.
 type StopVirtualMachineJSONRequestBody = StopRequest
+
+// TerminateVirtualMachineJSONRequestBody defines body for TerminateVirtualMachine for application/json ContentType.
+type TerminateVirtualMachineJSONRequestBody = OperationRequest
+
+// WakeVirtualMachineJSONRequestBody defines body for WakeVirtualMachine for application/json ContentType.
+type WakeVirtualMachineJSONRequestBody = OperationRequest
 
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
@@ -347,12 +375,33 @@ type ServerInterface interface {
 	// Assert this VM's desired state
 	// (PUT /vms/{uuid})
 	PutVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
+	// Pause a running guest
+	// (POST /vms/{uuid}/pause)
+	PauseVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
+	// Rebuild a VM's root disk from its image
+	// (POST /vms/{uuid}/rebuild)
+	RebuildVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
+	// Resize a stopped VM
+	// (POST /vms/{uuid}/resize)
+	ResizeVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
+	// Resume a paused guest
+	// (POST /vms/{uuid}/resume)
+	ResumeVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
+	// Park a VM to free its RAM
+	// (POST /vms/{uuid}/sleep)
+	SleepVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
 	// Start a provisioned VM
 	// (POST /vms/{uuid}/start)
 	StartVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
 	// Stop a running VM
 	// (POST /vms/{uuid}/stop)
 	StopVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
+	// Destroy a VM and everything it holds on this host
+	// (POST /vms/{uuid}/terminate)
+	TerminateVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
+	// Wake a sleeping VM now
+	// (POST /vms/{uuid}/wake)
+	WakeVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
 	// Stream observed changes as they happen
 	// (GET /watch)
 	Watch(w http.ResponseWriter, r *http.Request)
@@ -534,6 +583,161 @@ func (siw *ServerInterfaceWrapper) PutVirtualMachine(w http.ResponseWriter, r *h
 	handler.ServeHTTP(w, r)
 }
 
+// PauseVirtualMachine operation middleware
+func (siw *ServerInterfaceWrapper) PauseVirtualMachine(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "uuid" -------------
+	var uuid VirtualMachineUuid
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uuid", r.PathValue("uuid"), &uuid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uuid", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PauseVirtualMachine(w, r, uuid)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RebuildVirtualMachine operation middleware
+func (siw *ServerInterfaceWrapper) RebuildVirtualMachine(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "uuid" -------------
+	var uuid VirtualMachineUuid
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uuid", r.PathValue("uuid"), &uuid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uuid", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RebuildVirtualMachine(w, r, uuid)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ResizeVirtualMachine operation middleware
+func (siw *ServerInterfaceWrapper) ResizeVirtualMachine(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "uuid" -------------
+	var uuid VirtualMachineUuid
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uuid", r.PathValue("uuid"), &uuid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uuid", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ResizeVirtualMachine(w, r, uuid)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ResumeVirtualMachine operation middleware
+func (siw *ServerInterfaceWrapper) ResumeVirtualMachine(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "uuid" -------------
+	var uuid VirtualMachineUuid
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uuid", r.PathValue("uuid"), &uuid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uuid", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ResumeVirtualMachine(w, r, uuid)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// SleepVirtualMachine operation middleware
+func (siw *ServerInterfaceWrapper) SleepVirtualMachine(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "uuid" -------------
+	var uuid VirtualMachineUuid
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uuid", r.PathValue("uuid"), &uuid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uuid", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.SleepVirtualMachine(w, r, uuid)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // StartVirtualMachine operation middleware
 func (siw *ServerInterfaceWrapper) StartVirtualMachine(w http.ResponseWriter, r *http.Request) {
 
@@ -587,6 +791,68 @@ func (siw *ServerInterfaceWrapper) StopVirtualMachine(w http.ResponseWriter, r *
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.StopVirtualMachine(w, r, uuid)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// TerminateVirtualMachine operation middleware
+func (siw *ServerInterfaceWrapper) TerminateVirtualMachine(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "uuid" -------------
+	var uuid VirtualMachineUuid
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uuid", r.PathValue("uuid"), &uuid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uuid", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.TerminateVirtualMachine(w, r, uuid)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// WakeVirtualMachine operation middleware
+func (siw *ServerInterfaceWrapper) WakeVirtualMachine(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "uuid" -------------
+	var uuid VirtualMachineUuid
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uuid", r.PathValue("uuid"), &uuid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uuid", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.WakeVirtualMachine(w, r, uuid)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -743,8 +1009,15 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("GET "+options.BaseURL+"/vms", wrapper.ListVirtualMachines)
 	m.HandleFunc("GET "+options.BaseURL+"/vms/{uuid}", wrapper.GetVirtualMachine)
 	m.HandleFunc("PUT "+options.BaseURL+"/vms/{uuid}", wrapper.PutVirtualMachine)
+	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/pause", wrapper.PauseVirtualMachine)
+	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/rebuild", wrapper.RebuildVirtualMachine)
+	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/resize", wrapper.ResizeVirtualMachine)
+	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/resume", wrapper.ResumeVirtualMachine)
+	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/sleep", wrapper.SleepVirtualMachine)
 	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/start", wrapper.StartVirtualMachine)
 	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/stop", wrapper.StopVirtualMachine)
+	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/terminate", wrapper.TerminateVirtualMachine)
+	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/wake", wrapper.WakeVirtualMachine)
 	m.HandleFunc("GET "+options.BaseURL+"/watch", wrapper.Watch)
 
 	return m
@@ -955,6 +1228,241 @@ func (response PutVirtualMachine409JSONResponse) VisitPutVirtualMachineResponse(
 	return json.NewEncoder(w).Encode(response)
 }
 
+type PauseVirtualMachineRequestObject struct {
+	Uuid VirtualMachineUuid `json:"uuid"`
+	Body *PauseVirtualMachineJSONRequestBody
+}
+
+type PauseVirtualMachineResponseObject interface {
+	VisitPauseVirtualMachineResponse(w http.ResponseWriter) error
+}
+
+type PauseVirtualMachine200JSONResponse struct{ OperationAcceptedJSONResponse }
+
+func (response PauseVirtualMachine200JSONResponse) VisitPauseVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type PauseVirtualMachine401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response PauseVirtualMachine401JSONResponse) VisitPauseVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type PauseVirtualMachine404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response PauseVirtualMachine404JSONResponse) VisitPauseVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type PauseVirtualMachine409JSONResponse struct {
+	OperationIdentifierConflictJSONResponse
+}
+
+func (response PauseVirtualMachine409JSONResponse) VisitPauseVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type RebuildVirtualMachineRequestObject struct {
+	Uuid VirtualMachineUuid `json:"uuid"`
+	Body *RebuildVirtualMachineJSONRequestBody
+}
+
+type RebuildVirtualMachineResponseObject interface {
+	VisitRebuildVirtualMachineResponse(w http.ResponseWriter) error
+}
+
+type RebuildVirtualMachine200JSONResponse struct{ OperationAcceptedJSONResponse }
+
+func (response RebuildVirtualMachine200JSONResponse) VisitRebuildVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type RebuildVirtualMachine401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response RebuildVirtualMachine401JSONResponse) VisitRebuildVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type RebuildVirtualMachine404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response RebuildVirtualMachine404JSONResponse) VisitRebuildVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type RebuildVirtualMachine409JSONResponse struct {
+	OperationIdentifierConflictJSONResponse
+}
+
+func (response RebuildVirtualMachine409JSONResponse) VisitRebuildVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ResizeVirtualMachineRequestObject struct {
+	Uuid VirtualMachineUuid `json:"uuid"`
+	Body *ResizeVirtualMachineJSONRequestBody
+}
+
+type ResizeVirtualMachineResponseObject interface {
+	VisitResizeVirtualMachineResponse(w http.ResponseWriter) error
+}
+
+type ResizeVirtualMachine200JSONResponse struct{ OperationAcceptedJSONResponse }
+
+func (response ResizeVirtualMachine200JSONResponse) VisitResizeVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ResizeVirtualMachine401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response ResizeVirtualMachine401JSONResponse) VisitResizeVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ResizeVirtualMachine404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response ResizeVirtualMachine404JSONResponse) VisitResizeVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ResizeVirtualMachine409JSONResponse struct {
+	OperationIdentifierConflictJSONResponse
+}
+
+func (response ResizeVirtualMachine409JSONResponse) VisitResizeVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ResumeVirtualMachineRequestObject struct {
+	Uuid VirtualMachineUuid `json:"uuid"`
+	Body *ResumeVirtualMachineJSONRequestBody
+}
+
+type ResumeVirtualMachineResponseObject interface {
+	VisitResumeVirtualMachineResponse(w http.ResponseWriter) error
+}
+
+type ResumeVirtualMachine200JSONResponse struct{ OperationAcceptedJSONResponse }
+
+func (response ResumeVirtualMachine200JSONResponse) VisitResumeVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ResumeVirtualMachine401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response ResumeVirtualMachine401JSONResponse) VisitResumeVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ResumeVirtualMachine404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response ResumeVirtualMachine404JSONResponse) VisitResumeVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ResumeVirtualMachine409JSONResponse struct {
+	OperationIdentifierConflictJSONResponse
+}
+
+func (response ResumeVirtualMachine409JSONResponse) VisitResumeVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type SleepVirtualMachineRequestObject struct {
+	Uuid VirtualMachineUuid `json:"uuid"`
+	Body *SleepVirtualMachineJSONRequestBody
+}
+
+type SleepVirtualMachineResponseObject interface {
+	VisitSleepVirtualMachineResponse(w http.ResponseWriter) error
+}
+
+type SleepVirtualMachine200JSONResponse struct{ OperationAcceptedJSONResponse }
+
+func (response SleepVirtualMachine200JSONResponse) VisitSleepVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type SleepVirtualMachine401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response SleepVirtualMachine401JSONResponse) VisitSleepVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type SleepVirtualMachine404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response SleepVirtualMachine404JSONResponse) VisitSleepVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type SleepVirtualMachine409JSONResponse struct {
+	OperationIdentifierConflictJSONResponse
+}
+
+func (response SleepVirtualMachine409JSONResponse) VisitSleepVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type StartVirtualMachineRequestObject struct {
 	Uuid VirtualMachineUuid `json:"uuid"`
 	Body *StartVirtualMachineJSONRequestBody
@@ -1047,6 +1555,100 @@ func (response StopVirtualMachine409JSONResponse) VisitStopVirtualMachineRespons
 	return json.NewEncoder(w).Encode(response)
 }
 
+type TerminateVirtualMachineRequestObject struct {
+	Uuid VirtualMachineUuid `json:"uuid"`
+	Body *TerminateVirtualMachineJSONRequestBody
+}
+
+type TerminateVirtualMachineResponseObject interface {
+	VisitTerminateVirtualMachineResponse(w http.ResponseWriter) error
+}
+
+type TerminateVirtualMachine200JSONResponse struct{ OperationAcceptedJSONResponse }
+
+func (response TerminateVirtualMachine200JSONResponse) VisitTerminateVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type TerminateVirtualMachine401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response TerminateVirtualMachine401JSONResponse) VisitTerminateVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type TerminateVirtualMachine404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response TerminateVirtualMachine404JSONResponse) VisitTerminateVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type TerminateVirtualMachine409JSONResponse struct {
+	OperationIdentifierConflictJSONResponse
+}
+
+func (response TerminateVirtualMachine409JSONResponse) VisitTerminateVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type WakeVirtualMachineRequestObject struct {
+	Uuid VirtualMachineUuid `json:"uuid"`
+	Body *WakeVirtualMachineJSONRequestBody
+}
+
+type WakeVirtualMachineResponseObject interface {
+	VisitWakeVirtualMachineResponse(w http.ResponseWriter) error
+}
+
+type WakeVirtualMachine200JSONResponse struct{ OperationAcceptedJSONResponse }
+
+func (response WakeVirtualMachine200JSONResponse) VisitWakeVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type WakeVirtualMachine401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response WakeVirtualMachine401JSONResponse) VisitWakeVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type WakeVirtualMachine404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response WakeVirtualMachine404JSONResponse) VisitWakeVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type WakeVirtualMachine409JSONResponse struct {
+	OperationIdentifierConflictJSONResponse
+}
+
+func (response WakeVirtualMachine409JSONResponse) VisitWakeVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type WatchRequestObject struct {
 }
 
@@ -1105,12 +1707,33 @@ type StrictServerInterface interface {
 	// Assert this VM's desired state
 	// (PUT /vms/{uuid})
 	PutVirtualMachine(ctx context.Context, request PutVirtualMachineRequestObject) (PutVirtualMachineResponseObject, error)
+	// Pause a running guest
+	// (POST /vms/{uuid}/pause)
+	PauseVirtualMachine(ctx context.Context, request PauseVirtualMachineRequestObject) (PauseVirtualMachineResponseObject, error)
+	// Rebuild a VM's root disk from its image
+	// (POST /vms/{uuid}/rebuild)
+	RebuildVirtualMachine(ctx context.Context, request RebuildVirtualMachineRequestObject) (RebuildVirtualMachineResponseObject, error)
+	// Resize a stopped VM
+	// (POST /vms/{uuid}/resize)
+	ResizeVirtualMachine(ctx context.Context, request ResizeVirtualMachineRequestObject) (ResizeVirtualMachineResponseObject, error)
+	// Resume a paused guest
+	// (POST /vms/{uuid}/resume)
+	ResumeVirtualMachine(ctx context.Context, request ResumeVirtualMachineRequestObject) (ResumeVirtualMachineResponseObject, error)
+	// Park a VM to free its RAM
+	// (POST /vms/{uuid}/sleep)
+	SleepVirtualMachine(ctx context.Context, request SleepVirtualMachineRequestObject) (SleepVirtualMachineResponseObject, error)
 	// Start a provisioned VM
 	// (POST /vms/{uuid}/start)
 	StartVirtualMachine(ctx context.Context, request StartVirtualMachineRequestObject) (StartVirtualMachineResponseObject, error)
 	// Stop a running VM
 	// (POST /vms/{uuid}/stop)
 	StopVirtualMachine(ctx context.Context, request StopVirtualMachineRequestObject) (StopVirtualMachineResponseObject, error)
+	// Destroy a VM and everything it holds on this host
+	// (POST /vms/{uuid}/terminate)
+	TerminateVirtualMachine(ctx context.Context, request TerminateVirtualMachineRequestObject) (TerminateVirtualMachineResponseObject, error)
+	// Wake a sleeping VM now
+	// (POST /vms/{uuid}/wake)
+	WakeVirtualMachine(ctx context.Context, request WakeVirtualMachineRequestObject) (WakeVirtualMachineResponseObject, error)
 	// Stream observed changes as they happen
 	// (GET /watch)
 	Watch(ctx context.Context, request WatchRequestObject) (WatchResponseObject, error)
@@ -1326,6 +1949,171 @@ func (sh *strictHandler) PutVirtualMachine(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// PauseVirtualMachine operation middleware
+func (sh *strictHandler) PauseVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid) {
+	var request PauseVirtualMachineRequestObject
+
+	request.Uuid = uuid
+
+	var body PauseVirtualMachineJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.PauseVirtualMachine(ctx, request.(PauseVirtualMachineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "PauseVirtualMachine")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(PauseVirtualMachineResponseObject); ok {
+		if err := validResponse.VisitPauseVirtualMachineResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RebuildVirtualMachine operation middleware
+func (sh *strictHandler) RebuildVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid) {
+	var request RebuildVirtualMachineRequestObject
+
+	request.Uuid = uuid
+
+	var body RebuildVirtualMachineJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RebuildVirtualMachine(ctx, request.(RebuildVirtualMachineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RebuildVirtualMachine")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RebuildVirtualMachineResponseObject); ok {
+		if err := validResponse.VisitRebuildVirtualMachineResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ResizeVirtualMachine operation middleware
+func (sh *strictHandler) ResizeVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid) {
+	var request ResizeVirtualMachineRequestObject
+
+	request.Uuid = uuid
+
+	var body ResizeVirtualMachineJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ResizeVirtualMachine(ctx, request.(ResizeVirtualMachineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ResizeVirtualMachine")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ResizeVirtualMachineResponseObject); ok {
+		if err := validResponse.VisitResizeVirtualMachineResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ResumeVirtualMachine operation middleware
+func (sh *strictHandler) ResumeVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid) {
+	var request ResumeVirtualMachineRequestObject
+
+	request.Uuid = uuid
+
+	var body ResumeVirtualMachineJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ResumeVirtualMachine(ctx, request.(ResumeVirtualMachineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ResumeVirtualMachine")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ResumeVirtualMachineResponseObject); ok {
+		if err := validResponse.VisitResumeVirtualMachineResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// SleepVirtualMachine operation middleware
+func (sh *strictHandler) SleepVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid) {
+	var request SleepVirtualMachineRequestObject
+
+	request.Uuid = uuid
+
+	var body SleepVirtualMachineJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.SleepVirtualMachine(ctx, request.(SleepVirtualMachineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "SleepVirtualMachine")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(SleepVirtualMachineResponseObject); ok {
+		if err := validResponse.VisitSleepVirtualMachineResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // StartVirtualMachine operation middleware
 func (sh *strictHandler) StartVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid) {
 	var request StartVirtualMachineRequestObject
@@ -1385,6 +2173,72 @@ func (sh *strictHandler) StopVirtualMachine(w http.ResponseWriter, r *http.Reque
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(StopVirtualMachineResponseObject); ok {
 		if err := validResponse.VisitStopVirtualMachineResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// TerminateVirtualMachine operation middleware
+func (sh *strictHandler) TerminateVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid) {
+	var request TerminateVirtualMachineRequestObject
+
+	request.Uuid = uuid
+
+	var body TerminateVirtualMachineJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.TerminateVirtualMachine(ctx, request.(TerminateVirtualMachineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "TerminateVirtualMachine")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(TerminateVirtualMachineResponseObject); ok {
+		if err := validResponse.VisitTerminateVirtualMachineResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// WakeVirtualMachine operation middleware
+func (sh *strictHandler) WakeVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid) {
+	var request WakeVirtualMachineRequestObject
+
+	request.Uuid = uuid
+
+	var body WakeVirtualMachineJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.WakeVirtualMachine(ctx, request.(WakeVirtualMachineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "WakeVirtualMachine")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(WakeVirtualMachineResponseObject); ok {
+		if err := validResponse.VisitWakeVirtualMachineResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

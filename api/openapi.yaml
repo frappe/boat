@@ -244,6 +244,178 @@ paths:
         "409":
           $ref: "#/components/responses/OperationIdentifierConflict"
 
+  /vms/{uuid}/pause:
+    parameters:
+      - $ref: "#/components/parameters/VirtualMachineUuid"
+    post:
+      summary: Pause a running guest
+      description: |
+        Freezes the guest through the Firecracker API. The unit stays active, so a paused VM is still holding its RAM — this frees CPU, not memory.
+      operationId: PauseVirtualMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperationRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/OperationIdentifierConflict"
+
+  /vms/{uuid}/resume:
+    parameters:
+      - $ref: "#/components/parameters/VirtualMachineUuid"
+    post:
+      summary: Resume a paused guest
+      description: |
+        The inverse of pause. A guest that was not paused is already where this asks it to be.
+      operationId: ResumeVirtualMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperationRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/OperationIdentifierConflict"
+
+  /vms/{uuid}/sleep:
+    parameters:
+      - $ref: "#/components/parameters/VirtualMachineUuid"
+    post:
+      summary: Park a VM to free its RAM
+      description: |
+        Stops the guest after capturing a memory snapshot, then parks its address so the first inbound TCP SYN wakes it.
+        
+        Refused when the wake trap is not running: a VM that sleeps with nothing watching its counter never wakes, and declining the sleep is better than stranding it.
+      operationId: SleepVirtualMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperationRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/OperationIdentifierConflict"
+
+  /vms/{uuid}/wake:
+    parameters:
+      - $ref: "#/components/parameters/VirtualMachineUuid"
+    post:
+      summary: Wake a sleeping VM now
+      description: |
+        The operator's equivalent of the traffic that would have woken it. Removes the sleeping marker and starts the unit, which resumes from the memory snapshot.
+      operationId: WakeVirtualMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperationRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/OperationIdentifierConflict"
+
+  /vms/{uuid}/rebuild:
+    parameters:
+      - $ref: "#/components/parameters/VirtualMachineUuid"
+    post:
+      summary: Rebuild a VM's root disk from its image
+      description: |
+        Destroys the guest's root filesystem and lays it down again from the image, keeping the VM's identity, addresses and data disk.
+      operationId: RebuildVirtualMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperationRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/OperationIdentifierConflict"
+
+  /vms/{uuid}/terminate:
+    parameters:
+      - $ref: "#/components/parameters/VirtualMachineUuid"
+    post:
+      summary: Destroy a VM and everything it holds on this host
+      description: |
+        Removes the unit, the disks, the network and the whole VM tree. Idempotent: terminating what is already gone succeeds, because a retry after a partial failure must be able to finish the job.
+      operationId: TerminateVirtualMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperationRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/OperationIdentifierConflict"
+
+  /vms/{uuid}/resize:
+    parameters:
+      - $ref: "#/components/parameters/VirtualMachineUuid"
+    post:
+      summary: Resize a stopped VM
+      description: |
+        Applies the desired vCPU, memory and disk numbers. A disk only ever
+        grows: shrinking a filesystem that has already written past the new
+        boundary destroys data, so it is refused rather than attempted.
+      operationId: resizeVirtualMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OperationRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationAccepted"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/OperationIdentifierConflict"
+
   /ops/{operation_id}:
     parameters:
       - name: operation_id
@@ -638,6 +810,16 @@ components:
             A stable token for the cases a caller must tell apart by code rather
             than by prose. Absent when the sentence is the whole answer.
           enum: [operation-identifier-conflict, no-fence, stale-fence]
+
+    OperationRequest:
+      type: object
+      required: [operation_id]
+      properties:
+        operation_id:
+          type: string
+          description: |
+            The Atlas Task name. Re-posting one returns its recorded result
+            rather than running the verb again.
 
     StartRequest:
       type: object
