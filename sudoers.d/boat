@@ -52,11 +52,48 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_UNIT = \
 # three are `test`: they return a boolean and change nothing, which is why a
 # trailing wildcard on the directory check is acceptable here and would not be
 # on a command that writes.
+# The socket check is `test -S`, not `-f`. sudo matches arguments literally, so
+# the flag is part of the grant: a `-f` line does not authorize the `-S` call the
+# code makes, and `-f` is false for a socket in any case. The two together
+# produced a rule that denied precisely the command it existed for.
 Cmnd_Alias BOAT_VIRTUAL_MACHINE_MARKERS = \
     /usr/bin/test -d /var/lib/atlas/virtual-machines/*, \
     /usr/bin/test -f /var/lib/atlas/virtual-machines/*/sleeping, \
     /usr/bin/test -f /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot/READY, \
-    /usr/bin/test -f /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run/firecracker.socket
+    /usr/bin/test -S /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run/firecracker.socket
+
+# --- Adoption: reading what the host already holds -------------------------
+# Every one of these reads and none of them writes. Adoption runs on a host that
+# may already be serving VMs, so a scan that could mutate would be a scan nobody
+# could safely run.
+#
+# `network.env` is read rather than re-derived: it is the sidecar the systemd
+# hooks themselves read to rebuild a VM's networking after a reboot, so it is the
+# host's own record of which tap and namespace belong to which VM. Re-deriving
+# those names risks drifting from the writer, and a drift here means adopting a
+# VM holding another VM's tap.
+Cmnd_Alias BOAT_ADOPTION = \
+    /usr/bin/cat /var/lib/atlas/virtual-machines/*/network.env, \
+    /usr/sbin/lvs --noheadings --nosuffix --units b --separator \, -o lv_name\,lv_size\,pool_lv\,origin atlas, \
+    /usr/sbin/ip netns exec * ip link show *
+
+# --- Capacity: the numbers placement reads on every provision --------------
+# Live facts, not a bootstrap snapshot. Capacity that drifts silently is
+# capacity that overcommits.
+Cmnd_Alias BOAT_HOST_CAPACITY = \
+    /usr/sbin/lvs --noheadings --nosuffix --units b -o lv_size atlas/pool0, \
+    /usr/sbin/lvs --noheadings -o data_percent atlas/pool0
+
+# --- Liveness: is a Firecracker actually answering? ------------------------
+# A socket inode outlives the process that bound it, so existence proves
+# nothing and only a call through the socket separates live from stale. This is
+# a GET of the API root and is deliberately a separate, fully literal line: the
+# SendCtrlAltDel grant below must not be widened to cover it, because widening
+# the one line that can halt a guest is how a read-only probe acquires the power
+# to stop VMs.
+Cmnd_Alias BOAT_FIRECRACKER_LIVENESS = \
+    /usr/bin/sh -c cd\ /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run\ &&\ curl\ --silent\ --show-error\ --max-time\ 2\ --unix-socket\ firecracker.socket\ http\://localhost/, \
+    /usr/sbin/ss --no-header --unix --listening --processes src /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run/firecracker.socket
 
 # --- Bounded stop: the TimeoutStopSec drop-in ------------------------------
 # A migration-style fast stop bounds the guest's drain WITHOUT skipping the
@@ -116,4 +153,5 @@ Cmnd_Alias BOAT_FIRECRACKER_API = \
     /usr/bin/sh -c cd\ /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run\ &&\ curl\ --fail\ --silent\ --show-error\ --unix-socket\ firecracker.socket\ -X\ PUT\ 'http\://localhost/actions'\ -H\ 'Content-Type\:\ application/json'\ -d\ '{"action_type"\:\ "SendCtrlAltDel"}'
 
 boat ALL=(root) NOPASSWD: BOAT_VIRTUAL_MACHINE_UNIT, BOAT_VIRTUAL_MACHINE_MARKERS, \
-    BOAT_VIRTUAL_MACHINE_STOP_TIMEOUT, BOAT_VIRTUAL_MACHINE_CLONE, BOAT_FIRECRACKER_API
+    BOAT_VIRTUAL_MACHINE_STOP_TIMEOUT, BOAT_VIRTUAL_MACHINE_CLONE, BOAT_FIRECRACKER_API, \
+    BOAT_ADOPTION, BOAT_HOST_CAPACITY, BOAT_FIRECRACKER_LIVENESS
