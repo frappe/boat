@@ -20,7 +20,7 @@ var testIdentity = Identity{
 	IPv6Address:     "2604:a880:800:c1::1",
 	IPv4GuestCIDR:   "10.201.0.2/30",
 	IPv4Gateway:     "10.201.0.1",
-	SSHPublicKey:    "ssh-ed25519 AAAAC3Nz",
+	AuthorizedKeys:  "ssh-ed25519 AAAAC3Nz",
 	DataDiskMountAt: "/data",
 }
 

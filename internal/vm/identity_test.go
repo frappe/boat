@@ -24,7 +24,7 @@ func identityCommands() []string {
 		"sudo mount " + testRootDevice + " " + testMountPoint,
 		"install -d -m 0700 " + testMountPoint + "/root/.ssh",
 		fmt.Sprintf("install -m 0600 %q %s/root/.ssh/authorized_keys",
-			testIdentity.SSHPublicKey+"\n", testMountPoint),
+			testIdentity.AuthorizedKeys+"\n", testMountPoint),
 		fmt.Sprintf("install -m 0644 %q %s/etc/atlas-network.env", networkEnvironment, testMountPoint),
 		fmt.Sprintf("install -m 0644 %q %s/etc/hostname", testHostname+"\n", testMountPoint),
 		fmt.Sprintf("sudo sh -c tee -a %s/etc/hosts >/dev/null <<%q",
@@ -123,6 +123,51 @@ func TestRebuildDoesNotDuplicateTheDataDiskMount(t *testing.T) {
 	for _, line := range fake.trace {
 		if strings.Contains(line, "/etc/fstab >/dev/null") {
 			t.Errorf("appended a second data-disk line: %s", line)
+		}
+	}
+}
+
+// The guest files Atlas hands over are written exactly as they arrived. Boat
+// has no schema for what any of them mean, which is what keeps a service
+// semantic — a routing URL, a bench setting — out of the host's vocabulary.
+func TestRebuildWritesTheGuestFilesItWasHandedVerbatim(t *testing.T) {
+	fake := newFakeCommands()
+	aRebuiltHost(fake)
+	identity := testIdentity
+	identity.ExtraEnvironment = []EnvironmentFile{
+		{Path: "/etc/atlas-routing.env", Content: "ROUTING_BASE_URL=https://orchestrator.blr1.frappe.dev\n"},
+	}
+	request := RebuildRequest{
+		Image: testImage, DiskGB: 40, FirecrackerUID: testFirecrackerUID, Identity: identity,
+	}
+
+	if err := newTestManager(fake).Rebuild(context.Background(), nil, testUUID, request); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	written := fmt.Sprintf("install -m 0644 %q %s/etc/atlas-routing.env",
+		identity.ExtraEnvironment[0].Content, testMountPoint)
+	if countTrace(fake, written) != 1 {
+		t.Errorf("missing from the rebuild: %s\ngot:\n  %s", written, strings.Join(fake.trace, "\n  "))
+	}
+}
+
+// A guest path is joined onto a host mount point, so one that walks out of it
+// writes on the host as root. Refused rather than sanitised.
+func TestRebuildRefusesAGuestFilePathThatLeavesTheFilesystem(t *testing.T) {
+	for name, path := range map[string]string{
+		"relative": "etc/passwd",
+		"walks up": "/etc/../../../root/.ssh/authorized_keys",
+	} {
+		fake := newFakeCommands()
+		aRebuiltHost(fake)
+		identity := testIdentity
+		identity.ExtraEnvironment = []EnvironmentFile{{Path: path, Content: "x"}}
+		request := RebuildRequest{
+			Image: testImage, DiskGB: 40, FirecrackerUID: testFirecrackerUID, Identity: identity,
+		}
+
+		if err := newTestManager(fake).Rebuild(context.Background(), nil, testUUID, request); err == nil {
+			t.Errorf("%s: the rebuild accepted %q", name, path)
 		}
 	}
 }

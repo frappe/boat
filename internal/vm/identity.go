@@ -28,10 +28,28 @@ type Identity struct {
 	// off the private plane. The line is written either way, so the guest's
 	// network unit has a defined value to test rather than a missing variable.
 	PrivateAddress string
-	SSHPublicKey   string
+	// AuthorizedKeys is the guest's root authorized_keys file, whole. One key or
+	// six, whose they are and what they may do: none of that is readable from
+	// here and none of it is Boat's. It is written verbatim.
+	AuthorizedKeys string
+	// ExtraEnvironment is every other file the control plane wants in the fresh
+	// rootfs, as {path, content} pairs Boat writes without parsing either half.
+	//
+	// This is the whole of the guest-service seam. A field named for what a file
+	// MEANS — a routing URL, a bench setting — would put a service semantic in
+	// Boat's vocabulary and make the host care what runs inside the guest; an
+	// anonymous path and its bytes do not. Boat therefore cannot tell one of
+	// these apart from another, which is the property being bought.
+	ExtraEnvironment []EnvironmentFile
 	// DataDiskMountAt re-establishes the data disk's fstab line in the fresh
 	// rootfs. Empty means no data mount, and no line is written.
 	DataDiskMountAt string
+}
+
+// EnvironmentFile is one guest file and its content, both opaque to Boat.
+type EnvironmentFile struct {
+	Path    string
+	Content string
 }
 
 const (
@@ -70,7 +88,7 @@ func (manager *Manager) unmount(ctx context.Context, commands commands, mountPoi
 func (manager *Manager) writeIdentity(
 	ctx context.Context, commands commands, mountPoint string, uuid string, identity Identity,
 ) error {
-	if err := manager.writeAuthorizedKeys(ctx, commands, mountPoint, identity.SSHPublicKey); err != nil {
+	if err := manager.writeAuthorizedKeys(ctx, commands, mountPoint, identity.AuthorizedKeys); err != nil {
 		return err
 	}
 	if err := manager.writeNetworkEnvironment(ctx, commands, mountPoint, identity); err != nil {
@@ -87,6 +105,9 @@ func (manager *Manager) writeIdentity(
 	); err != nil {
 		return err
 	}
+	if err := manager.writeExtraEnvironment(ctx, commands, mountPoint, identity.ExtraEnvironment); err != nil {
+		return err
+	}
 	if identity.DataDiskMountAt == "" {
 		return nil
 	}
@@ -94,14 +115,42 @@ func (manager *Manager) writeIdentity(
 }
 
 func (manager *Manager) writeAuthorizedKeys(
-	ctx context.Context, commands commands, mountPoint string, sshPublicKey string,
+	ctx context.Context, commands commands, mountPoint string, authorizedKeys string,
 ) error {
 	if err := commands.InstallDirectory(ctx, mountPoint+"/root/.ssh", "0700"); err != nil {
 		return err
 	}
 	return commands.InstallFile(
-		ctx, sshPublicKey+"\n", mountPoint+"/root/.ssh/authorized_keys", "0600",
+		ctx, authorizedKeys+"\n", mountPoint+"/root/.ssh/authorized_keys", "0600",
 	)
+}
+
+// writeExtraEnvironment lays down the files Boat was handed but does not read.
+//
+// The path is checked because it is joined onto the host's mount point: an
+// absolute path with no `..` in it lands inside the filesystem being rebuilt,
+// and anything else lands somewhere on the HOST, as root. Refused rather than
+// sanitised — a caller that meant a guest path and wrote something else has a
+// bug worth hearing about, and quietly rewriting it would hide it.
+//
+// The containing directory has to exist in the rootfs already; `install` does
+// not create one, and a rebuild that had to mkdir -p its way to a guest config
+// file is a rebuild writing somewhere the image never had.
+func (manager *Manager) writeExtraEnvironment(
+	ctx context.Context, commands commands, mountPoint string, files []EnvironmentFile,
+) error {
+	for _, file := range files {
+		if !strings.HasPrefix(file.Path, "/") || strings.Contains(file.Path, "..") {
+			return fmt.Errorf(
+				"guest file %q must be an absolute path with no '..' in it, or it would not stay inside the rebuilt filesystem",
+				file.Path,
+			)
+		}
+		if err := commands.InstallFile(ctx, file.Content, mountPoint+file.Path, "0644"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (manager *Manager) writeNetworkEnvironment(
