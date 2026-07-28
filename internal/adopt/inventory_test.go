@@ -179,14 +179,18 @@ func TestIsUUID(t *testing.T) {
 // that drifts reads back as a host that suddenly holds nothing.
 func TestTakeInventoryRunsTheSixEnumerations(t *testing.T) {
 	fake := &fakeCommands{
-		outputs: map[string]string{}, present: map[string]bool{}, failing: map[string]bool{},
+		outputs: map[string]string{}, failing: map[string]bool{},
+		present: map[string]bool{probeDirectory: true, probeVolumeGroup: true},
 	}
 
 	if _, err := takeInventory(t.Context(), fake); err != nil {
 		t.Fatalf("takeInventory: %v", err)
 	}
+	// The two optional subjects are proven present before they are read, so the
+	// probe and its read are one enumeration and both belong in this list.
 	expected := []string{
-		listDirectories, listUnits, listNamespaces, listLinks, listProxies, listVolumes,
+		probeDirectory, listDirectories, listUnits, listNamespaces, listLinks, listProxies,
+		probeVolumeGroup, listVolumes,
 	}
 	if !slices.Equal(fake.issued, expected) {
 		t.Errorf("enumerations:\ngot:\n  %s\nwant:\n  %s",
@@ -198,14 +202,15 @@ func TestTakeInventoryRunsTheSixEnumerations(t *testing.T) {
 // discarded whole, so asking the host more questions buys nothing.
 func TestTakeInventoryStopsAtTheFirstFailure(t *testing.T) {
 	fake := &fakeCommands{
-		outputs: map[string]string{}, present: map[string]bool{},
+		outputs: map[string]string{},
+		present: map[string]bool{probeDirectory: true, probeVolumeGroup: true},
 		failing: map[string]bool{listUnits: true},
 	}
 
 	if _, err := takeInventory(t.Context(), fake); err == nil {
 		t.Fatal("takeInventory succeeded, want the failure reported")
 	}
-	if !slices.Equal(fake.issued, []string{listDirectories, listUnits}) {
+	if !slices.Equal(fake.issued, []string{probeDirectory, listDirectories, listUnits}) {
 		t.Errorf("enumerations = %v, want it to stop at the failure", fake.issued)
 	}
 }
@@ -221,9 +226,15 @@ func TestTakeInventoryStopsAtTheFirstFailure(t *testing.T) {
 func TestAHostWithNoAtlasDirectoryScansCleanAndEmpty(t *testing.T) {
 	host := newFakeHost()
 	host.directories = nil
-	// `ls` on a path that is not there exits non-zero, which for an optional
-	// enumeration is an answer and not a failure.
+	host.present[probeDirectory] = false
+	host.present[probeVolumeGroup] = false
+	// Proven absent, and then never read. `failing` here is the assertion: if
+	// the scan asked anyway, the read would fail and the scan would fail with
+	// it. Absence is established by the probe, never inferred from a non-zero
+	// exit — inferring it is what made an EACCES on a 0700 directory read as
+	// "this host holds no VMs" on every bootstrapped host.
 	host.failing[listDirectories] = true
+	host.failing[listVolumes] = true
 
 	result, err := host.scan(t)
 

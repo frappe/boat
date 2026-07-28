@@ -74,14 +74,18 @@ type inventory struct {
 func takeInventory(ctx context.Context, commands commands) (inventory, error) {
 	reading := &enumeration{ctx: ctx, commands: commands}
 	taken := inventory{
-		directories: parseListing(reading.readOptional("ls -1 {}", paths.VirtualMachinesDirectory)),
+		directories: parseListing(reading.readIfPresent(
+			presence{"sudo test -d {}", []any{paths.VirtualMachinesDirectory}},
+			"sudo ls -1 {}", paths.VirtualMachinesDirectory,
+		)),
 		units: parseUnits(reading.read(
 			"systemctl list-units {} --all --no-legend --plain", virtualMachineUnitPattern,
 		)),
 		namespaces: parseNamespaces(reading.read("ip netns list")),
 		links:      parseLinks(reading.read("ip -o link show")),
 		proxies:    parseProxies(reading.read("ip -6 neigh show proxy")),
-		volumes: parseVolumes(reading.readOptional(
+		volumes: parseVolumes(reading.readIfPresent(
+			presence{"sudo vgs --noheadings -o vg_name {}", []any{volumeGroup}},
 			"sudo lvs --noheadings --nosuffix --units b --separator , "+
 				"-o lv_name,lv_size,pool_lv,origin {}", volumeGroup,
 		)),
@@ -110,7 +114,14 @@ func (enumeration *enumeration) read(template string, parameters ...any) string 
 	return output
 }
 
-// readOptional is read for an enumeration whose subject may legitimately not
+// presence is the probe that decides whether an optional subject is there at
+// all, kept beside the read it guards so the two cannot drift apart.
+type presence struct {
+	template   string
+	parameters []any
+}
+
+// readIfPresent is read for an enumeration whose subject may legitimately not
 // exist yet, where absence is an answer rather than a failure to get one.
 //
 // Two enumerations qualify, and only two: the VM directory and the `atlas`
@@ -120,21 +131,32 @@ func (enumeration *enumeration) read(template string, parameters ...any) string 
 // which also makes `boat bootstrap` impossible, since the daemon that would run
 // it cannot come up on the host it is meant to bootstrap.
 //
-// The honest limit: a non-zero exit cannot distinguish "the volume group is not
-// there" from "lvs is broken", so a broken lvs now reads as an empty inventory
-// rather than a failed scan. That is survivable where a silent drop would not
-// be, because a VM whose unit is present and whose volume is missing does not
-// vanish — it fails the coherence check and is quarantined, which is the state
-// an operator is meant to look at.
+// ABSENCE IS PROVEN, NOT INFERRED FROM A NON-ZERO EXIT, and the difference is
+// the whole of why this function exists in this shape. An earlier version ran
+// the read unchecked and took any failure as "nothing there". That is how the
+// worst bug in this package shipped: the directory listing had no `sudo`, the
+// tree is 0700 and root-owned, the daemon is not root — so on every real host
+// the read failed with EACCES, was recorded as an empty directory list, and
+// every VM the units and volumes named was then quarantined as "no VM
+// directory". A host serving VMs reported that it held none, which is the one
+// answer a control plane must never be handed by accident.
 //
-// Every other enumeration stays fatal. A scan missing one of those reports a
-// host holding fewer VMs than it holds, and that is indistinguishable from a
-// wiped host.
-func (enumeration *enumeration) readOptional(template string, parameters ...any) string {
+// So the probe answers "is it there", the read answers "what is in it", and a
+// read that fails when the probe said yes fails the whole scan like any other.
+//
+// Every other enumeration stays fatal without a probe. A scan missing one of
+// those reports a host holding fewer VMs than it holds, and that is
+// indistinguishable from a wiped host.
+func (enumeration *enumeration) readIfPresent(
+	probe presence, template string, parameters ...any,
+) string {
 	if enumeration.err != nil {
 		return ""
 	}
-	output, err := enumeration.commands.RunUnchecked(enumeration.ctx, template, parameters...)
+	if !enumeration.commands.OK(enumeration.ctx, probe.template, probe.parameters...) {
+		return ""
+	}
+	output, err := enumeration.commands.Run(enumeration.ctx, template, parameters...)
 	if err != nil {
 		enumeration.err = err
 	}

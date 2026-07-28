@@ -143,8 +143,25 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_MARKERS = \
 # also matches a command: `ip netns exec <ns> sh -c '...' ip link show` satisfies
 # any rule written around it. `ip -n` takes the namespace as a flag and can only
 # ever re-execute ip, so the wildcard has nothing to reach.
+#
+# The listing and its presence probe are the entry point of the whole scan, and
+# they need root for a reason worth stating: /var/lib/atlas/virtual-machines is
+# 0700 and root-owned (bootstrap-server.py), so an unprivileged `ls` fails with
+# EACCES on every bootstrapped host. Boat read that failure as "this host holds
+# no VMs" and quarantined every VM its units and volumes named. A host serving
+# VMs reported that it held none — the one answer a control plane must never be
+# handed by accident. The scan now proves absence with `test -d` and treats a
+# failed listing as a failed scan, so both lines are needed and both are fully
+# literal.
+#
+# The wake trap's boot sweep runs the same listing, and was dark the same way:
+# after a reboot nftables is empty and every sleeping VM's unit is suppressed by
+# its own marker, so that sweep is the only thing that re-parks them.
 Cmnd_Alias BOAT_ADOPTION = \
+    /usr/bin/test -d /var/lib/atlas/virtual-machines, \
+    /usr/bin/ls -1 /var/lib/atlas/virtual-machines, \
     /usr/bin/cat /var/lib/atlas/virtual-machines/*/network.env, \
+    /usr/sbin/vgs --noheadings -o vg_name atlas, \
     /usr/sbin/lvs --noheadings --nosuffix --units b --separator \, -o lv_name\,lv_size\,pool_lv\,origin atlas, \
     /usr/sbin/ip -n * -o link show *
 

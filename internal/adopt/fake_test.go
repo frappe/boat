@@ -32,12 +32,17 @@ const (
 
 // The six enumerations, as they render.
 const (
-	listDirectories = "ls -1 /var/lib/atlas/virtual-machines"
-	listUnits       = "systemctl list-units firecracker-vm@* --all --no-legend --plain"
-	listNamespaces  = "ip netns list"
-	listLinks       = "ip -o link show"
-	listProxies     = "ip -6 neigh show proxy"
-	listVolumes     = "sudo lvs --noheadings --nosuffix --units b --separator , " +
+	listDirectories = "sudo ls -1 /var/lib/atlas/virtual-machines"
+	// The two presence probes that decide whether an optional enumeration is
+	// asked at all. They are the difference between "not bootstrapped" and
+	// "could not read", which is the distinction the scan got wrong.
+	probeDirectory   = "sudo test -d /var/lib/atlas/virtual-machines"
+	probeVolumeGroup = "sudo vgs --noheadings -o vg_name atlas"
+	listUnits        = "systemctl list-units firecracker-vm@* --all --no-legend --plain"
+	listNamespaces   = "ip netns list"
+	listLinks        = "ip -o link show"
+	listProxies      = "ip -6 neigh show proxy"
+	listVolumes      = "sudo lvs --noheadings --nosuffix --units b --separator , " +
 		"-o lv_name,lv_size,pool_lv,origin atlas"
 )
 
@@ -111,9 +116,13 @@ func newFakeHost() *fakeHost {
 	return &fakeHost{
 		// Every host carries the pool and the park dummy: they are bootstrap
 		// floor, and a scan that reported them would report them on every host.
-		volumes:      []string{"  pool0,107374182400,,"},
-		links:        []string{"1: lo: <LOOPBACK,UP> mtu 65536", "2: eth0: <BROADCAST,UP> mtu 1500"},
-		present:      map[string]bool{},
+		volumes: []string{"  pool0,107374182400,,"},
+		links:   []string{"1: lo: <LOOPBACK,UP> mtu 65536", "2: eth0: <BROADCAST,UP> mtu 1500"},
+		// A bootstrapped host by default: both optional subjects are there, so
+		// the scan asks for them. The bare-host scenario clears these, which is
+		// the only way an optional enumeration is skipped now — a FAILED read is
+		// a failed scan, not an empty answer.
+		present:      map[string]bool{probeDirectory: true, probeVolumeGroup: true},
 		outputs:      map[string]string{},
 		failing:      map[string]bool{},
 		unstartable:  map[string]bool{},

@@ -165,7 +165,8 @@ func TestScanOnlyEverReadsTheHost(t *testing.T) {
 }
 
 var readOnlyCommands = []string{
-	"ls -1 ",
+	"sudo ls -1 ",
+	"sudo vgs ",
 	"systemctl list-units ",
 	"ip netns list",
 	"ip -o link show",
