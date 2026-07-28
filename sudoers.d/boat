@@ -16,22 +16,82 @@
 #   sudo install -m 0440 -o root -g root sudoers.d/boat /etc/sudoers.d/boat
 #   sudo visudo -cf /etc/sudoers.d/boat
 #
-# Paths below are Ubuntu 26.04 with merged /usr. Adjust per distro:
-#   command -v systemctl test install mkdir rm rmdir dmsetup sh
+# Paths below are Ubuntu with merged /usr, resolved on a real host. Adjust per
+# distro, and resolve rather than guess — sudoers matches the resolved path, so a
+# binary in the other directory is a silent denial:
+#   command -v systemctl test install mkdir rm rmdir dmsetup sh cat touch stat \
+#       chown chmod mknod mount umount mktemp mv grep jq ss ip nft lvs lvcreate \
+#       lvchange lvextend lvremove vgmknodes udevadm blockdev tune2fs e2fsck \
+#       ssh-keygen
 #
 # On wildcards: in a sudoers command PATH a `*` does not match `/`, but in a
-# command ARGUMENT it does. Every `*` here stands for a VM UUID inside a fixed
-# path shape or unit name; the literal text around it is what does the pinning.
-# Boat validates the UUID at the API boundary before any of these are rendered —
-# sudoers is the second line of defence, not the first.
+# command ARGUMENT it does — and it matches SPACES too. sudo joins the user's
+# arguments into one string before matching, so a `*` that spans a space is a `*`
+# that has grown the command a second operand, and no amount of care about the
+# rest of the line undoes that.
 #
-# Scope is WO-0: start, stop, observe. Each later work order adds its own verbs'
-# commands here explicitly. Widening an existing line to cover a new verb is not
-# a smaller change than adding a line; it is an unreviewable one.
+# THE RULE: a `*` is pinned by the literal text that follows it. Where that
+# literal does no work, the field is spelled out character by character instead.
+# Three places the literal provably does no work, all found by probing a real
+# host rather than by reading:
+#
+#   - `firecracker-vm@*.service`. Every unit on the host ends in `.service`, so
+#     the suffix pins nothing: `systemctl stop firecracker-vm@x.service
+#     sshd.service` satisfied it. Combined with the drop-in lines below it was a
+#     path to root, and both families now carry the spelled-out UUID.
+#   - a `*` inside an `sh -c` script. A `#` in the wildcard comments out the whole
+#     literal tail the pattern is anchored on, so the tail matches the pattern and
+#     never reaches the shell: `cd /var/lib/atlas/virtual-machines/x; cmd;
+#     #/jail/...` satisfied the SendCtrlAltDel line. Every `sh -c` line here
+#     therefore has every variable field spelled out.
+#   - a `*` with nothing after it at all, on a command that destroys: `rm -rf` of
+#     a VM tree, `lvremove` of a volume.
+#
+# So the forms are:
+#
+#   `*`           a name with load-bearing literal text after it. The default.
+#   `?`           a field whose length is fixed by construction (the eight hex
+#                 digits of a hostname suffix).
+#   `[0-9a-f]`    the 8-4-4-4-12 UUID, spelled out. A class matches neither a
+#                 space nor a `/`, so the field cannot grow an operand and cannot
+#                 walk out of its directory.
+#   `[0-9A-Za-z]` the six characters mktemp generates, which is what anchors the
+#                 whole rebuild identity block.
+#
+# The spelled-out forms are ugly, and they are ugly on purpose. This file is the
+# privilege boundary; a boundary that is pleasant to read and does not hold is
+# worth less than one that holds.
+#
+# Boat validates the UUID at the API boundary before any of these are rendered —
+# sudoers is the second line of defence, not the first. Where a `*` still stands
+# for a UUID, that first line is what makes it safe, and the comment on the line
+# says what the second line is still buying.
+#
+# Scope is every verb internal/vm and internal/park render today: start, stop,
+# observe, pause, resume, sleep, wake, resize, rebuild, terminate, adopt, and the
+# wake trap. Each later work order adds its own verbs' commands here explicitly.
+# Widening an existing line to cover a new verb is not a smaller change than
+# adding a line; it is an unreviewable one.
+#
+# Every line below was checked against a real host with `sudo -u boat sudo -n -l
+# <the exact rendered command>`, not by reading. Three separate bugs in this file
+# — a `-f` where the code called `-S`, `/usr/sbin/ss` where the binary is in
+# /usr/bin, and a Firecracker API line whose quoting had drifted — each shipped
+# past a fully green test suite, because the tests stub above the layer that
+# renders these strings. Reading is not verification here.
 
 # --- Lifecycle: the per-VM unit, and only the per-VM unit -------------------
-# Instance-scoped to firecracker-vm@*.service, so this grants nothing over sshd,
-# over boat.service itself, or over any other unit on the host.
+# Instance-scoped to one firecracker-vm@ instance, so this grants nothing over
+# sshd, over boat.service itself, or over any other unit on the host.
+#
+# The instance is the spelled-out UUID and not `firecracker-vm@*.service`, and
+# that is not fussiness. `.service` pins nothing, because every unit name ends in
+# it: `systemctl stop firecracker-vm@x.service sshd.service` satisfied the
+# wildcard form, and so did `systemctl start firecracker-vm@x.service
+# <anything>.service`. A daemon that could render one argument containing a space
+# — which is all it takes, since sudo joins the arguments before matching — could
+# stop sshd or start any unit on the host through this alias. The spelled-out
+# form cannot match a space, so the instance is exactly one VM's.
 #
 # Only the commands the Go actually renders WITH `sudo`. `is-active --quiet` and
 # `systemctl show` are rendered unprivileged, so grants for them were dead — and
@@ -44,16 +104,17 @@
 # port carries the Python's `sudo` prefix through and granting a read that
 # changes nothing costs nothing.
 Cmnd_Alias BOAT_VIRTUAL_MACHINE_UNIT = \
-    /usr/bin/systemctl start firecracker-vm@*.service, \
-    /usr/bin/systemctl stop firecracker-vm@*.service, \
-    /usr/bin/systemctl reset-failed firecracker-vm@*.service, \
-    /usr/bin/systemctl is-active firecracker-vm@*.service
+    /usr/bin/systemctl start firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service, \
+    /usr/bin/systemctl stop firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service, \
+    /usr/bin/systemctl reset-failed firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service, \
+    /usr/bin/systemctl is-active firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service
 
 # --- Observation: the on-disk markers --------------------------------------
 # The VM tree is 0700-owned by the per-VM uid, so even a stat needs root. All
-# three are `test`: they return a boolean and change nothing, which is why a
+# four are `test`: they return a boolean and change nothing, which is why a
 # trailing wildcard on the directory check is acceptable here and would not be
 # on a command that writes.
+#
 # The socket check is `test -S`, not `-f`. sudo matches arguments literally, so
 # the flag is part of the grant: a `-f` line does not authorize the `-S` call the
 # code makes, and `-f` is false for a socket in any case. The two together
@@ -95,18 +156,21 @@ Cmnd_Alias BOAT_HOST_CAPACITY = \
     /usr/sbin/lvs --noheadings -o data_percent atlas/pool0
 
 # --- Liveness: is a Firecracker actually answering? ------------------------
-# A socket inode outlives the process that bound it, so existence proves
-# nothing and only a call through the socket separates live from stale. This is
-# ss lives in /usr/bin on Ubuntu 24.04, not /usr/sbin. sudoers matches the
-# resolved path, so the wrong directory is a silent denial — caught by probing
-# every grant with `sudo -l` on a real host rather than by reading the file.
-#
-# a GET of the API root and is deliberately a separate, fully literal line: the
+# A socket inode outlives the process that bound it, so existence proves nothing
+# and only a call through the socket separates live from stale. The probe is a
+# GET of the API root, and it is deliberately a separate, fully literal line: the
 # SendCtrlAltDel grant below must not be widened to cover it, because widening
 # the one line that can halt a guest is how a read-only probe acquires the power
-# to stop VMs.
+# to stop VMs. It is NOT `--fail`, which is the one flag the state-changing call
+# wants and this one must not have — any HTTP answer, a 404 included, proves a
+# live process, and reading a 404 as "not running" is how a controller decides a
+# live VM is down.
+#
+# `ss` lives in /usr/bin on Ubuntu, not /usr/sbin, and sudoers matches the
+# resolved path — so the wrong directory here was a silent denial. It was caught
+# by probing every grant with `sudo -l` on a real host, and by nothing else.
 Cmnd_Alias BOAT_FIRECRACKER_LIVENESS = \
-    /usr/bin/sh -c cd\ /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run\ &&\ curl\ --silent\ --show-error\ --max-time\ 2\ --unix-socket\ firecracker.socket\ http\://localhost/, \
+    /usr/bin/sh -c cd\ /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/run\ &&\ curl\ --silent\ --show-error\ --max-time\ 2\ --unix-socket\ firecracker.socket\ http\://localhost/, \
     /usr/bin/ss --no-header --unix --listening --processes src /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run/firecracker.socket
 
 # --- Bounded stop: the TimeoutStopSec drop-in ------------------------------
@@ -116,21 +180,34 @@ Cmnd_Alias BOAT_FIRECRACKER_LIVENESS = \
 # a /128). TimeoutStopSec is a load-time property, so the bound arrives as a
 # runtime drop-in under /run and is removed again after the stop.
 #
-# CANNOT BE PINNED TIGHTLY, and the residual risk is named rather than hidden:
-# the `install` line's SOURCE is a wildcard, because it is a spool file the
-# daemon just wrote. Since the daemon controls that path (and could point it at a
-# symlink), this line lets `boat` copy any root-readable file to one known
-# location with mode 0644 — i.e. make it readable to itself. It is bounded by the
-# pinned mode, the single pinned destination filename, a tmpfs path that
-# evaporates on reboot, and the daemon deleting the file immediately after the
-# stop. The tighter fix is for the port to stop using install(1) here and render
-# the two-line drop-in through a pinned writer instead; that is a change to
-# internal/run, recorded here rather than papered over.
+# The drop-in path carries the spelled-out UUID for the reason the lifecycle
+# alias above gives: `firecracker-vm@*.service.d` also matched `sshd.service.d`,
+# and a drop-in the daemon can write for an arbitrary unit, followed by the
+# daemon-reload below and a start, is root.
+#
+# CANNOT BE PINNED TIGHTLY, and the residual risk is named rather than hidden,
+# because this is the one line in the file that is still root: the `install`
+# SOURCE is a wildcard. run.InstallFile spools content to a real temp file (uutils
+# install(1) cannot read /dev/stdin), and os.CreateTemp("", "boat-install-")
+# produces /tmp/boat-install-<random> — boat.service sets no TMPDIR, so the prefix
+# is pinnable and is pinned, but the random tail is a variable-length decimal and
+# no glob expresses "one or more digits". A `*` there matches a space, so the
+# wildcard can carry install's own `-t <directory>` flag and copy the file the
+# daemon just wrote into ANY directory: /etc/sudoers.d, a unit drop-in, root's
+# .ssh. That is the whole boundary, through one hole, and it is true of every
+# `install` line in this file — it is argued once, here.
+#
+# The fix is a Go change and is deliberately not attempted in sudoers: spool to a
+# SINGLE fixed path instead of a random one — /var/lib/boat/spool/install, inside
+# the StateDirectory systemd already creates 0700 for this service — so that every
+# `install` line in this file becomes fully literal. One filename, no wildcard, no
+# hole. That is a few lines in internal/run/install.go, recorded here rather than
+# papered over, and it is the highest-value change this file is waiting on.
 Cmnd_Alias BOAT_VIRTUAL_MACHINE_STOP_TIMEOUT = \
-    /usr/bin/mkdir -p /run/systemd/system/firecracker-vm@*.service.d, \
-    /usr/bin/install -m 0644 * /run/systemd/system/firecracker-vm@*.service.d/atlas-migration-faststop.conf, \
-    /usr/bin/rm -f /run/systemd/system/firecracker-vm@*.service.d/atlas-migration-faststop.conf, \
-    /usr/bin/rmdir /run/systemd/system/firecracker-vm@*.service.d, \
+    /usr/bin/mkdir -p /run/systemd/system/firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service.d, \
+    /usr/bin/install -m 0644 /tmp/boat-install-* /run/systemd/system/firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service.d/atlas-migration-faststop.conf, \
+    /usr/bin/rm -f /run/systemd/system/firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service.d/atlas-migration-faststop.conf, \
+    /usr/bin/rmdir /run/systemd/system/firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service.d, \
     /usr/bin/systemctl daemon-reload
 
 # --- Clone convergence after a stop ----------------------------------------
@@ -150,11 +227,20 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_CLONE = \
 # and that directory is 0700-owned by the per-VM uid, so the cd must be root.
 # The cd and the curl are therefore one shell line by construction.
 #
-# It is pinned to the ONE call WO-0 makes: SendCtrlAltDel, the cooperative
-# power-off that lets the guest sync before the unit stops. Method, path,
-# headers and body are all literal here. A trailing `*` instead would have been
-# far easier and would have been a root shell — `*` matches spaces and
+# It is pinned to the ONE call the stop path makes: SendCtrlAltDel, the
+# cooperative power-off that lets the guest sync before the unit stops. Method,
+# path, headers and body are all literal here. A trailing `*` instead would have
+# been far easier and would have been a root shell — `*` matches spaces and
 # semicolons in an argument, so anything appended to that pipeline would run.
+#
+# The UUID is spelled out for a subtler version of the same thing, and it took a
+# real host to see it. The two path fields used to be `*`, on the reasoning that
+# the literal tail (`/jail/firecracker/`, `/root/run && curl …`) did the pinning.
+# It does not, because this is a SHELL: a `#` inside the wildcard comments the
+# tail out, so the pattern still matches and the shell never runs it.
+# `cd /var/lib/atlas/virtual-machines/x; chmod u+s /bin/sh; #/jail/…` satisfied
+# this line. Inside an `sh -c`, a literal tail is not a pin, and every `sh -c`
+# line in this file now spells its variable fields out.
 #
 # Two consequences, both intended:
 #   - Later verbs (pause, resume, snapshot) each add their OWN pinned line for
@@ -164,8 +250,349 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_CLONE = \
 #     the same commit. A mismatch is a denied sudo, which fails the stop loudly —
 #     the right failure mode, but only if someone reads the error.
 Cmnd_Alias BOAT_FIRECRACKER_API = \
-    /usr/bin/sh -c cd\ /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run\ &&\ curl\ --fail\ --silent\ --show-error\ --unix-socket\ firecracker.socket\ -X\ PUT\ 'http\://localhost/actions'\ -H\ 'Content-Type\:\ application/json'\ -d\ '{"action_type"\:\ "SendCtrlAltDel"}'
+    /usr/bin/sh -c cd\ /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/run\ &&\ curl\ --fail\ --silent\ --show-error\ --unix-socket\ firecracker.socket\ -X\ PUT\ 'http\://localhost/actions'\ -H\ 'Content-Type\:\ application/json'\ -d\ '{"action_type"\:\ "SendCtrlAltDel"}'
+
+# --- The Firecracker API: freezing and unfreezing the guest ----------------
+# Pause and resume are the same call to the same path with a different body, and
+# they get their own lines rather than a widened one above. The rule the file was
+# written under and is still written under: the SendCtrlAltDel line can halt a
+# guest, and a `*` on its body — or on its method, or its path — would hand that
+# power to every other caller of the socket. `-X PATCH` and `/vm` are as literal
+# here as `-X PUT` and `/actions` are there.
+#
+# The UUID is spelled out in both path fields, as it is on every `sh -c` line
+# here, because inside a shell a literal tail is not a pin — see the block above.
+#
+# The two bodies are byte-coupled to pauseStateBody and resumeStateBody in
+# internal/vm/pause.go, spacing included. internal/run's FirecrackerAPI renders
+# the line and internal/run.Quote decides the quoting, so a change to either is a
+# change to these two lines in the same commit. The failure mode of a drift is a
+# denied sudo, which fails the operation loudly — the right direction, but only
+# because pause and resume are checked calls. The stop path's equivalent drift
+# was silent for months, because a refused SendCtrlAltDel reads as "the guest
+# declined to shut down".
+Cmnd_Alias BOAT_FIRECRACKER_API_GUEST_STATE = \
+    /usr/bin/sh -c cd\ /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/run\ &&\ curl\ --fail\ --silent\ --show-error\ --unix-socket\ firecracker.socket\ -X\ PATCH\ 'http\://localhost/vm'\ -H\ 'Content-Type\:\ application/json'\ -d\ '{"state"\:\ "Paused"}', \
+    /usr/bin/sh -c cd\ /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/run\ &&\ curl\ --fail\ --silent\ --show-error\ --unix-socket\ firecracker.socket\ -X\ PATCH\ 'http\://localhost/vm'\ -H\ 'Content-Type\:\ application/json'\ -d\ '{"state"\:\ "Resumed"}'
+
+# --- The Firecracker API: capturing the guest's RAM ------------------------
+# The one call that writes a memory snapshot, and the reason sleep frees RAM at
+# all. Its own line for the same reason pause has one: the body names the files
+# Firecracker will write, and a wildcard body would let this socket be told to
+# write them anywhere the jailed process can reach.
+#
+# The two paths in the body are JAIL-RELATIVE, which is not a shortening: the
+# jailed Firecracker resolves them after its chroot, exactly as firecracker.json
+# names rootfs.ext4 and vmlinux. Pinning them literally is therefore pinning them
+# to <jail>/snapshot, which is the directory the line above creates 0700 and
+# chowns to the VM's own uid.
+Cmnd_Alias BOAT_FIRECRACKER_API_SNAPSHOT = \
+    /usr/bin/sh -c cd\ /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/run\ &&\ curl\ --fail\ --silent\ --show-error\ --unix-socket\ firecracker.socket\ -X\ PUT\ 'http\://localhost/snapshot/create'\ -H\ 'Content-Type\:\ application/json'\ -d\ '{"snapshot_type"\:\ "Full"\,\ "snapshot_path"\:\ "snapshot/vmstate.bin"\,\ "mem_file_path"\:\ "snapshot/mem.bin"}'
+
+# --- Sleep: the memory snapshot on disk, and the marker --------------------
+# Sleep is the verb that gives the host a VM's RAM back. Everything here is
+# inside one VM's own tree, which is 0700-owned by the per-VM uid, so even the
+# reads need root.
+#
+# `grep -q snapshot/READY <launcher>` is a preflight, not a search: a launcher
+# generated before memory snapshots existed always passes --config-file, and a
+# marker written for one of those strands the next start. `jq -r` reads the
+# guest's RAM size out of firecracker.json so the free-space check has a number.
+# `test -s` and not `-f` on the pair, because the marker asserts a COMPLETE
+# snapshot and an empty file is the failure this exists to catch — the same flag
+# lesson the socket check above already paid for once.
+#
+# The `chown` uid is spelled out as six digits rather than wildcarded, and that is
+# the load-bearing decision in this block. `chown * <path>` is not "chown to a
+# uid": a `*` matches spaces, so it also matches `-R root /etc`, and this line
+# would become recursive chown of anything. Atlas derives a VM's uid as
+# UID_BASE 200000 + hash % 60000 (atlas/atlas/networking.py), so it is always six
+# digits. RESIDUAL RISK, named because it is a coupling and not a proof: a uid
+# outside that range is DENIED, and the sleep fails loudly rather than this line
+# quietly widening. That is the failure we want, but somebody has to read it.
+Cmnd_Alias BOAT_VIRTUAL_MACHINE_SLEEP = \
+    /usr/bin/grep -q snapshot/READY /var/lib/atlas/virtual-machines/*/jailer-launch.sh, \
+    /usr/bin/jq -r ."machine-config".mem_size_mib /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json, \
+    /usr/bin/rm -rf /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot, \
+    /usr/bin/install -d -m 0700 /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot, \
+    /usr/bin/chown [0-9][0-9][0-9][0-9][0-9][0-9]\:[0-9][0-9][0-9][0-9][0-9][0-9] /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot, \
+    /usr/bin/test -s /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot/vmstate.bin, \
+    /usr/bin/test -s /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot/mem.bin, \
+    /usr/bin/stat -c %s /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot/mem.bin, \
+    /usr/bin/touch /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot/READY, \
+    /usr/bin/rm -f /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot/READY, \
+    /usr/bin/touch /var/lib/atlas/virtual-machines/*/sleeping, \
+    /usr/bin/rm -f /var/lib/atlas/virtual-machines/*/sleeping
+
+# --- Parking: keeping a sleeping VM's address reachable --------------------
+# A sleep runs the unit's ExecStopPost, which removes the proxy-NDP entry, the
+# route, the namespace, the veth and the tap — that total teardown is what frees
+# the RAM. These lines put back the least that lets one inbound SYN be noticed
+# with no guest running: the host keeps answering NDP for the /128, and the /128
+# routes out a shared always-up dummy so the packet is FORWARDED (and therefore
+# seen by the forward chain) instead of being input-delivered to a host with
+# nothing listening.
+#
+# `ip -6 route`, and never `ip netns exec`. The rule at the top of this file
+# applies to every ip line here for the same reason it applies to the adoption
+# one: `ip netns exec <ns> <cmd>` runs <cmd> as root with full access to the real
+# filesystem, and no sudoers pattern can constrain it.
+#
+# RESIDUAL RISK: the address and the uplink device are wildcards — they are read
+# from a VM's network.env and from the host's default route, not derived from a
+# UUID, so there is no shape to pin them to. What bounds them is `ip` itself: the
+# subcommand is fixed and positional, so the worst a wildcard buys is extra
+# neighbour or route attributes on a command that is already installing a
+# neighbour entry and a route. It cannot become another ip subcommand, and the
+# route lines end in a literal `dev atlas-park0`.
+Cmnd_Alias BOAT_PARK_ROUTING = \
+    /usr/sbin/ip link add atlas-park0 type dummy, \
+    /usr/sbin/ip link set atlas-park0 up, \
+    /usr/sbin/ip -6 neigh replace proxy * dev *, \
+    /usr/sbin/ip -6 route replace */128 dev atlas-park0, \
+    /usr/sbin/ip -6 route del */128 dev atlas-park0
+
+# --- The wake trap: the nft counter and the rule that feeds it -------------
+# Without these the trap polls nothing and wakes nothing, silently, forever. The
+# poll runs `nft -j list counters` about once a second for the life of the host —
+# a denial here does not fail an operation, it just means no sleeping VM on this
+# host ever comes back from traffic. That is the failure this block exists to
+# stop, and it is invisible from the control plane.
+#
+# The chain clause is one argument, spaces and all, which is why its spaces are
+# escaped: internal/run.Quote wraps it in single quotes and internal/run.Split
+# gives it back as a single argv entry. `policy accept` is what makes the trap
+# TCP-only — a packet the wake rule does not match is forwarded out the dummy and
+# dies there with nothing woken.
+#
+# RESIDUAL RISK, and this is the loosest block in the file: nft parses `;` as a
+# command separator, so every `*` here is an nft injection point. A compromised
+# daemon could reach the whole ruleset through the address hole in the rule line,
+# through a counter name, or through a rule handle. What bounds it is that nft has
+# no form that executes a command and no form that touches a file outside `-f`:
+# the blast radius is the host's nftables ruleset — which includes the per-VM
+# public firewall, so this is not nothing — and it stops there. It is not pinned
+# further because the address is a VM's own /128 read out of its network.env and
+# has no fixed length to spell out. The tighter fix is for internal/park to
+# validate the address before rendering it, the way internal/paths.IsUUID already
+# validates a UUID; that is a change to internal/park, recorded here rather than
+# papered over.
+Cmnd_Alias BOAT_WAKE_TRAP = \
+    /usr/sbin/nft list table inet atlas, \
+    /usr/sbin/nft add table inet atlas, \
+    /usr/sbin/nft list chain inet atlas forward, \
+    /usr/sbin/nft -a list chain inet atlas forward, \
+    /usr/sbin/nft add chain inet atlas forward {\ type\ filter\ hook\ forward\ priority\ filter;\ policy\ accept;\ }, \
+    /usr/sbin/nft -j list counters table inet atlas, \
+    /usr/sbin/nft list counter inet atlas wake_*, \
+    /usr/sbin/nft add counter inet atlas wake_*, \
+    /usr/sbin/nft delete counter inet atlas wake_*, \
+    /usr/sbin/nft add rule inet atlas forward ip6 daddr * tcp flags syn / fin\,syn\,rst\,ack counter name wake_* drop, \
+    /usr/sbin/nft delete rule inet atlas forward handle [0-9]*
+
+# --- Volumes: the thin LVs a VM's disks are ---------------------------------
+# Resize, rebuild and terminate are the three verbs that reach past the unit to
+# the VM's LVM volumes. Naming is derived and never stored — atlas-vm-<uuid> is
+# the root disk, atlas-data-<uuid> its peer — so a host that lost its database
+# still knows which volume belongs to which VM, and that derivation is what these
+# lines pin to.
+#
+# `lvs` is read-only and is allowed across the whole `atlas` group, because a
+# rebuild's origin can be a base image or a snapshot LV and neither is named after
+# the VM. Everything that WRITES is pinned to the two per-VM prefixes, so nothing
+# here can reach pool0 or a base image — the shared state every VM on the host
+# depends on. -K on lvchange is not optional: every per-VM disk is a thin snapshot
+# and carries the activation-skip flag.
+#
+# RESIDUAL RISK: the trailing wildcards on lvcreate's `-n`, on lvextend and on
+# blockdev could carry extra flags to those tools (a bigger `-L`, a different
+# `--type`). Each of them takes a single volume operand and none of them removes
+# anything, so the reachable damage is a wrongly sized or wrongly typed volume in
+# a group this daemon may already create volumes in. Removal is the operation
+# that cannot be undone, and it is in its own alias below with no wildcard at all.
+Cmnd_Alias BOAT_VIRTUAL_MACHINE_VOLUMES = \
+    /usr/sbin/lvs --noheadings atlas/*, \
+    /usr/sbin/blockdev --getsize64 /dev/atlas/atlas-vm-*, \
+    /usr/sbin/blockdev --getsize64 /dev/atlas/atlas-data-*, \
+    /usr/sbin/lvcreate -s atlas/* -n atlas-vm-*, \
+    /usr/sbin/lvcreate -s atlas/* -n atlas-data-*, \
+    /usr/sbin/lvchange -ay -K atlas/atlas-vm-*, \
+    /usr/sbin/lvchange -ay -K atlas/atlas-data-*, \
+    /usr/sbin/lvextend -r -L [0-9]*G /dev/atlas/atlas-vm-*, \
+    /usr/sbin/lvextend -r -L [0-9]*G /dev/atlas/atlas-data-*, \
+    /usr/sbin/lvextend -L [0-9]*G /dev/atlas/atlas-data-*, \
+    /usr/sbin/vgmknodes atlas, \
+    /usr/bin/udevadm settle
+
+# --- Volume removal: the two lines that cannot be undone --------------------
+# These two lines END with the UUID, with no literal text after it to do any
+# pinning at all — the third of the three cases the header names. A `*` in a
+# sudoers argument matches spaces, so `atlas/atlas-vm-*` also matches
+# `atlas/atlas-vm-x atlas/pool0` — one wildcard away from destroying every VM on
+# the host. A character class matches neither a space nor a `/`, so these two
+# lines can name exactly one volume and exactly one shape of volume.
+#
+# internal/vm/volume.go refuses to remove pool0 or an atlas-image-* volume before
+# it renders anything. This is the second line of defence for when that check is
+# wrong.
+Cmnd_Alias BOAT_VIRTUAL_MACHINE_VOLUME_REMOVE = \
+    /usr/sbin/lvremove -f atlas/atlas-vm-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f], \
+    /usr/sbin/lvremove -f atlas/atlas-data-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
+
+# --- Filesystems: the ext4 on the volume, not the volume --------------------
+# A copy-on-write snapshot inherits its origin's filesystem UUID, and two mounted
+# filesystems claiming one UUID is a host-side blkid that lies — so a rebuild
+# rerolls it. The LABEL is pinned and is kept rather than rerolled, because the
+# guest mounts its data disk by label and the fstab line the identity injection
+# writes says LABEL=atlas-data. e2fsck is unchecked in the code, like the Python:
+# a restored data filesystem that needs a repair gets one, and "I fixed something"
+# is not a failed rebuild.
+Cmnd_Alias BOAT_VIRTUAL_MACHINE_FILESYSTEM = \
+    /usr/sbin/tune2fs -U random -L atlas-root /dev/atlas/atlas-vm-*, \
+    /usr/sbin/tune2fs -U random -L atlas-data /dev/atlas/atlas-data-*, \
+    /usr/sbin/e2fsck -fy /dev/atlas/atlas-data-*
+
+# --- Jail nodes: how a volume reaches the jailed Firecracker ---------------
+# The jailed Firecracker opens its disks as block-special nodes inside its own
+# chroot, and access there is pure DAC — hence the chown to the VM's own uid and
+# the 0660. A rebuild gives the VM a new volume with a new device number, so the
+# node is always removed and re-made rather than reused; a surviving node points
+# at a device that is gone.
+#
+# The uid is spelled out for the reason the sleep block gives, and the same
+# residual risk applies. RESIDUAL RISK on the device numbers: they come from
+# `lsblk -ndo MAJ:MIN` and are unconstrained beyond starting with a digit, so a
+# bug that read the wrong numbers would expose the wrong block device — any block
+# device on the host — to that VM. No sudoers pattern can fix that, because a
+# major and a minor genuinely are arbitrary numbers; what is pinned is the one
+# thing that can be, which is where the node lands. The safety of the node is
+# therefore internal/vm/volume.go's parse of lsblk, not this line.
+Cmnd_Alias BOAT_VIRTUAL_MACHINE_JAIL_NODES = \
+    /usr/bin/rm -f /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/rootfs.ext4, \
+    /usr/bin/rm -f /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/data.ext4, \
+    /usr/bin/mknod /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/rootfs.ext4 b [0-9]* [0-9]*, \
+    /usr/bin/mknod /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/data.ext4 b [0-9]* [0-9]*, \
+    /usr/bin/chown [0-9][0-9][0-9][0-9][0-9][0-9]\:[0-9][0-9][0-9][0-9][0-9][0-9] /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/rootfs.ext4, \
+    /usr/bin/chown [0-9][0-9][0-9][0-9][0-9][0-9]\:[0-9][0-9][0-9][0-9][0-9][0-9] /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/data.ext4, \
+    /usr/bin/chmod 0660 /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/rootfs.ext4, \
+    /usr/bin/chmod 0660 /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/data.ext4
+
+# --- Resize: the machine config and the jailer launcher --------------------
+# Two files, edited in place and swapped atomically. jq touches only vcpu_count
+# and mem_size_mib, so drives and network interfaces survive verbatim; the
+# launcher rewrite touches only the --cgroup lines. Both write a `.new` beside the
+# original, copy the ORIGINAL's ownership onto it, and mv it over — the jailed
+# Firecracker runs as the per-VM uid and reads its own config after the chroot, so
+# a root-owned replacement is a VM that cannot start.
+#
+# The `chown --reference=` lines are pinned on BOTH paths: the reference file and
+# the target are the same fixed shape, and the target's literal `.new` suffix is
+# what stops the wildcard reaching a file this verb does not own.
+#
+# The jq filter is one argument containing spaces, so its spaces are escaped the
+# way the shell lines' are. RESIDUAL RISK: `--argjson vcpus *` and `--argjson mem
+# *` are numeric holes, and a `*` matches spaces, so in principle a value could
+# carry another jq flag — `-f`, which reads the program from a file. Both values
+# are Go ints formatted with %d by internal/run.Substitute, so they cannot contain
+# a space in the first place; the wildcard is the shape of the pattern, not of the
+# rendering. Bounded further by the pinned filter and the pinned config path that
+# must both still follow.
+Cmnd_Alias BOAT_VIRTUAL_MACHINE_RESIZE = \
+    /usr/bin/test -f /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json, \
+    /usr/bin/jq --argjson vcpus [0-9]* --argjson mem [0-9]* ."machine-config".vcpu_count\ \=\ $vcpus\ |\ ."machine-config".mem_size_mib\ \=\ $mem /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json, \
+    /usr/bin/cat /var/lib/atlas/virtual-machines/*/jailer-launch.sh, \
+    /usr/bin/install -m 0644 /tmp/boat-install-* /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json.new, \
+    /usr/bin/install -m 0755 /tmp/boat-install-* /var/lib/atlas/virtual-machines/*/jailer-launch.sh.new, \
+    /usr/bin/chown --reference=/var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json.new, \
+    /usr/bin/chown --reference=/var/lib/atlas/virtual-machines/*/jailer-launch.sh /var/lib/atlas/virtual-machines/*/jailer-launch.sh.new, \
+    /usr/bin/mv /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json.new /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json, \
+    /usr/bin/mv /var/lib/atlas/virtual-machines/*/jailer-launch.sh.new /var/lib/atlas/virtual-machines/*/jailer-launch.sh
+
+# --- Rebuild: writing a VM's identity into a fresh rootfs ------------------
+# A rebuild lays down a new root filesystem from an image or a snapshot, and then
+# has to make it THIS VM's rather than the source's: hostname, machine-id,
+# authorized_keys, addresses, host keys, the data-disk fstab line. That happens
+# with the disk mounted on the host, because the guest is not running — the one
+# moment the host may mount a VM's root filesystem at all.
+#
+# EVERY path in this block is anchored on a mount point mktemp made, and the six
+# characters mktemp generates are spelled out as [0-9A-Za-z] rather than
+# wildcarded. This is the block where that mattered most, and it is worth being
+# explicit about why. With a `*` or a `?` there, two things become true at once:
+#
+#   - `/tmp/atlas-mount-*/root/.ssh/authorized_keys` also matches
+#     `/tmp/atlas-mount-x/../../root/.ssh/authorized_keys`, because a wildcard
+#     matches `/` and `..` — so this block would hand out root's authorized_keys;
+#   - the two `sh -c tee` lines would become a root shell, because a wildcard
+#     matches `;` and a space, and the shell script's stdin is content this daemon
+#     already controls. A trailing `*` on an `sh -c` line is arbitrary root
+#     execution, and a `?` on one is arbitrary root execution six characters at a
+#     time.
+#
+# A character class matches neither, so the mount point can only ever be a
+# directory mktemp made from the one pinned template. The `tee -a` form is there
+# because the redirection makes it a shell line; the path is substituted with the
+# same quoting every other command's parameters get, so only the literal template
+# is ever shell.
+#
+# Host keys are PRESERVED, not rotated: they are the VM's SSH identity and
+# changing them on every rebuild looks exactly like an attack. The rm/ssh-keygen
+# lines are the one exception — a disk with NO keys at all, where sshd would not
+# start. Inherited rsa and ecdsa keys go because a snapshot source may carry them
+# and keeping them would let the new VM answer with the source VM's identity.
+#
+# RESIDUAL RISK: `mkdir -p <mount>/*` is the data disk's mount point, and its name
+# comes from Atlas rather than from a UUID. mkdir -p creates intermediate
+# directories, so a traversal through that wildcard could create a directory
+# anywhere on the host. Creating an empty directory is the whole of what mkdir can
+# do, and every line that WRITES a file in this block has its destination pinned,
+# so the created directory is not reachable by any other grant here.
+Cmnd_Alias BOAT_VIRTUAL_MACHINE_IDENTITY = \
+    /usr/bin/mktemp -d /tmp/atlas-mount-XXXXXX, \
+    /usr/bin/mount /dev/atlas/atlas-vm-* /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z], \
+    /usr/bin/umount /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z], \
+    /usr/bin/rmdir /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z], \
+    /usr/bin/install -d -m 0700 /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/root/.ssh, \
+    /usr/bin/install -d -m 0755 /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh, \
+    /usr/bin/install -m 0600 /tmp/boat-install-* /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/root/.ssh/authorized_keys, \
+    /usr/bin/install -m 0644 /tmp/boat-install-* /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/atlas-network.env, \
+    /usr/bin/install -m 0644 /tmp/boat-install-* /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/hostname, \
+    /usr/bin/install -m 0444 /tmp/boat-install-* /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/machine-id, \
+    /usr/bin/test -f /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh/ssh_host_ed25519_key, \
+    /usr/bin/rm -f /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh/ssh_host_rsa_key /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh/ssh_host_rsa_key.pub, \
+    /usr/bin/rm -f /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh/ssh_host_ecdsa_key /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh/ssh_host_ecdsa_key.pub, \
+    /usr/bin/rm -f /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh/ssh_host_ed25519_key /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh/ssh_host_ed25519_key.pub, \
+    /usr/bin/ssh-keygen -q -t ed25519 -f /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh/ssh_host_ed25519_key -N\ \ -C root@atlas-????????, \
+    /usr/bin/grep -q LABEL=atlas-data /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/fstab, \
+    /usr/bin/mkdir -p /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/*, \
+    /usr/bin/sh -c tee\ -a\ /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/hosts\ >/dev/null, \
+    /usr/bin/sh -c tee\ -a\ /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/fstab\ >/dev/null
+
+# --- Terminate: taking the VM tree off the host ----------------------------
+# `disable --now` rather than `stop`, because the unit must not come back on the
+# next boot, and it is the stop inside it that runs ExecStopPost and unwinds the
+# netns, veth and proxy-NDP.
+#
+# The rm -rf is the single most dangerous line in this file, and it is the second
+# of the two that spell the UUID out character by character. `rm -rf
+# /var/lib/atlas/virtual-machines/*` also matches
+# `/var/lib/atlas/virtual-machines/x /etc` — a `*` matches spaces, so one wildcard
+# turns a per-VM delete into an arbitrary one — and it also matches
+# `.../../../..`, because a `*` matches `/` and `.` too. `?` is not enough either:
+# it fixes the length at 36 but still matches a space, and a 36-character field
+# has room for ` /root`. A character class matches neither a space nor a `/`, so
+# this line can name exactly one directory, and only a directory whose name is the
+# shape internal/paths.IsUUID accepts.
+Cmnd_Alias BOAT_VIRTUAL_MACHINE_TERMINATE = \
+    /usr/bin/systemctl disable --now firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service, \
+    /usr/bin/rm -rf /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
 
 boat ALL=(root) NOPASSWD: BOAT_VIRTUAL_MACHINE_UNIT, BOAT_VIRTUAL_MACHINE_MARKERS, \
     BOAT_VIRTUAL_MACHINE_STOP_TIMEOUT, BOAT_VIRTUAL_MACHINE_CLONE, BOAT_FIRECRACKER_API, \
-    BOAT_ADOPTION, BOAT_HOST_CAPACITY, BOAT_FIRECRACKER_LIVENESS
+    BOAT_ADOPTION, BOAT_HOST_CAPACITY, BOAT_FIRECRACKER_LIVENESS, \
+    BOAT_FIRECRACKER_API_GUEST_STATE, BOAT_FIRECRACKER_API_SNAPSHOT, \
+    BOAT_VIRTUAL_MACHINE_SLEEP, BOAT_PARK_ROUTING, BOAT_WAKE_TRAP, \
+    BOAT_VIRTUAL_MACHINE_VOLUMES, BOAT_VIRTUAL_MACHINE_VOLUME_REMOVE, \
+    BOAT_VIRTUAL_MACHINE_FILESYSTEM, BOAT_VIRTUAL_MACHINE_JAIL_NODES, \
+    BOAT_VIRTUAL_MACHINE_RESIZE, BOAT_VIRTUAL_MACHINE_IDENTITY, \
+    BOAT_VIRTUAL_MACHINE_TERMINATE
