@@ -28,8 +28,9 @@ const (
 	// RAM and an inbound SYN wakes it. Distinct from Stopped, which stays stopped.
 	StatusSleeping VirtualMachineStatus = "Sleeping"
 	// StatusPaused means the guest is frozen through the Firecracker API while its
-	// unit stays active. The unit alone cannot tell this from Running, so nothing
-	// reports it until the pause verb lands and the API state is read.
+	// unit stays active. The unit alone cannot tell this from Running, so it is
+	// read from the Firecracker that is answering on the VM's API socket and from
+	// nowhere else.
 	StatusPaused VirtualMachineStatus = "Paused"
 	// StatusFailed means the unit reached its failed state — a distinct fact from
 	// Stopped, which is a VM that was asked to stop and did.
@@ -52,6 +53,12 @@ type VirtualMachine struct {
 	UnitSubState      string               `json:"unit_sub_state"`
 	HasMemorySnapshot bool                 `json:"has_memory_snapshot"`
 	Sleeping          bool                 `json:"sleeping"`
+	// FirecrackerPID is the process that answered on this VM's API socket, or 0
+	// when nothing did or when its holder could not be named. A diagnostic — it is
+	// what lets an operator strace the right process — and nothing decides
+	// anything from it: the socket answering is the liveness claim, and a pid on
+	// its own would prove nothing (see internal/fcattach).
+	FirecrackerPID int `json:"firecracker_pid"`
 }
 
 // OperationStatus is where one operation stands in its journal record.
@@ -78,11 +85,17 @@ type Operation struct {
 	Verb               string          `json:"verb"`
 	VirtualMachineUUID string          `json:"uuid"`
 	Status             OperationStatus `json:"status"`
-	StartedAt          time.Time       `json:"started_at"`
-	EndedAt            time.Time       `json:"ended_at"`
-	ExitCode           int             `json:"exit_code"`
-	Output             string          `json:"output"`
-	Error              string          `json:"error"`
+	// Incarnation is which run of this daemon claimed the operation, stamped by
+	// the transaction that claimed it. It is how work a crash abandoned is told
+	// apart from work that is merely slow: a process that has ended cannot still
+	// be running an operation claimed under the number it was handed when it
+	// opened the store. See internal/journal's Unfinished.
+	Incarnation int64     `json:"incarnation"`
+	StartedAt   time.Time `json:"started_at"`
+	EndedAt     time.Time `json:"ended_at"`
+	ExitCode    int       `json:"exit_code"`
+	Output      string    `json:"output"`
+	Error       string    `json:"error"`
 }
 
 // Finished reports whether this operation reached a terminal state.

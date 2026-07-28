@@ -12,7 +12,10 @@
 // a pure function of its UUID (paths.APISocket), so the socket is the one
 // per-UUID rendezvous the launcher and Boat both derive with no shared state,
 // and something answering HTTP on it is proof that a Firecracker is alive behind
-// it. Two alternatives were rejected outright:
+// it. The same answer carries the guest's own state, which is the only place a
+// paused microVM is distinguishable from a running one — pause goes through this
+// API and leaves the systemd unit active, so systemd reports both identically.
+// Two alternatives were rejected outright:
 //
 //   - Pattern-matching a process table (`pgrep firecracker`, argv scraping) is
 //     racy against a pid that was recycled, spoofable by anything that can pick
@@ -32,6 +35,7 @@ package fcattach
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -39,6 +43,20 @@ import (
 
 	"github.com/frappe/boat/internal/paths"
 	"github.com/frappe/boat/internal/run"
+)
+
+// The guest states Firecracker names in its InstanceInfo. This is Firecracker's
+// vocabulary and not Boat's, which is why it lives beside the call that reads it
+// rather than in internal/model: what a state MEANS for a VM's status is
+// internal/vm's judgement, and a Firecracker that grows a fourth state should
+// change one package rather than two.
+const (
+	StateRunning = "Running"
+	StatePaused  = "Paused"
+	// StateNotStarted is a VMM that is up with no guest in it — a VM caught
+	// between its launch and its boot. Named because it is a real answer and a
+	// reader who cannot see it here will assume the state is one of the other two.
+	StateNotStarted = "Not started"
 )
 
 // Process is a live jailed Firecracker this host is already running.
@@ -49,6 +67,11 @@ type Process struct {
 	// still proven alive, and a pid alone would prove nothing.
 	Pid       int
 	APISocket string
+	// State is what Firecracker called the guest — one of the State constants,
+	// or empty when the answer could not be read as InstanceInfo. Empty is not a
+	// weaker liveness claim: something answered, and only the reading of what it
+	// said failed.
+	State string
 }
 
 // commands is everything this package does to the host, and the only seam it
@@ -112,14 +135,17 @@ func find(ctx context.Context, commands commands, files socketFiles, uuid string
 	if !commands.OK(ctx, "sudo test -S {}", files.socket) {
 		return Process{}, false, nil
 	}
-	live, err := answering(ctx, commands, files)
+	state, live, err := instanceInfo(ctx, commands, files)
 	if err != nil || !live {
 		return Process{}, false, err
 	}
-	return Process{UUID: uuid, Pid: pidOf(ctx, commands, files), APISocket: files.socket}, true, nil
+	return Process{
+		UUID: uuid, Pid: pidOf(ctx, commands, files), APISocket: files.socket, State: state,
+	}, true, nil
 }
 
-// answering reports whether something on the far end of the socket speaks HTTP.
+// instanceInfo asks the far end of the socket who it is, and reports whether
+// anything answered along with the guest state it named.
 //
 // The whole line runs under one `sudo sh -c` for the same reason
 // run.FirecrackerAPI does: the absolute socket path is longer than AF_UNIX's
@@ -136,19 +162,38 @@ func find(ctx context.Context, commands commands, files socketFiles, uuid string
 // process. Treating a 404 as "not running" would be a false negative, and false
 // negatives are the dangerous direction here: they are how a controller decides
 // a live VM is down.
-func answering(ctx context.Context, commands commands, files socketFiles) (bool, error) {
+func instanceInfo(ctx context.Context, commands commands, files socketFiles) (string, bool, error) {
 	// --max-time bounds a Firecracker that accepted the connection and then never
 	// answered. Adoption calls this once per VM on a host with dozens, and one
 	// wedged guest must not hold the scan open forever.
 	probe := "cd {} && curl --silent --show-error --max-time 2 --unix-socket {} {}"
 	rendered, err := run.Substitute(probe, files.directory, files.name, instanceInfoURL)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
-	if _, err := commands.Run(ctx, "sudo sh -c {}", rendered); err != nil {
-		return false, classify(err, files)
+	body, err := commands.Run(ctx, "sudo sh -c {}", rendered)
+	if err != nil {
+		return "", false, classify(err, files)
 	}
-	return true, nil
+	return stateOf(body), true, nil
+}
+
+// stateOf reads the guest state out of an InstanceInfo body.
+//
+// Unreadable is empty, and never an error, for the same reason the probe above
+// is deliberately not --fail: any HTTP answer proves a live process, so a body
+// this code cannot parse — a 404 page from a Firecracker whose API root moved, a
+// version that renamed the field — describes a live VM whose state we do not
+// know. Turning that into "nothing is here" would be the false negative this
+// whole package exists to avoid.
+func stateOf(body string) string {
+	var info struct {
+		State string `json:"state"`
+	}
+	if json.Unmarshal([]byte(body), &info) != nil {
+		return ""
+	}
+	return info.State
 }
 
 // classify separates the stale socket from the broken host. A refused connect is

@@ -225,12 +225,18 @@ func TestANamespaceWithNoTapIsQuarantined(t *testing.T) {
 	)
 }
 
-// The socket is Firecracker's own API endpoint: it is created by the process and
-// goes with it, so an active unit over no socket describes a process that is not
-// there.
-func TestAnActiveUnitWithNoFirecrackerSocketIsQuarantined(t *testing.T) {
+// An active unit is a claim that a Firecracker is up, and the only thing that can
+// confirm that claim is the Firecracker.
+//
+// The scan used to settle this with `test -S` on the API socket, which answers a
+// weaker question: a unix socket inode outlives the process that bound it, so a
+// Firecracker that segfaulted leaves one standing that stat is perfectly happy
+// with, and the VM was adopted as healthy. Both halves of the case land here now
+// — a socket that is gone and a socket nobody is listening on are one answer,
+// which is that nothing answered.
+func TestAnActiveUnitWithNoLiveFirecrackerIsQuarantined(t *testing.T) {
 	host := newFakeHost().withRunning(firstUUID)
-	host.present["sudo test -S "+apiSocketOf(firstUUID)] = false
+	host.firecracker[firstUUID] = false
 
 	result, err := host.scan(t)
 
@@ -239,8 +245,28 @@ func TestAnActiveUnitWithNoFirecrackerSocketIsQuarantined(t *testing.T) {
 	}
 	assertAdopted(t, result)
 	record := quarantineOf(t, result, firstUUID)
-	assertEvidence(t, record, "unit is active but the Firecracker API socket "+
-		apiSocketOf(firstUUID)+" is absent")
+	assertEvidence(t, record, "unit is active but no Firecracker answered on its API socket "+
+		apiSocketOf(firstUUID))
+}
+
+// A probe that could not be made is not an observation of the host. A scan that
+// shrugged one off would quarantine a healthy VM for a fault of ours — a denied
+// sudo, a missing curl — so it fails whole, like every other unreadable probe.
+func TestAScanFailsWhenTheFirecrackerProbeCannotBeMade(t *testing.T) {
+	host := newFakeHost().withRunning(firstUUID)
+	host.livenessFail[firstUUID] = true
+
+	result, err := host.scan(t)
+
+	if err == nil {
+		t.Fatal("Scan succeeded, want the failed liveness probe reported")
+	}
+	if !strings.Contains(err.Error(), firstUUID) {
+		t.Errorf("error %q does not name the VM it could not probe", err)
+	}
+	if len(result.VirtualMachines) > 0 || len(result.Quarantined) > 0 {
+		t.Errorf("failed scan returned a partial result: %+v", result)
+	}
 }
 
 // Untidiness is not ambiguity. A stop that skipped its ExecStopPost leaves the

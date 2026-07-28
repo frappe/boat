@@ -128,7 +128,48 @@ func TestFindAttachesToAFirecrackerThatAnswersOnItsSocket(t *testing.T) {
 	if process.UUID != testUUID || process.APISocket != files.socket || process.Pid != 15843 {
 		t.Errorf("Find = %+v, want uuid %s pid 15843 socket %s", process, testUUID, files.socket)
 	}
+	if process.State != StateRunning {
+		t.Errorf("State = %q, want %q", process.State, StateRunning)
+	}
 	assertTrace(t, fake, existsCommand(files), probeCommand(files), processCommand(files))
+}
+
+// The guest state rides back on the liveness answer, and it is the only place a
+// frozen guest is distinguishable from a running one: pause goes through this
+// same API and leaves the systemd unit active, so systemd reports both the same
+// way. Reading it costs nothing extra — it is the body of the call already made.
+func TestFindReportsTheGuestStateFirecrackerNamed(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		body string
+		want string
+	}{
+		"running": {`{"app_name":"Firecracker","id":"x","state":"Running","vmm_version":"1.7.0"}`, StateRunning},
+		"paused":  {`{"app_name":"Firecracker","id":"x","state":"Paused","vmm_version":"1.7.0"}`, StatePaused},
+		"booting": {`{"app_name":"Firecracker","id":"x","state":"Not started"}`, StateNotStarted},
+		// Any HTTP answer proves a live process, so a body this version cannot
+		// read is a live VM whose state is unknown — never a VM that is not there.
+		// Reading it as "not found" is the false negative that makes a controller
+		// decide a live VM is down.
+		"a body this version cannot read": {"<html>404 Not Found</html>", ""},
+		"no state field at all":           {`{"app_name":"Firecracker"}`, ""},
+		"empty":                           {"", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			files := testFiles(testUUID)
+			fake := newFakeCommands()
+			fake.gates["sudo test -S "+files.socket] = true
+			fake.outputs[probeCommand(files)] = testCase.body
+
+			process, found, err := findWith(fake)
+
+			if err != nil || !found {
+				t.Fatalf("Find = (%+v, %v, %v), want a live process", process, found, err)
+			}
+			if process.State != testCase.want {
+				t.Errorf("State = %q, want %q", process.State, testCase.want)
+			}
+		})
+	}
 }
 
 // An absent socket is the ordinary answer for every stopped and sleeping VM on

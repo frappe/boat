@@ -49,6 +49,10 @@ Atlas asserting intent, `GET /export` is Boat asserting fact. Around them:
   the whole host in a single document;
 - **an operation journal**, so re-posting an `operation_id` returns the first
   result instead of running the work twice;
+- **crash recovery for that journal** — every claim carries the run of the daemon
+  that took it, so a restart tells the work a crash abandoned from the work it is
+  still doing, drives those VMs before anything else, and closes records that
+  would otherwise read `Running` for the life of the host;
 - **one actor per VM**, so a verb and a reconcile pass are one queue and nothing
   drives a machine another thing is mid-boot on;
 - **the wake-on-TCP reflex**, resident, deciding with no control plane in the

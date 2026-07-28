@@ -19,7 +19,8 @@ func TestNewScannerIsWiredToTheHost(t *testing.T) {
 	scanner := NewScanner()
 	runner := run.NewRunner(nil)
 
-	if scanner.commandsFor == nil || scanner.observer == nil || scanner.clock == nil {
+	if scanner.commandsFor == nil || scanner.observer == nil ||
+		scanner.liveness == nil || scanner.clock == nil {
 		t.Fatal("NewScanner left a seam nil")
 	}
 	if scanner.commandsFor(runner) != commands(runner) {

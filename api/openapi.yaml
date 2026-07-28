@@ -604,35 +604,40 @@ components:
         sleeping:
           type: boolean
           description: The sleeping marker is present — the VM is parked, not stopped.
-        boot_epoch:
-          type: integer
-          format: int64
-          description: |
-            The fence epoch this host is permitted to boot the VM at. Absent
-            means Boat holds no fence for it and will refuse to start it.
         firecracker_pid:
           type: integer
           description: |
-            The running Firecracker process, when Boat has re-attached to one.
-            Absent means no live process was found, not that the VM is dead.
-        quarantined:
-          type: boolean
-          description: |
-            The host holds artifacts for this VM that Boat could not read as a
-            coherent state — a crash part-way through a terminate, say. It is
-            reported, never silently ingested as truth, and never acted upon
-            until a human or Atlas resolves it.
-        quarantine_reason:
-          type: string
-          description: What was incoherent, in one sentence.
-        observed_vcpus:
-          type: integer
-        observed_memory_megabytes:
-          type: integer
-        observed_disk_gigabytes:
-          type: integer
-        observed_data_disk_gigabytes:
-          type: integer
+            The process that answered on this VM's API socket. A diagnostic that
+            lets an operator strace the right process, and nothing more: the
+            liveness claim is that the socket answered, so an absent pid — no
+            live Firecracker, or one whose socket holder `ss` could not name —
+            says nothing on its own about observed_status.
+
+        # Deliberately absent. Each of these was declared here and set by no
+        # handler, so a client written against this document read it as absent
+        # forever; a field the server never sends is worse than one this schema
+        # does not promise.
+        #
+        # - boot_epoch. The fence is not an observation. This document is what
+        #   the host was seen to be, while the epoch is what Boat was told and
+        #   remembers — and the export already carries every fence this host
+        #   holds under `fence_epochs`, keyed by the same UUID. A third copy,
+        #   beside the `DesiredVirtualMachine.boot_epoch` Atlas asserted, is a
+        #   third place for one number to disagree with itself.
+        #
+        # - quarantined, quarantine_reason. A quarantined artifact set is not a
+        #   VM and never becomes one: the scan keeps the two sets disjoint by
+        #   construction (spec/33-boat.md §3.4), so this flag could not have been
+        #   true on a document that exists. The export's top-level `quarantine`
+        #   array is the report, and it carries the evidence as well as the
+        #   reason.
+        #
+        # - observed_vcpus, observed_memory_megabytes, observed_disk_gigabytes,
+        #   observed_data_disk_gigabytes. The shape of a drift check against what
+        #   Atlas asked for, and nothing measures them: the numbers are in the
+        #   VM's firecracker.json and in its logical volumes, which is a
+        #   subprocess per VM per sweep and a widened sudoers grant. They come
+        #   back in the commit that reads them.
 
     DesiredPower:
       type: string

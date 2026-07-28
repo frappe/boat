@@ -29,6 +29,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/frappe/boat/internal/fcattach"
 	"github.com/frappe/boat/internal/park"
 	"github.com/frappe/boat/internal/paths"
 	"github.com/frappe/boat/internal/run"
@@ -121,15 +122,26 @@ type Manager struct {
 	// field for the same reason the others are: it runs real ip and nft commands,
 	// and a test that could not substitute it would have to touch the host.
 	park func(ctx context.Context, runner *run.Runner, uuid string) error
+	// liveness confirms that a Firecracker is answering on a VM's API socket and
+	// reports the guest state it named. A field for the same reason park is: it
+	// speaks HTTP to a jailed process through sudo, and a test that could not
+	// substitute it would have to run a Firecracker.
+	liveness func(ctx context.Context, runner *run.Runner, uuid string) (fcattach.Process, bool, error)
+	// wakeTrapResident reports whether this process is running the wake reflex a
+	// sleeping VM's return depends on. See requireWakeTrap for why a sleep is
+	// gated on it, and internal/park.Resident for why the fact lives there.
+	wakeTrapResident func() bool
 }
 
 // NewManager returns a Manager wired to the real host.
 func NewManager() *Manager {
 	return &Manager{
-		commandsFor: func(runner *run.Runner) commands { return runner },
-		filesFor:    filesFor,
-		clock:       systemClock{},
-		park:        park.ParkVirtualMachine,
+		commandsFor:      func(runner *run.Runner) commands { return runner },
+		filesFor:         filesFor,
+		clock:            systemClock{},
+		park:             park.ParkVirtualMachine,
+		liveness:         fcattach.Find,
+		wakeTrapResident: park.Resident,
 	}
 }
 

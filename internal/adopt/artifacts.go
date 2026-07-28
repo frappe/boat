@@ -2,9 +2,11 @@ package adopt
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/paths"
+	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/sidecar"
 )
 
@@ -62,24 +64,39 @@ type hostArtifacts struct {
 	tap         bool
 	hostVeth    bool
 	proxy       bool
-	apiSocket   bool
+	// firecracker is whether a live Firecracker ANSWERED for this UUID, not
+	// whether its socket file exists. See examineDisk.
+	firecracker bool
 }
 
 func (artifacts hostArtifacts) unitIsActive() bool {
 	return artifacts.unitLoaded && artifacts.unit.ActiveState == unitActive
 }
 
-func examineAll(ctx context.Context, commands commands, taken inventory) []hostArtifacts {
+// examineAll collects every candidate UUID's artifacts, and fails the whole scan
+// the moment one of them cannot be read. That is this package's rule rather than
+// this function's: a probe that failed and was skipped would leave a VM looking
+// like it holds one artifact fewer than it does, and the record of that is a
+// quarantine blaming the host for a fault of ours.
+func (scanner *Scanner) examineAll(
+	ctx context.Context, commands commands, runner *run.Runner, taken inventory,
+) ([]hostArtifacts, error) {
 	var examined []hostArtifacts
 	for _, uuid := range taken.candidates() {
-		examined = append(examined, examine(ctx, commands, taken, uuid))
+		artifacts, err := scanner.examine(ctx, commands, runner, taken, uuid)
+		if err != nil {
+			return nil, err
+		}
+		examined = append(examined, artifacts)
 	}
-	return examined
+	return examined, nil
 }
 
 // examine collects one UUID's artifacts from the inventory and from the probes
 // the inventory cannot answer.
-func examine(ctx context.Context, commands commands, taken inventory, uuid string) hostArtifacts {
+func (scanner *Scanner) examine(
+	ctx context.Context, commands commands, runner *run.Runner, taken inventory, uuid string,
+) (hostArtifacts, error) {
 	artifacts := hostArtifacts{
 		uuid:       uuid,
 		directory:  taken.hasDirectory(uuid),
@@ -88,10 +105,12 @@ func examine(ctx context.Context, commands commands, taken inventory, uuid strin
 	}
 	artifacts.unit, artifacts.unitLoaded = taken.unitFor(uuid)
 	if artifacts.directory {
-		examineDisk(ctx, commands, uuid, &artifacts)
+		if err := scanner.examineDisk(ctx, commands, runner, uuid, &artifacts); err != nil {
+			return hostArtifacts{}, err
+		}
 	}
 	examineNetwork(ctx, commands, taken, &artifacts)
-	return artifacts
+	return artifacts, nil
 }
 
 // examineDisk reads the VM tree. The probes are skipped when the directory is
@@ -101,11 +120,28 @@ func examine(ctx context.Context, commands commands, taken inventory, uuid strin
 //
 // Every probe goes through sudo: the VM tree is 0700 owned by the per-VM uid, so
 // an in-process stat would report "absent" for a file that is plainly there.
-func examineDisk(ctx context.Context, commands commands, uuid string, artifacts *hostArtifacts) {
+//
+// The Firecracker question is asked of the Firecracker. This used to be
+// `test -S` on the API socket, which answers a weaker question than the one the
+// coherence rules want: a unix socket inode outlives the process that bound it,
+// so a Firecracker that segfaulted leaves a socket behind that stat is perfectly
+// happy with — and a scan that read that as a running VM would adopt a dead one
+// as healthy and report it to Atlas as Running. internal/fcattach talks to the
+// far end instead, which is the test it was written for. A probe that could not
+// be made at all is an error and fails the scan; "nothing answered" is an answer
+// and is not.
+func (scanner *Scanner) examineDisk(
+	ctx context.Context, commands commands, runner *run.Runner, uuid string, artifacts *hostArtifacts,
+) error {
 	files := paths.ForVirtualMachine(uuid)
 	artifacts.jail = commands.OK(ctx, "sudo test -d {}", files.JailRoot())
-	artifacts.apiSocket = commands.OK(ctx, "sudo test -S {}", files.APISocket())
 	artifacts.environment = parseNetworkEnvironment(readNetworkEnvironment(ctx, commands, files))
+	_, live, err := scanner.liveness(ctx, runner, uuid)
+	if err != nil {
+		return fmt.Errorf("could not tell whether a Firecracker is running for %s: %w", uuid, err)
+	}
+	artifacts.firecracker = live
+	return nil
 }
 
 // readNetworkEnvironment returns the sidecar's text, or empty when there is

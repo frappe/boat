@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/frappe/boat/internal/fcattach"
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/run"
 )
@@ -95,6 +96,12 @@ type fakeHost struct {
 	unstartable map[string]bool
 	statuses    map[string]model.VirtualMachineStatus
 	observeFail map[string]bool
+	// firecracker is the UUIDs a live Firecracker ANSWERS for, and livenessFail
+	// the ones whose probe cannot be made at all. The two are separate because
+	// they are separate answers: nothing answering is data about the host, and a
+	// probe that failed is data about us.
+	firecracker  map[string]bool
+	livenessFail map[string]bool
 
 	commands *fakeCommands
 	observer *fakeObserver
@@ -104,14 +111,16 @@ func newFakeHost() *fakeHost {
 	return &fakeHost{
 		// Every host carries the pool and the park dummy: they are bootstrap
 		// floor, and a scan that reported them would report them on every host.
-		volumes:     []string{"  pool0,107374182400,,"},
-		links:       []string{"1: lo: <LOOPBACK,UP> mtu 65536", "2: eth0: <BROADCAST,UP> mtu 1500"},
-		present:     map[string]bool{},
-		outputs:     map[string]string{},
-		failing:     map[string]bool{},
-		unstartable: map[string]bool{},
-		statuses:    map[string]model.VirtualMachineStatus{},
-		observeFail: map[string]bool{},
+		volumes:      []string{"  pool0,107374182400,,"},
+		links:        []string{"1: lo: <LOOPBACK,UP> mtu 65536", "2: eth0: <BROADCAST,UP> mtu 1500"},
+		present:      map[string]bool{},
+		outputs:      map[string]string{},
+		failing:      map[string]bool{},
+		unstartable:  map[string]bool{},
+		statuses:     map[string]model.VirtualMachineStatus{},
+		observeFail:  map[string]bool{},
+		firecracker:  map[string]bool{},
+		livenessFail: map[string]bool{},
 	}
 }
 
@@ -125,7 +134,7 @@ func (host *fakeHost) withRunning(uuid string) *fakeHost {
 	host.links = append(host.links,
 		fmt.Sprintf("5: %s@if4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500", network.hostVeth))
 	host.proxies = append(host.proxies, network.address+" dev eth0 proxy")
-	host.present["sudo test -S "+apiSocketOf(uuid)] = true
+	host.firecracker[uuid] = true
 	host.present["sudo ip -n "+network.namespace+" -o link show "+network.tap] = true
 	host.statuses[uuid] = model.StatusRunning
 	return host
@@ -169,9 +178,29 @@ func (host *fakeHost) scan(t *testing.T) (Result, error) {
 	scanner := &Scanner{
 		commandsFor: func(*run.Runner) commands { return host.commands },
 		observer:    host.observer,
+		liveness:    host.liveness,
 		clock:       fixedClock{},
 	}
 	return scanner.Scan(context.Background(), nil)
+}
+
+// liveness stands in for internal/fcattach. The scan asks whether a Firecracker
+// ANSWERED and not whether its socket file is there, so the fake models the three
+// answers that probe really gives: a live process, nothing answering, and a probe
+// that could not be made. The commands it would render belong to that package's
+// tests; asserting them here as well would be one contract written down twice.
+func (host *fakeHost) liveness(
+	_ context.Context, _ *run.Runner, uuid string,
+) (fcattach.Process, bool, error) {
+	if host.livenessFail[uuid] {
+		return fcattach.Process{}, false, errCommandFailed
+	}
+	if !host.firecracker[uuid] {
+		return fcattach.Process{}, false, nil
+	}
+	return fcattach.Process{
+		UUID: uuid, Pid: 15843, APISocket: apiSocketOf(uuid), State: fcattach.StateRunning,
+	}, true, nil
 }
 
 // fakeCommands answers rendered commands from a script and records every one of

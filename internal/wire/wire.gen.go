@@ -354,34 +354,20 @@ type UnitLiveness struct {
 
 // VirtualMachine defines model for VirtualMachine.
 type VirtualMachine struct {
-	// BootEpoch The fence epoch this host is permitted to boot the VM at. Absent
-	// means Boat holds no fence for it and will refuse to start it.
-	BootEpoch *int64 `json:"boot_epoch,omitempty"`
-
-	// FirecrackerPid The running Firecracker process, when Boat has re-attached to one.
-	// Absent means no live process was found, not that the VM is dead.
+	// FirecrackerPid The process that answered on this VM's API socket. A diagnostic that
+	// lets an operator strace the right process, and nothing more: the
+	// liveness claim is that the socket answered, so an absent pid — no
+	// live Firecracker, or one whose socket holder `ss` could not name —
+	// says nothing on its own about observed_status.
 	FirecrackerPid *int `json:"firecracker_pid,omitempty"`
 
 	// HasMemorySnapshot A complete memory snapshot is staged, so the next start resumes from RAM.
-	HasMemorySnapshot         *bool     `json:"has_memory_snapshot,omitempty"`
-	ObservedAt                time.Time `json:"observed_at"`
-	ObservedDataDiskGigabytes *int      `json:"observed_data_disk_gigabytes,omitempty"`
-	ObservedDiskGigabytes     *int      `json:"observed_disk_gigabytes,omitempty"`
-	ObservedMemoryMegabytes   *int      `json:"observed_memory_megabytes,omitempty"`
+	HasMemorySnapshot *bool     `json:"has_memory_snapshot,omitempty"`
+	ObservedAt        time.Time `json:"observed_at"`
 
 	// ObservedStatus Boat's observed status, derived from the host — the unit's state and the
 	// on-disk markers — never from a command's success.
 	ObservedStatus VirtualMachineStatus `json:"observed_status"`
-	ObservedVcpus  *int                 `json:"observed_vcpus,omitempty"`
-
-	// QuarantineReason What was incoherent, in one sentence.
-	QuarantineReason *string `json:"quarantine_reason,omitempty"`
-
-	// Quarantined The host holds artifacts for this VM that Boat could not read as a
-	// coherent state — a crash part-way through a terminate, say. It is
-	// reported, never silently ingested as truth, and never acted upon
-	// until a human or Atlas resolves it.
-	Quarantined *bool `json:"quarantined,omitempty"`
 
 	// Sleeping The sleeping marker is present — the VM is parked, not stopped.
 	Sleeping *bool `json:"sleeping,omitempty"`

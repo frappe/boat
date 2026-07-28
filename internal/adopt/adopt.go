@@ -50,6 +50,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/frappe/boat/internal/fcattach"
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/vm"
@@ -78,6 +79,12 @@ type observer interface {
 
 var _ observer = (*vm.Manager)(nil)
 
+// liveness confirms that a Firecracker is answering for a UUID. internal/fcattach
+// owns that call and the argument for why socket existence is not liveness; a
+// scan needs the answer for its coherence rules, which run before any VM is
+// adopted and therefore before Observe is ever asked.
+type liveness func(ctx context.Context, runner *run.Runner, uuid string) (fcattach.Process, bool, error)
+
 // clock is the seam over real time, so a quarantine record's SeenAt is a fact a
 // test can assert rather than whatever the wall clock said.
 type clock interface{ Now() time.Time }
@@ -105,6 +112,7 @@ type Result struct {
 type Scanner struct {
 	commandsFor func(runner *run.Runner) commands
 	observer    observer
+	liveness    liveness
 	clock       clock
 }
 
@@ -113,6 +121,7 @@ func NewScanner() *Scanner {
 	return &Scanner{
 		commandsFor: func(runner *run.Runner) commands { return runner },
 		observer:    vm.NewManager(),
+		liveness:    fcattach.Find,
 		clock:       systemClock{},
 	}
 }
@@ -136,8 +145,12 @@ func (scanner *Scanner) reconstruct(
 	ctx context.Context, commands commands, runner *run.Runner, taken inventory,
 ) (Result, error) {
 	result := Result{Units: taken.units, LogicalVolumes: taken.volumes}
+	examined, err := scanner.examineAll(ctx, commands, runner, taken)
+	if err != nil {
+		return Result{}, err
+	}
 	claimed := claims{}
-	for _, artifacts := range examineAll(ctx, commands, taken) {
+	for _, artifacts := range examined {
 		claimed.add(artifacts.environment)
 		if contradictions := artifacts.contradictions(); len(contradictions) > 0 {
 			result.Quarantined = append(result.Quarantined, scanner.quarantine(artifacts, contradictions))

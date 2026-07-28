@@ -21,8 +21,15 @@ func virtualMachinesToWire(records []model.VirtualMachine) []wire.VirtualMachine
 	return documents
 }
 
+// virtualMachineToWire renders one observation.
+//
+// The Firecracker pid is absent rather than zero, because 0 is not a pid and a
+// present zero would read as one. It is absent for every VM that is not running
+// and for the running VM whose socket holder `ss` could not name — the pid is a
+// diagnostic and the liveness claim is the socket having answered, so its absence
+// says nothing about the status beside it.
 func virtualMachineToWire(record model.VirtualMachine) wire.VirtualMachine {
-	return wire.VirtualMachine{
+	document := wire.VirtualMachine{
 		Uuid:              record.UUID,
 		ObservedStatus:    wire.VirtualMachineStatus(record.ObservedStatus),
 		ObservedAt:        record.ObservedAt,
@@ -31,6 +38,11 @@ func virtualMachineToWire(record model.VirtualMachine) wire.VirtualMachine {
 		HasMemorySnapshot: &record.HasMemorySnapshot,
 		Sleeping:          &record.Sleeping,
 	}
+	if record.FirecrackerPID != 0 {
+		pid := record.FirecrackerPID
+		document.FirecrackerPid = &pid
+	}
+	return document
 }
 
 // desiredFromWire reads one assertion of desired state.

@@ -94,12 +94,15 @@ func (artifacts hostArtifacts) runtimeContradictions() []string {
 			"unit is active but its host-side veth %s is absent", environment.hostVeth,
 		))
 	}
-	// The socket is the liveness cross-check: it is Firecracker's own API
-	// endpoint, created by the process and gone with it. A unit reporting active
-	// over no socket is a unit describing a process that is not there.
-	if !artifacts.apiSocket {
+	// The liveness cross-check, and the one runtime artifact that is asked rather
+	// than looked at: a unit reporting active is a unit claiming a Firecracker is
+	// up, and the only thing that can confirm that is the Firecracker. Absent and
+	// stale are one answer here — a socket nobody is listening on describes a
+	// process that is not there just as surely as no socket does — so the evidence
+	// says what was true, which is that nothing answered.
+	if !artifacts.firecracker {
 		found = append(found, fmt.Sprintf(
-			"unit is active but the Firecracker API socket %s is absent",
+			"unit is active but no Firecracker answered on its API socket %s",
 			paths.ForVirtualMachine(artifacts.uuid).APISocket(),
 		))
 	}
@@ -132,8 +135,8 @@ func (artifacts hostArtifacts) survivors() []string {
 	if artifacts.hostVeth {
 		held = append(held, fmt.Sprintf("host-side veth %s is up", artifacts.environment.hostVeth))
 	}
-	if artifacts.apiSocket {
-		held = append(held, fmt.Sprintf("a Firecracker API socket is open at %s", files.APISocket()))
+	if artifacts.firecracker {
+		held = append(held, fmt.Sprintf("a live Firecracker is answering on %s", files.APISocket()))
 	}
 	if artifacts.proxy {
 		held = append(held, fmt.Sprintf(

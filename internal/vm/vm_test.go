@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/frappe/boat/internal/fcattach"
 	"github.com/frappe/boat/internal/run"
 )
 
@@ -23,7 +24,13 @@ import (
 // concrete type never matters to it.
 var errCommandFailed = errors.New("command failed")
 
-const testUUID = "11111111-2222-3333-4444-555555555555"
+const (
+	testUUID = "11111111-2222-3333-4444-555555555555"
+	// testFirecrackerPID is the pid a live probe reports, and is the pid in
+	// internal/fcattach's own canned `ss` line — so a reader comparing the two
+	// packages' tests is looking at one host.
+	testFirecrackerPID = 15843
+)
 
 // testFiles spells out the slice of the path layout this package addresses a VM
 // through, rather than deriving it, so the golden command lines below read like
@@ -66,6 +73,22 @@ type fakeCommands struct {
 	// parkError lets a test make arming the wake trap fail, which must fail the
 	// sleep: a VM that is stopped and untrapped can never come back on its own.
 	parkError error
+	// liveness is what the Firecracker probe answers. It is a value rather than a
+	// scripted command because the commands that probe renders belong to
+	// internal/fcattach and are asserted there; spelling them again here would be
+	// two copies of one contract, and only one of them would be updated.
+	liveness fakeLiveness
+	// wakeTrapStopped makes this host one whose wake reflex is not running, which
+	// is the one state a sleep must refuse.
+	wakeTrapStopped bool
+}
+
+// fakeLiveness is one answer from the liveness probe: a live Firecracker in a
+// named guest state, nothing answering, or a probe that could not be made.
+type fakeLiveness struct {
+	process fcattach.Process
+	live    bool
+	err     error
 }
 
 func newFakeCommands() *fakeCommands {
@@ -73,6 +96,15 @@ func newFakeCommands() *fakeCommands {
 		replies: map[string][]bool{},
 		calls:   map[string]int{},
 		outputs: map[string]string{},
+		// A live, running guest by default, for the same reason an unscripted
+		// command succeeds by default: a scenario states what it took away from a
+		// healthy host, and everything it did not mention is healthy.
+		liveness: fakeLiveness{
+			process: fcattach.Process{
+				UUID: testUUID, Pid: testFirecrackerPID, State: fcattach.StateRunning,
+			},
+			live: true,
+		},
 	}
 }
 
@@ -216,6 +248,13 @@ func newTestManager(fake *fakeCommands) *Manager {
 			fake.trace = append(fake.trace, "park "+uuid)
 			return fake.parkError
 		},
+		// Traced too, so an observation that took the host's word for a running VM
+		// is a missing line rather than an assertion nobody wrote.
+		liveness: func(_ context.Context, _ *run.Runner, uuid string) (fcattach.Process, bool, error) {
+			fake.trace = append(fake.trace, "liveness "+uuid)
+			return fake.liveness.process, fake.liveness.live, fake.liveness.err
+		},
+		wakeTrapResident: func() bool { return !fake.wakeTrapStopped },
 	}
 }
 
@@ -229,6 +268,23 @@ func assertTrace(t *testing.T, fake *fakeCommands, expected ...string) {
 		if fake.trace[index] != expected[index] {
 			t.Errorf("command %d:\ngot:  %s\nwant: %s", index, fake.trace[index], expected[index])
 		}
+	}
+}
+
+// The seams have exactly one real implementation each, and a nil one is not a
+// test failure but a nil dereference inside a daemon supervising live VMs — on
+// the first observation of a running VM, or on the first sleep.
+func TestNewManagerIsWiredToTheHost(t *testing.T) {
+	manager := NewManager()
+
+	if manager.commandsFor == nil || manager.filesFor == nil || manager.clock == nil ||
+		manager.park == nil || manager.liveness == nil || manager.wakeTrapResident == nil {
+		t.Fatal("NewManager left a seam nil")
+	}
+	// False on a Manager nobody is running a trap beside, which is what this
+	// process is: the answer is the host's, not this type's.
+	if manager.wakeTrapResident() {
+		t.Error("wakeTrapResident answered true with no wake trap running")
 	}
 }
 
