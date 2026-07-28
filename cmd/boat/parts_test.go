@@ -120,11 +120,7 @@ func newTestParts(t *testing.T, machines reconcile.VirtualMachines) *daemonParts
 	if err != nil {
 		t.Fatalf("could not open the store: %v", err)
 	}
-	decisions, err := journal.New(database, journalPath(filepath.Join(directory, "boat.db")))
-	if err != nil {
-		database.Close()
-		t.Fatalf("could not open the journal: %v", err)
-	}
+	decisions := journal.New(database)
 	parts := &daemonParts{store: database, journal: decisions, runner: run.NewRunner(nil), scanner: &fakeScanner{}}
 	parts.reconciler = reconcile.New(database, machines, decisions)
 	t.Cleanup(func() { parts.close() })
@@ -262,9 +258,49 @@ func TestTheApiIsBuiltWithTheReconciler(t *testing.T) {
 	}
 }
 
-func TestTheJournalSitsBesideTheStore(t *testing.T) {
-	if got := journalPath("/var/lib/boat/boat.db"); got != "/var/lib/boat/journal.db" {
-		t.Errorf("got %s, want the journal beside the store", got)
+// A Server built without the journal refuses every verb that makes a choice,
+// because a choice it cannot write down is one no replay could ever read back.
+// Loud, but only if somebody wired it — so this is what says the daemon does.
+func TestTheApiIsBuiltWithTheJournal(t *testing.T) {
+	parts := newTestParts(t, &fakeMechanics{})
+
+	if dependencies := parts.dependencies(); dependencies.Decisions != parts.journal {
+		t.Error("the API records its decisions somewhere other than this host's journal")
+	}
+}
+
+// The daemon holds ONE file. The write-ahead decisions used to sit in a second
+// bbolt database beside the store, which made "the decision and the state it
+// justifies commit in one transaction" unreachable — bbolt takes an exclusive
+// lock per file, so the second handle was a second commit and a crash could land
+// between them.
+func TestTheDaemonHoldsOneFileAndTheDecisionsAreInIt(t *testing.T) {
+	directory := t.TempDir()
+	parts, err := build(daemonOptions{storePath: filepath.Join(directory, "boat.db")})
+	if err != nil {
+		t.Fatalf("build the daemon's parts: %v", err)
+	}
+	if _, _, err := parts.store.ClaimOperation("Task-1", "rebuild-vm", adoptedUuid); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	decision := journal.Decision{OperationID: "Task-1", Step: "rebuild-source"}
+	if err := parts.journal.Record(decision); err != nil {
+		t.Fatalf("record a decision: %v", err)
+	}
+	if err := parts.close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	files, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatalf("read the daemon's directory: %v", err)
+	}
+	if len(files) != 1 || files[0].Name() != "boat.db" {
+		names := []string{}
+		for _, file := range files {
+			names = append(names, file.Name())
+		}
+		t.Fatalf("the daemon left %v behind, want the store alone", names)
 	}
 }
 

@@ -229,9 +229,10 @@ func serveUntilSignal(active []listening) error {
 //
 // The store is closed ONLY when that quiesce actually completed. A verb that
 // outlasted the drain still holds a claimed operation, and closing the store
-// under it fails its CompleteOperation: the record stays non-terminal forever,
-// the Atlas Task behind it never completes, and the retry reads the same
-// Running record and waits again. That is reachable on the ordinary
+// under it fails its CompleteOperation: the record stays non-terminal, the
+// verb's own answer is lost, and the next start has to close the record on its
+// behalf as a Failure (internal/reconcile, conclude) rather than with the
+// outcome the verb actually reached. That is reachable on the ordinary
 // binary-swap path — systemd stops the old daemon while a stop verb is inside
 // its guest's 30-second drain — so the file is left open instead and the
 // process exits with it open. bbolt commits every transaction to disk as it

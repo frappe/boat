@@ -7,14 +7,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/store"
 )
 
-// Every test in this package runs against real bbolt files under t.TempDir, the
-// journal's and the store's. Durability is the entire job here, so a fake of the
-// thing that persists would test nothing that matters — and the tests that close
-// the journal and open it again are the only ones that prove a decision is on
-// disk rather than in a struct.
+// Every test in this package runs against a real bbolt file under t.TempDir.
+// Durability is the entire job here, so a fake of the thing that persists would
+// test nothing that matters — and the tests that close the store and open it
+// again are the only ones that prove a decision is on disk rather than in a
+// struct.
 
 const (
 	firstOperation  = "task-aaaa1111"
@@ -22,38 +23,38 @@ const (
 	virtualMachine  = "11111111-2222-3333-4444-555555555555"
 )
 
-// host is one host's pair of files: the store that owns operation status and the
-// journal path that survives being reopened.
+// host is one host's file, and the sequence of daemon runs over it.
 type host struct {
-	store       *store.Store
-	journalPath string
+	path  string
+	store *store.Store
 }
 
-func newHost(t *testing.T) host {
+func newHost(t *testing.T) *host {
 	t.Helper()
-	directory := t.TempDir()
-	database, err := store.Open(filepath.Join(directory, "boat.db"))
+	return &host{path: filepath.Join(t.TempDir(), "boat.db")}
+}
+
+// restart closes the store and opens it again, which is what a daemon restart
+// is: the same file under the next incarnation. Every operation claimed before
+// it belongs to a run that has ended.
+func (host *host) restart(t *testing.T) *Journal {
+	t.Helper()
+	if host.store != nil {
+		if err := host.store.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+	}
+	database, err := store.Open(host.path)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	host.store = database
 	t.Cleanup(func() { database.Close() })
-	return host{store: database, journalPath: filepath.Join(directory, "journal.db")}
-}
-
-// restart opens the journal again, which is what a daemon restart is: the same
-// file under the next incarnation.
-func (host host) restart(t *testing.T) *Journal {
-	t.Helper()
-	journal, err := New(host.store, host.journalPath)
-	if err != nil {
-		t.Fatalf("open journal: %v", err)
-	}
-	t.Cleanup(func() { journal.Close() })
-	return journal
+	return New(database)
 }
 
 // claim leaves an operation in the store the way a verb about to run does.
-func (host host) claim(t *testing.T, identifier string) {
+func (host *host) claim(t *testing.T, identifier string) {
 	t.Helper()
 	if _, claimed, err := host.store.ClaimOperation(identifier, "start-vm", virtualMachine); err != nil || !claimed {
 		t.Fatalf("claim %s: claimed=%v err=%v", identifier, claimed, err)
@@ -90,15 +91,13 @@ func steps(decisions []Decision) []string {
 
 // The property the whole package is for: what was decided before the crash is
 // what is read after it, in the order it was decided.
-func TestDecisionsReplayInOrderAfterAReopen(t *testing.T) {
+func TestDecisionsReplayInOrderAfterARestart(t *testing.T) {
 	host := newHost(t)
 	journal := host.restart(t)
+	host.claim(t, firstOperation)
 	record(t, journal, decisionOf(firstOperation, "allocate-address", map[string]string{"ipv6": "2001:db8::5"}))
 	record(t, journal, decisionOf(firstOperation, "create-volume", map[string]string{"lv": "atlas-vm-1"}))
 	record(t, journal, decisionOf(firstOperation, "claim-slot", map[string]string{"slot": "3"}))
-	if err := journal.Close(); err != nil {
-		t.Fatalf("close journal: %v", err)
-	}
 
 	replayed := decisionsOf(t, host.restart(t), firstOperation)
 	expected := []string{"allocate-address", "create-volume", "claim-slot"}
@@ -115,6 +114,7 @@ func TestDecisionsReplayInOrderAfterAReopen(t *testing.T) {
 func TestDecisionsStayInOrderPastTenEntries(t *testing.T) {
 	host := newHost(t)
 	journal := host.restart(t)
+	host.claim(t, firstOperation)
 	expected := []string{}
 	for step := 1; step <= 12; step++ {
 		name := "step-" + string(rune('a'+step-1))
@@ -131,6 +131,8 @@ func TestDecisionsStayInOrderPastTenEntries(t *testing.T) {
 func TestDecisionsAreScopedToOneOperation(t *testing.T) {
 	host := newHost(t)
 	journal := host.restart(t)
+	host.claim(t, firstOperation)
+	host.claim(t, secondOperation)
 	record(t, journal, decisionOf(firstOperation, "first-a", nil))
 	record(t, journal, decisionOf(secondOperation, "second-a", nil))
 	record(t, journal, decisionOf(firstOperation, "first-b", nil))
@@ -156,13 +158,21 @@ func TestDecisionsOfAnOperationThatDecidedNothing(t *testing.T) {
 	}
 }
 
-func TestRecordRefusesADecisionItCouldNotHandBack(t *testing.T) {
+// A decision names work this host is doing, or it names nothing. The store
+// checks that in the transaction that would have written it, so the two cases
+// below cannot leave a decision behind that no replay could ever reach.
+func TestRecordRefusesADecisionNoOperationCouldOwn(t *testing.T) {
+	host := newHost(t)
+	journal := host.restart(t)
+	host.claim(t, secondOperation)
+	complete(t, host, secondOperation, model.OperationSuccess)
 	cases := map[string]Decision{
+		"never claimed":        decisionOf(firstOperation, "allocate-address", nil),
+		"already finished":     decisionOf(secondOperation, "allocate-address", nil),
 		"no operation":         decisionOf("", "allocate-address", nil),
 		"separator in the key": decisionOf("task/1", "allocate-address", nil),
-		"no step":              decisionOf(firstOperation, "", nil),
+		"no step":              decisionOf(secondOperation, "", nil),
 	}
-	journal := newHost(t).restart(t)
 	for name, decision := range cases {
 		t.Run(name, func(t *testing.T) {
 			if err := journal.Record(decision); err == nil {
@@ -175,6 +185,7 @@ func TestRecordRefusesADecisionItCouldNotHandBack(t *testing.T) {
 func TestRecordStampsTheTimeTheCallerLeftZero(t *testing.T) {
 	host := newHost(t)
 	journal := host.restart(t)
+	host.claim(t, firstOperation)
 	record(t, journal, decisionOf(firstOperation, "allocate-address", nil))
 	stamped := decisionsOf(t, journal, firstOperation)[0].At
 	if stamped.IsZero() {
@@ -186,18 +197,22 @@ func TestRecordStampsTheTimeTheCallerLeftZero(t *testing.T) {
 }
 
 // The file is read by `strings` on a host too wedged to answer its API, so the
-// identifier has to be in the key and the values have to be legible.
-func TestTheFileIsLegibleToAnOperator(t *testing.T) {
+// identifier has to be in the key and the values have to be legible. It is the
+// STORE's file: the journal has none of its own, which is what lets a decision
+// and the operation that took it commit together.
+func TestTheDecisionsAreInTheStoreFileAndLegibleToAnOperator(t *testing.T) {
 	host := newHost(t)
 	journal := host.restart(t)
+	host.claim(t, firstOperation)
 	record(t, journal, decisionOf(firstOperation, "allocate-address", map[string]string{"ipv6": "2001:db8::5"}))
-	if err := journal.Close(); err != nil {
-		t.Fatalf("close journal: %v", err)
+	if err := host.store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
 	}
-	contents := readFile(t, host.journalPath)
+	host.store = nil
+	contents := readFile(t, host.path)
 	for _, wanted := range []string{firstOperation, "allocate-address", "2001:db8::5"} {
 		if !strings.Contains(contents, wanted) {
-			t.Fatalf("the journal file does not contain %q", wanted)
+			t.Fatalf("the store file does not contain %q", wanted)
 		}
 	}
 }

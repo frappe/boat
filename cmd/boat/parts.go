@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/frappe/boat/internal/adopt"
@@ -20,15 +18,6 @@ import (
 	"github.com/frappe/boat/internal/vm"
 	"github.com/frappe/boat/internal/watch"
 )
-
-// journalFileName is the write-ahead decisions file, kept beside the store.
-//
-// Beside, because the two are read together: an operator who found one has
-// found the other, and a host whose /var/lib/boat was moved moves both. The
-// journal keeps its own bbolt file only until internal/store grows a decisions
-// bucket — see the internal/journal package comment — and putting it anywhere
-// else would make that merge a migration rather than a deletion.
-const journalFileName = "journal.db"
 
 // hostScanner is the startup adoption scan.
 //
@@ -60,30 +49,27 @@ type daemonParts struct {
 	runner *run.Runner
 }
 
-// build constructs the daemon in dependency order: the store, the journal
-// beside it, the mechanics, the reconciler over all three, and then the two
-// things that ask the reconciler for work — the API and the wake trap.
+// build constructs the daemon in dependency order: the store, the journal over
+// it, the mechanics, the reconciler over all three, and then the two things that
+// ask the reconciler for work — the API and the wake trap.
 //
-// Nothing here starts a goroutine or touches the host. Construction that also
-// ran would leave a half-built daemon behind on the next error, and the error
-// paths below close what they opened precisely because they can.
+// Opening the store is the whole of the fallible part now that the journal keeps
+// its decisions in the store's own file. Nothing here starts a goroutine or
+// touches the host: construction that also ran would leave a half-built daemon
+// behind on the next error.
 func build(options daemonOptions) (*daemonParts, error) {
 	database, err := store.Open(options.storePath)
 	if err != nil {
 		return nil, fmt.Errorf("could not open the store at %s: %w", options.storePath, err)
 	}
-	decisions, err := journal.New(database, journalPath(options.storePath))
-	if err != nil {
-		database.Close()
-		return nil, fmt.Errorf("could not open the journal beside %s: %w", options.storePath, err)
-	}
-	return assemble(database, decisions), nil
+	return assemble(database), nil
 }
 
 // assemble wires the parts that cannot fail. One vm.Manager serves the API and
 // the reconciler, so a verb and a pass reach the host through the same
 // mechanics rather than through two copies of them.
-func assemble(database *store.Store, decisions *journal.Journal) *daemonParts {
+func assemble(database *store.Store) *daemonParts {
+	decisions := journal.New(database)
 	parts := &daemonParts{
 		store:    database,
 		journal:  decisions,
@@ -97,12 +83,17 @@ func assemble(database *store.Store, decisions *journal.Journal) *daemonParts {
 	return parts
 }
 
-// dependencies is the API's collaborators, named rather than inlined so the one
-// thing that cannot be seen from outside internal/api can be asserted from a
-// test: that the Server is built WITH a reconciler. A Server built without one
-// still serializes its own verbs, so nothing fails, breaks or logs — the host
-// simply acquires a second driver, and it shows up as a stop that lands in the
-// middle of a start.
+// dependencies is the API's collaborators, named rather than inlined so the two
+// things that cannot be seen from outside internal/api can be asserted from a
+// test.
+//
+// That the Server is built WITH a reconciler: one built without still serializes
+// its own verbs, so nothing fails, breaks or logs — the host simply acquires a
+// second driver, and it shows up as a stop that lands in the middle of a start.
+//
+// And that it is built with the journal: one built without refuses every verb
+// that decides something, which is loud rather than silent, but it is a refusal
+// nobody would understand from the outside.
 //
 // One *store.Store satisfies both the operation and the state interfaces; they
 // are separate at the API boundary so a handler declares which half of the store
@@ -112,6 +103,7 @@ func (parts *daemonParts) dependencies() api.Dependencies {
 		Operations:      parts.store,
 		State:           parts.store,
 		VirtualMachines: parts.machines,
+		Decisions:       parts.journal,
 		Reconciler:      parts.reconciler,
 		Watch:           watch.NewHub(),
 		StartedAt:       time.Now().UTC(),
@@ -206,14 +198,9 @@ func reportQuarantined(quarantined []model.Quarantine) {
 	}
 }
 
-// close releases the two files this daemon holds. The journal goes first
-// because the store is the one an operator opens by hand after a bad stop, and
-// the last thing written to it should be the store's own clean close.
+// close releases the one file this daemon holds. The write-ahead decisions are
+// in it too, so there is no second handle to release in an order that could be
+// got wrong.
 func (parts *daemonParts) close() error {
-	return errors.Join(parts.journal.Close(), parts.store.Close())
-}
-
-// journalPath puts the decisions file beside the store.
-func journalPath(storePath string) string {
-	return filepath.Join(filepath.Dir(storePath), journalFileName)
+	return parts.store.Close()
 }

@@ -12,85 +12,60 @@
 // (spec/33-boat.md §11.5), and it is the only reason a forward-only operation
 // can be resumed at its checkpoint at all (§3.2).
 //
-// This is not the operation record. internal/store owns an operation's status,
-// because a status kept in two places is two truths that disagree exactly when a
-// crash lands between the two writes — which is the case this package exists
-// for. The journal owns the decisions taken under an operation, and the
-// knowledge of which run of this daemon took them.
+// # What is here, and what is in internal/store
 //
-// # Where the decisions live, and how that differs from the contract
+// The bytes are the store's. Decisions live in the store's own bbolt file, in a
+// bucket beside the operations they belong to, because §11.5 asks for the
+// decision and the state it justifies to commit in one transaction and bbolt
+// takes an exclusive lock per file — a journal with a file of its own could not
+// reach that at all, and the second commit was a window a crash could land in.
+// So internal/store owns durability, the key layout and the refusal of a
+// decision naming work this host is not doing; all three are properties of the
+// transaction a decision commits in.
 //
-// The WO-2 contract has New(store *store.Store) *Journal, and spec/33-boat.md
-// §11.5 asks for the decision and the state it justifies to commit in one bbolt
-// transaction. That is the right design, and this package cannot reach it from
-// outside internal/store: the store's *bbolt.DB is unexported, it has no
-// decisions bucket, its operations bucket cannot be listed, and bbolt holds an
-// exclusive lock on its file so a second handle on the same path will not open.
-// Until internal/store grows a decisions bucket, this package keeps its own
-// bbolt file — New takes its path — and every bbolt detail is confined to
-// bolt.go so that the move is a file being deleted rather than a rewrite.
-//
-// Two consequences, both stated again where they bite. Record is still durable
-// before it returns, which is the property the write-ahead rule actually needs;
-// it is not atomic with a store write, so a crash between them leaves a decision
-// recorded for an operation whose outcome was not, and a replay reads the
-// decision and finishes — the safe direction. And Unfinished sees only
-// operations that recorded a decision.
+// What is here is the rule. Record is the entry point a verb calls, and its
+// contract is an ORDER rather than a data structure: record, then do the thing.
+// Unfinished is the other half — which operations a crash left behind — and it
+// is policy this package would have to state even if the store held every byte,
+// because "unfinished" is not "not finished yet".
 package journal
 
 import (
-	"time"
-
+	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/store"
-	"go.etcd.io/bbolt"
 )
 
-// Decision is a choice that cannot be re-made safely: which address was taken,
-// which volume was created, which host slot was claimed.
-//
-// Values is a map of strings rather than a typed payload for the same reason the
-// store writes indented JSON: on a host too wedged to answer its own API, the
-// only tools an operator has are `strings` and a hex dump, and the answer they
-// need out of this file — which address did this VM get — has to be legible in
-// both. A verb that grows a second decided value also grows no migration.
-type Decision struct {
-	OperationID string            `json:"operation_id"`
-	Step        string            `json:"step"`
-	Values      map[string]string `json:"values"`
-	At          time.Time         `json:"at"`
-}
+// Decision is the persisted shape from internal/model, named here because this
+// is the package that gives it its meaning. An alias and not a copy: a decision
+// written through Record and a decision read back out of the store are one
+// value, not two that have to be kept in step.
+type Decision = model.Decision
 
 // Journal is this host's write-ahead record of decisions.
 type Journal struct {
-	decisions  *bbolt.DB
-	operations *store.Store
-	// incarnation is which run of this daemon opened the journal. It is the whole
-	// of how an operation a crash abandoned is told apart from one that is merely
-	// slow; see Unfinished.
-	incarnation int64
+	store *store.Store
 }
 
-// New opens the journal's file at path and takes database as the authority on
-// what an operation's status is.
+// New takes the store as the authority on operations, their status and their
+// decisions.
+func New(database *store.Store) *Journal { return &Journal{store: database} }
+
+// Record writes the decision durably, and returns only once it survives a
+// crash — a decision still sitting in a buffer has not been made, and a caller
+// that acted on one is a caller whose retry chooses differently.
 //
-// Opening is itself a durable act: it advances the incarnation counter, so every
-// decision recorded from here on is stamped with a number no earlier run can
-// have used. A journal that failed to record that would report its own live
-// operations as crashed ones the next time it was asked.
-func New(database *store.Store, path string) (*Journal, error) {
-	decisions, err := openDecisions(path)
-	if err != nil {
-		return nil, err
-	}
-	incarnation, err := beginIncarnation(decisions)
-	if err != nil {
-		decisions.Close()
-		return nil, err
-	}
-	return &Journal{decisions: decisions, operations: database, incarnation: incarnation}, nil
+// The order this is used in is the entire rule: record, then do the thing. A
+// decision recorded after its side effect is not a write-ahead journal, it is a
+// log — and a log cannot answer the only question a replay has, which is what
+// the first attempt chose. Nothing below can enforce that order; it is enforced
+// by the caller putting this line above the one that acts.
+func (journal *Journal) Record(decision Decision) error {
+	return journal.store.RecordDecision(decision)
 }
 
-// Close releases the journal's file lock. Reopening the same path afterwards
-// returns the same decisions under a new incarnation, which is precisely what a
-// restart is.
-func (journal *Journal) Close() error { return journal.decisions.Close() }
+// Decisions returns what an operation already decided, in the order it decided
+// it, so a resumed operation re-enters at its checkpoint rather than at its
+// beginning.
+func (journal *Journal) Decisions(operationID string) ([]Decision, error) {
+	return journal.store.Decisions(operationID)
+}

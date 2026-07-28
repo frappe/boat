@@ -12,13 +12,13 @@ import (
 // Run drives every VM toward its desired state until ctx ends, and resumes the
 // operations a crash left unfinished before it does anything else.
 //
-// The order is the point. A half-finished terminate sitting in the journal is
-// work with a decision already recorded — an address allocated, a volume
-// created — and a fresh reconcile pass that ran first would drive that VM toward
-// a desired state the terminate is in the middle of retiring, so the two would
-// fight: the pass starts the unit the terminate has just torn the disk out from
-// under. Resuming first means the interrupted work reaches its own conclusion,
-// and only then does the steady-state loop get an opinion.
+// The order is the point. A half-finished terminate sitting in the journal is a
+// VM whose disk is part-way torn out from under a unit that is still there, and
+// a fresh reconcile pass that ran first would drive that VM toward a desired
+// state the terminate is in the middle of retiring, so the two would fight: the
+// pass starts the unit the terminate has just taken the disk from. Resuming
+// first means the interrupted work reaches its own conclusion, and only then
+// does the steady-state loop get an opinion.
 //
 // Returning cancels this reconciler for good: every pass still in flight is
 // cancelled with it, and passes requested afterwards are dropped. A daemon being
@@ -61,13 +61,18 @@ func (reconciler *Reconciler) resume(ctx context.Context) error {
 	return nil
 }
 
-// resumeOne converges one interrupted operation's VM.
+// resumeOne converges one interrupted operation's VM and then closes its record.
 //
 // The pass is a sweep-flavoured one: a resume is not somebody asking for this VM
 // by name, so it converges power and leaves a sleeping VM asleep. The decisions
 // the operation recorded are counted into the log rather than replayed here —
 // re-entering a verb at its checkpoint is the verb's own business, and this
 // package would have to know what every verb means to do it for them.
+//
+// The VM first and the record second, because that order is the one a second
+// crash survives: interrupted here, the operation is still unfinished and the
+// next start resumes it again, which costs one idempotent pass. The other order
+// would drop it from the list with its VM untouched.
 func (reconciler *Reconciler) resumeOne(ctx context.Context, operation model.Operation) {
 	log := logger(operation.VirtualMachineUUID).With("operation", operation.Identifier, "verb", operation.Verb)
 	decisions, err := reconciler.journal.Decisions(operation.Identifier)
@@ -78,6 +83,34 @@ func (reconciler *Reconciler) resumeOne(ctx context.Context, operation model.Ope
 	log.Warn("resuming a virtual machine whose operation was left unfinished", "decisions", len(decisions))
 	if err := reconciler.pass(ctx, operation.VirtualMachineUUID, triggerSweep); err != nil {
 		log.Error("could not resume a virtual machine after a restart", "error", err)
+	}
+	reconciler.conclude(operation, log)
+}
+
+// interrupted is the outcome an operation gets when the daemon running it died.
+//
+// A Failure, because Boat does not know whether the verb finished — the process
+// that could have said so is gone — and recording Success would assert an
+// outcome nobody observed, which is the habit the whole split exists to end. It
+// is also the safe direction: every verb is idempotent, so an operator who
+// retries re-runs the work, whereas a false Success is a broken host Atlas has
+// stopped asking about.
+const interrupted = "the daemon that claimed this operation restarted before recording an outcome for it"
+
+// conclude closes the record of an operation no process is running any more.
+//
+// Leaving it Running is the defect this path exists to fix. That record is what
+// GET /ops/{id} answers with and what a replayed claim reads, so it would report
+// a verb as in flight for the life of the host; and it would be handed back by
+// Unfinished to every restart after this one, so the resume would never end. The
+// VM is converged by the pass above and by the sweeps after it — what is closed
+// here is the record, not the work.
+func (reconciler *Reconciler) conclude(operation model.Operation, log *slog.Logger) {
+	operation.Status = model.OperationFailure
+	operation.Error = interrupted
+	operation.ExitCode = 1
+	if err := reconciler.store.CompleteOperation(operation); err != nil {
+		log.Error("could not close the record of an interrupted operation", "error", err)
 	}
 }
 

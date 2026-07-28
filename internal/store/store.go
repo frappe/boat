@@ -1,7 +1,10 @@
 // Package store is Boat's durable memory: the observed state of this host's VMs,
 // the desired state Atlas has asserted, the fence epochs that decide what may
-// boot, and the operation journal that makes a retried Atlas Task a replay
-// instead of a double-run. One bbolt file, one transaction per call.
+// boot, and the operation journal — the claims that make a retried Atlas Task a
+// replay instead of a double-run, and the write-ahead decisions taken under
+// them. One bbolt file, one transaction per call, and one file on purpose: a
+// decision that did not commit with the record authorizing it is a decision a
+// crash can strand (spec/33-boat.md §11.5).
 //
 // Boat is authoritative for its host's observed state, so this file is the only
 // thing that survives a daemon restart under VMs that never stopped running.
@@ -22,10 +25,11 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-// The buckets. VMs, desired records and fence epochs are keyed by UUID and
-// operations by the Atlas Task name, so every key an operator reads out of this
-// file is a key they can search for in Atlas. meta holds the store's own
-// bookkeeping, which today is the observed epoch and nothing else.
+// The buckets. VMs, desired records and fence epochs are keyed by UUID,
+// operations by the Atlas Task name and decisions by that name plus a sequence,
+// so every key an operator reads out of this file is a key they can search for
+// in Atlas. meta holds the store's own bookkeeping: the observed epoch and the
+// incarnation counter.
 var (
 	virtualMachinesBucket = []byte("virtual-machines")
 	// quarantineBucket holds artifact sets that could not be read as a VM. It is
@@ -33,9 +37,16 @@ var (
 	// as it is now, and a resolved one must stop being reported.
 	quarantineBucket = []byte("quarantine")
 	operationsBucket = []byte("operations")
-	desiredBucket    = []byte("desired")
-	fenceBucket      = []byte("fence")
-	metaBucket       = []byte("meta")
+	// decisionsBucket holds the write-ahead decisions of spec/33-boat.md §11.5,
+	// keyed by the operation that took them. It is in this file rather than beside
+	// it because the rule asks for a decision and the state it justifies to commit
+	// in ONE transaction, and bbolt takes an exclusive lock per file — so a second
+	// file would be a second commit, and a crash between the two is exactly the
+	// gap the rule exists to close. See decisions.go.
+	decisionsBucket = []byte("decisions")
+	desiredBucket   = []byte("desired")
+	fenceBucket     = []byte("fence")
+	metaBucket      = []byte("meta")
 )
 
 // buckets is the whole set, so that adding one is a single edit rather than an
@@ -44,6 +55,7 @@ var buckets = [][]byte{
 	virtualMachinesBucket,
 	quarantineBucket,
 	operationsBucket,
+	decisionsBucket,
 	desiredBucket,
 	fenceBucket,
 	metaBucket,
@@ -58,19 +70,27 @@ const openTimeout = 5 * time.Second
 // Replay is only replay when it is the same operation.
 var ErrOperationConflict = errors.New("operation identifier already used for different work")
 
-// errUnclaimedOperation means a completion arrived for an identifier the journal
-// has never seen. Every operation is claimed before it runs, so this is a bug in
-// the caller and not a state the host can reach on its own.
+// errUnclaimedOperation means a completion or a decision arrived for an
+// identifier the journal has never seen. Every operation is claimed before it
+// runs, so this is a bug in the caller and not a state the host can reach on its
+// own.
 var errUnclaimedOperation = errors.New("operation was never claimed")
 
 // Store is this host's bbolt database.
 type Store struct {
 	database *bbolt.DB
+	// incarnation is which run of this daemon holds the file. See incarnation.go.
+	incarnation int64
 }
 
 // Open opens the database at path, creating the parent directory, the file and
 // the buckets as needed. It is safe on an existing database: a Boat restart
 // re-opens the same file under VMs that are still running.
+//
+// Opening is itself a durable act, because it advances the incarnation counter:
+// every operation claimed from here on is stamped with a number no earlier run
+// can have used, which is what makes a crashed operation distinguishable from a
+// slow one.
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create store directory for %s: %w", path, err)
@@ -83,7 +103,12 @@ func Open(path string) (*Store, error) {
 		database.Close()
 		return nil, err
 	}
-	return &Store{database: database}, nil
+	incarnation, err := beginIncarnation(database)
+	if err != nil {
+		database.Close()
+		return nil, err
+	}
+	return &Store{database: database, incarnation: incarnation}, nil
 }
 
 func createBuckets(database *bbolt.DB) error {

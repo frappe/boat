@@ -233,52 +233,60 @@ func (machines *machines) counted(verb string) int {
 	return count
 }
 
-// harness is one host: the store and journal a reconciler persists through, the
-// fake mechanics it drives, and the delays it asked to wait.
+// harness is one host: the store a reconciler persists through, the journal over
+// it, the fake mechanics it drives, and the delays it asked to wait.
 type harness struct {
-	store       *store.Store
-	journal     *journal.Journal
-	machines    *machines
-	occupancy   *occupancy
-	reconciler  *Reconciler
-	journalPath string
-	delays      chan time.Duration
+	store      *store.Store
+	journal    *journal.Journal
+	machines   *machines
+	occupancy  *occupancy
+	reconciler *Reconciler
+	storePath  string
+	delays     chan time.Duration
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	directory := t.TempDir()
-	database, err := store.Open(filepath.Join(directory, "boat.db"))
+	occupancy := newOccupancy()
+	harness := &harness{
+		machines:  newMachines(occupancy),
+		occupancy: occupancy,
+		storePath: filepath.Join(t.TempDir(), "boat.db"),
+		delays:    make(chan time.Duration, 64),
+	}
+	harness.open(t)
+	return harness
+}
+
+// open closes the store and opens it again, which is what a daemon restart is:
+// the same file under the next incarnation, so everything claimed before it
+// belongs to a run that has ended.
+func (harness *harness) open(t *testing.T) {
+	t.Helper()
+	if harness.store != nil {
+		if err := harness.store.Close(); err != nil {
+			t.Fatalf("close store: %v", err)
+		}
+	}
+	database, err := store.Open(harness.storePath)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
+	harness.store = database
 	t.Cleanup(func() { database.Close() })
-	occupancy := newOccupancy()
-	return &harness{
-		store:       database,
-		machines:    newMachines(occupancy),
-		occupancy:   occupancy,
-		journalPath: filepath.Join(directory, "journal.db"),
-		delays:      make(chan time.Duration, 64),
-	}
 }
 
-// start opens the journal and builds the reconciler. It is separate from
-// newHarness so that a test can leave a crashed operation in the journal first,
-// which is the only way to reach the state a restart recovers from.
+// start builds the reconciler over the store as it stands. It is separate from
+// newHarness so that a test can leave a crashed operation behind first, which is
+// the only way to reach the state a restart recovers from.
 //
 // The intervals are shortened and the wait is replaced with a recorder: the
 // backoff is asserted from the delays the reconciler asked for, so no test ever
 // lives through one.
 func (harness *harness) start(t *testing.T) *Reconciler {
 	t.Helper()
-	record, err := journal.New(harness.store, harness.journalPath)
-	if err != nil {
-		t.Fatalf("open journal: %v", err)
-	}
-	t.Cleanup(func() { record.Close() })
-	harness.journal = record
-	harness.reconciler = New(harness.store, harness.machines, record)
+	harness.journal = journal.New(harness.store)
+	harness.reconciler = New(harness.store, harness.machines, harness.journal)
 	harness.reconciler.sweepInterval = time.Millisecond
 	harness.reconciler.backoff = backoff{base: 10 * time.Millisecond, max: 40 * time.Millisecond}
 	harness.reconciler.wait = harness.recordDelay
@@ -328,24 +336,33 @@ func (harness *harness) desireUnfenced(t *testing.T, uuid string, power model.De
 }
 
 // crash leaves behind exactly what a daemon that died mid-operation does: a
-// claimed operation the store still calls Running, and a decision recorded
-// against it by an incarnation that is gone.
-func (harness *harness) crash(t *testing.T, identifier string, uuid string) {
+// claimed operation the store still calls Running, stamped with an incarnation
+// that has ended. Reopening the file is what ends it.
+//
+// The decision is optional because that is the point of the shape: seven of the
+// nine verbs record none, and their claims have to be recovered all the same.
+func (harness *harness) crash(t *testing.T, identifier string, uuid string, steps ...string) {
 	t.Helper()
 	if _, claimed, err := harness.store.ClaimOperation(identifier, "stop-vm", uuid); err != nil || !claimed {
 		t.Fatalf("claim %s: claimed=%v err=%v", identifier, claimed, err)
 	}
-	record, err := journal.New(harness.store, harness.journalPath)
-	if err != nil {
-		t.Fatalf("open journal: %v", err)
+	for _, step := range steps {
+		if err := harness.store.RecordDecision(journal.Decision{OperationID: identifier, Step: step}); err != nil {
+			t.Fatalf("record decision %s: %v", step, err)
+		}
 	}
-	decision := journal.Decision{OperationID: identifier, Step: "allocate-address"}
-	if err := record.Record(decision); err != nil {
-		t.Fatalf("record decision: %v", err)
+	harness.open(t)
+}
+
+// operation is what the store now records under a Task name, which is what
+// GET /ops/{id} answers with and what a replayed claim reads.
+func (harness *harness) operation(t *testing.T, identifier string) model.Operation {
+	t.Helper()
+	operation, found, err := harness.store.GetOperation(identifier)
+	if err != nil || !found {
+		t.Fatalf("read operation %s: found=%v err=%v", identifier, found, err)
 	}
-	if err := record.Close(); err != nil {
-		t.Fatalf("close journal: %v", err)
-	}
+	return operation
 }
 
 func (harness *harness) observedStatus(t *testing.T, uuid string) model.VirtualMachineStatus {

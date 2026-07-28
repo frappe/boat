@@ -22,12 +22,18 @@ import (
 // An identifier already recorded against a different verb or VM is
 // ErrOperationConflict. Replay is only replay when it is the same operation;
 // handing a caller someone else's result is worse than refusing them.
+//
+// The claim also carries this run's incarnation, written by the same
+// transaction. That is what makes crash recovery cover all nine verbs and not
+// only the ones that go on to record a decision: an operation is in flight from
+// the moment it is claimed, and a claim whose stamp were written afterwards
+// would leave a window in which a crash strands an operation nothing can see.
 func (store *Store) ClaimOperation(identifier, verb, uuid string) (model.Operation, bool, error) {
 	var operation model.Operation
 	var claimed bool
 	err := store.database.Update(func(transaction *bbolt.Tx) error {
 		var err error
-		operation, claimed, err = claimInBucket(transaction.Bucket(operationsBucket), identifier, verb, uuid)
+		operation, claimed, err = store.claimInBucket(transaction.Bucket(operationsBucket), identifier, verb, uuid)
 		return err
 	})
 	if err != nil {
@@ -36,7 +42,9 @@ func (store *Store) ClaimOperation(identifier, verb, uuid string) (model.Operati
 	return operation, claimed, nil
 }
 
-func claimInBucket(bucket *bbolt.Bucket, identifier, verb, uuid string) (model.Operation, bool, error) {
+func (store *Store) claimInBucket(
+	bucket *bbolt.Bucket, identifier, verb, uuid string,
+) (model.Operation, bool, error) {
 	recorded, found, err := getRecord[model.Operation](bucket, identifier)
 	if err != nil {
 		return model.Operation{}, false, err
@@ -45,21 +53,26 @@ func claimInBucket(bucket *bbolt.Bucket, identifier, verb, uuid string) (model.O
 		return model.Operation{}, false, conflictWith(identifier, recorded)
 	}
 	if found {
+		// A replay keeps the incarnation that claimed it. The operation belongs to
+		// the run that started it, and re-stamping it here would let a restarted
+		// daemon adopt work it never began — which is the one thing the stamp exists
+		// to prevent it from doing.
 		return recorded, false, nil
 	}
-	claim := runningOperation(identifier, verb, uuid)
+	claim := runningOperation(identifier, verb, uuid, store.incarnation)
 	return claim, true, putRecord(bucket, identifier, claim)
 }
 
 // runningOperation stamps in UTC. Hosts run in whatever timezone they were
 // imaged with, and a journal an operator reads across several of them at once
 // has to be comparable without knowing which.
-func runningOperation(identifier, verb, uuid string) model.Operation {
+func runningOperation(identifier, verb, uuid string, incarnation int64) model.Operation {
 	return model.Operation{
 		Identifier:         identifier,
 		Verb:               verb,
 		VirtualMachineUUID: uuid,
 		Status:             model.OperationRunning,
+		Incarnation:        incarnation,
 		StartedAt:          time.Now().UTC(),
 	}
 }
@@ -130,6 +143,37 @@ func (store *Store) GetOperation(identifier string) (model.Operation, bool, erro
 		return model.Operation{}, false, err
 	}
 	return operation, found, nil
+}
+
+// ListOperations returns every operation this host has recorded, ordered by
+// identifier, so that two restarts read the same work in the same sequence.
+//
+// This is what makes a crash visible at all. Without it an operation a restart
+// left Running is in the file and reachable by name, but unreachable by anyone
+// who does not already know the name — so no recovery path can find the very
+// records it exists to close (spec/33-boat.md §3.3, §11.5).
+//
+// It reads the whole bucket, which is never pruned: a host that has run ten
+// thousand verbs decodes ten thousand records here. That is paid once per boot
+// by the one caller (internal/journal's Unfinished), and the day it stops being
+// cheap is the day this bucket needs a retention rule — which is a decision for
+// the chapter, not a filter quietly added here.
+func (store *Store) ListOperations() ([]model.Operation, error) {
+	operations := []model.Operation{}
+	err := store.database.View(func(transaction *bbolt.Tx) error {
+		return transaction.Bucket(operationsBucket).ForEach(func(key, value []byte) error {
+			operation, err := decodeRecord[model.Operation](key, value)
+			if err != nil {
+				return err
+			}
+			operations = append(operations, operation)
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read this host's operations: %w", err)
+	}
+	return operations, nil
 }
 
 // conflictWith says what the identifier is already spoken for, because the whole
