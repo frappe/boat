@@ -125,9 +125,14 @@ func (server *Server) asActor(
 // daemon is shutting down.
 //
 // The claim is already in the journal by then, so it owes a terminal record
-// whatever happened to the caller: an operation left Running is one the Atlas
-// Task behind it waits on forever, and the retry that would rescue it reads the
-// same non-terminal record and waits again.
+// whatever happened to the caller: an operation left Running is one whose Atlas
+// Task can never be answered, and the retry that would rescue it reads the same
+// non-terminal record and is refused again.
+//
+// The out-of-process case — the daemon itself dying between the claim and the
+// record — cannot be closed from here, and is closed by the reconciler's resume
+// on the next start (internal/reconcile, conclude). The claim carries this run's
+// incarnation for exactly that reason.
 func (server *Server) abandoned(operation model.Operation, uuid string, cause error) (model.Operation, *errorResponse) {
 	var trace bytes.Buffer
 	recorded, failure := server.record(operation, &trace, fmt.Errorf("waiting for a turn on %s: %w", uuid, cause))

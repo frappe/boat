@@ -181,6 +181,9 @@ func (server *Server) RebuildVirtualMachine(ctx context.Context, request wire.Re
 		return failure, nil
 	}
 	build := func(runner *run.Runner) error {
+		if err := server.decisions.Record(rebuildSource(request.Body.OperationId, rebuild)); err != nil {
+			return err
+		}
 		firecrackerUID, err := server.virtualMachines.FirecrackerUID(ctx, runner, request.Uuid)
 		if err != nil {
 			return err
@@ -195,6 +198,35 @@ func (server *Server) RebuildVirtualMachine(ctx context.Context, request wire.Re
 	return wire.RebuildVirtualMachine200JSONResponse{
 		OperationAcceptedJSONResponse: wire.OperationAcceptedJSONResponse(operationToWire(operation)),
 	}, nil
+}
+
+// rebuildSource is the write-ahead decision of the one verb among the nine that
+// makes a choice its own retry could not repeat (spec/33-boat.md §11.5). It is
+// recorded before the rebuild runs, because the rebuild's first act is to drop
+// the VM's root volume — after that the question "what was this supposed to
+// become" has no answer on the host at all.
+//
+// What makes it a decision rather than a log line: the source is the only verb
+// input that is neither desired state nor host state. It is chosen at the moment
+// of asking and written down nowhere else, so a crash between the claim and the
+// terminal record loses it — the operation record remembers the verb and the
+// UUID, and only this remembers which filesystem the VM was authorized to be
+// rebuilt from.
+//
+// The request's sources are recorded as stated, not the single origin
+// vm.Rebuild resolves them to. The precedence rule — a snapshot device wins over
+// an image — belongs to internal/vm, and restating it here would let this record
+// start lying the day that rule changes.
+func rebuildSource(operationID string, request vm.RebuildRequest) model.Decision {
+	return model.Decision{
+		OperationID: operationID,
+		Step:        "rebuild-source",
+		Values: map[string]string{
+			"snapshot_device":      request.SnapshotDevice,
+			"image":                request.Image,
+			"data_snapshot_device": request.DataSnapshotDevice,
+		},
+	}
 }
 
 // operation is the shared front of every verb whose whole request is the

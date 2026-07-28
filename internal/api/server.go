@@ -18,6 +18,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"time"
@@ -53,6 +54,15 @@ type StateStore interface {
 	FenceEpoch(uuid string) (int64, bool, error)
 	ObservedEpoch() (int64, error)
 	Snapshot() (model.Export, error)
+}
+
+// Decisions is the write-ahead journal as the handlers use it: the one method
+// that has to be called BEFORE the side effect it authorizes, so that a crash
+// and then a retry replays the choice instead of making a second, different one
+// (spec/33-boat.md §11.5). internal/journal is the implementation and the place
+// that argument is written out in full.
+type Decisions interface {
+	Record(decision model.Decision) error
 }
 
 // VirtualMachines is the slice of the VM manager the handlers need: one method
@@ -95,6 +105,12 @@ type Dependencies struct {
 	Operations      OperationStore
 	State           StateStore
 	VirtualMachines VirtualMachines
+	// Decisions is the write-ahead journal. Unlike Watch and Reconciler below,
+	// there is no legal nil: a verb that made a choice and could not write it down
+	// has nothing a replay could read, which is the whole failure §11.5 exists to
+	// prevent. A Server built without one therefore refuses the verbs that decide
+	// rather than running them unjournalled — see refusedDecision.
+	Decisions Decisions
 	// Reconciler is what every verb takes its turn from, so a verb and a
 	// reconcile pass can never drive one machine at once. A nil Reconciler is
 	// legal and means the Server serializes against itself — see localSerializer
@@ -113,6 +129,7 @@ type Server struct {
 	operations      OperationStore
 	state           StateStore
 	virtualMachines VirtualMachines
+	decisions       Decisions
 	reconciler      Reconciler
 	watch           *watch.Hub
 	startedAt       time.Time
@@ -144,16 +161,35 @@ func NewServer(dependencies Dependencies) *Server {
 	if serializer == nil {
 		serializer = newLocalSerializer()
 	}
+	// A missing journal is substituted with one that refuses. Substituting one
+	// that silently accepted would be the same bug as having no journal at all,
+	// and dereferencing nil in the middle of a verb would take the daemon down
+	// under live guests.
+	decisions := dependencies.Decisions
+	if decisions == nil {
+		decisions = refusedDecision{}
+	}
 	return &Server{
 		operations:      dependencies.Operations,
 		state:           dependencies.State,
 		virtualMachines: dependencies.VirtualMachines,
+		decisions:       decisions,
 		reconciler:      serializer,
 		watch:           hub,
 		startedAt:       dependencies.StartedAt,
 		newRunner:       run.NewRunner,
 		hostFacts:       hostfacts.Read,
 	}
+}
+
+// refusedDecision stands in for a journal a Server was built without. Every
+// decision through it fails, which fails the verb that was about to act on one:
+// a host that cannot write down what it chose must not choose, because nothing
+// afterwards could tell a replay what the first attempt did.
+type refusedDecision struct{}
+
+func (refusedDecision) Record(decision model.Decision) error {
+	return errors.New("this Boat was built with no write-ahead journal, so it will not make a decision it cannot record")
 }
 
 // GetHealth is unauthenticated by design, so a supervisor can probe a Boat that

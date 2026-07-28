@@ -33,6 +33,7 @@ type fakeStore struct {
 	virtualMachines map[string]model.VirtualMachine
 	desired         map[string]model.DesiredVirtualMachine
 	fences          map[string]int64
+	decisions       []model.Decision
 	epoch           int64
 	units           []model.UnitLiveness
 	logicalVolumes  []model.LogicalVolume
@@ -40,6 +41,7 @@ type fakeStore struct {
 	fenceWrites     int
 	claimError      error
 	completeError   error
+	decisionError   error
 	readError       error
 	writeError      error
 	snapshotError   error
@@ -113,6 +115,25 @@ func (fake *fakeStore) GetOperation(identifier string) (model.Operation, bool, e
 	}
 	operation, found := fake.operations[identifier]
 	return operation, found, nil
+}
+
+// Record keeps the decisions in the order they were taken, which is the property
+// the real store's key layout buys and the one a test asserting a write-ahead
+// ordering depends on.
+func (fake *fakeStore) Record(decision model.Decision) error {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
+	if fake.decisionError != nil {
+		return fake.decisionError
+	}
+	fake.decisions = append(fake.decisions, decision)
+	return nil
+}
+
+func (fake *fakeStore) decided() []model.Decision {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
+	return append([]model.Decision{}, fake.decisions...)
 }
 
 // PutVirtualMachine bumps the observed epoch with the write, as the real store
@@ -260,6 +281,11 @@ type fakeVirtualMachines struct {
 	sleepResult       vm.SleepResult
 	firecrackerUID    int
 	firecrackerUIDErr error
+	// beforeRebuild runs as the rebuild reaches the host, which is the only place
+	// a test can see what was recorded BEFORE the volume would have been dropped.
+	// Ordering is the whole of the write-ahead rule, and it is invisible to any
+	// assertion made after the request returns.
+	beforeRebuild func()
 
 	// hold is how long a verb pretends to take, and overlapped is whether a
 	// second one ever ran while it did. Counters alone cannot see the failure the
@@ -330,6 +356,9 @@ func (fake *fakeVirtualMachines) Rebuild(
 	ctx context.Context, runner *run.Runner, uuid string, request vm.RebuildRequest,
 ) error {
 	defer fake.enter()()
+	if fake.beforeRebuild != nil {
+		fake.beforeRebuild()
+	}
 	fake.rebuildRequests = append(fake.rebuildRequests, request)
 	fake.writeTrace()
 	return fake.verbError
@@ -409,6 +438,7 @@ func newTestServer(operations *fakeStore, machines *fakeVirtualMachines) *Server
 		Operations:      operations,
 		State:           operations,
 		VirtualMachines: machines,
+		Decisions:       operations,
 		Watch:           watch.NewHub(),
 		StartedAt:       time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC),
 	})

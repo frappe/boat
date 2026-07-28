@@ -403,6 +403,75 @@ func TestRebuildJoinsItsRequestToDesiredStateAndTheHost(t *testing.T) {
 	}
 }
 
+// Rebuild is the one verb among the nine that makes a choice its own retry
+// could not repeat, and the choice is written down BEFORE the verb runs: the
+// rebuild's first act is to drop the VM's root volume, and after that the host
+// holds no record of what it was supposed to become.
+func TestRebuildRecordsItsSourceBeforeItLaysAnythingDown(t *testing.T) {
+	operations := aFencedRunningVirtualMachine()
+	machines := &fakeVirtualMachines{}
+	snapshot := "/dev/atlas/atlas-snap-77777777"
+	// Asserted from inside the verb, because "before" is the whole claim. A
+	// decision recorded afterwards is a log, and a log cannot answer the one
+	// question a replay has.
+	machines.beforeRebuild = func() {
+		if len(operations.decided()) != 1 {
+			t.Errorf("the rebuild reached the host with %d decisions recorded, want its source first",
+				len(operations.decided()))
+		}
+	}
+	handler := newTestServer(operations, machines).SocketHandler()
+
+	postJSON(t, handler, "/vms/"+testUuid+"/rebuild",
+		wire.RebuildRequest{OperationId: "Task-21", SnapshotDevice: &snapshot})
+
+	decisions := operations.decided()
+	if len(decisions) != 1 {
+		t.Fatalf("recorded %d decisions, want the one source this rebuild was authorized to use", len(decisions))
+	}
+	if decisions[0].OperationID != "Task-21" || decisions[0].Step != "rebuild-source" {
+		t.Fatalf("recorded %+v, want the source under the operation that chose it", decisions[0])
+	}
+	if decisions[0].Values["snapshot_device"] != snapshot {
+		t.Fatalf("recorded %v, want the device the request named", decisions[0].Values)
+	}
+}
+
+// A decision that could not be written down is not a decision, and the verb must
+// not run past it. Acting on a choice no crash could recover is the whole
+// failure write-ahead journalling exists to prevent.
+//
+// The two cases are the same rule from either side: a journal that refused the
+// write, and a Server that was built without a journal at all.
+func TestRebuildDoesNotRunWhenItsSourceCannotBeRecorded(t *testing.T) {
+	image := "ubuntu-24.04"
+	cases := map[string]func(*fakeStore, *fakeVirtualMachines) *Server{
+		"the journal refused": func(operations *fakeStore, machines *fakeVirtualMachines) *Server {
+			operations.decisionError = errors.New("the store refused")
+			return newTestServer(operations, machines)
+		},
+		"there is no journal": func(operations *fakeStore, machines *fakeVirtualMachines) *Server {
+			return NewServer(Dependencies{Operations: operations, State: operations, VirtualMachines: machines})
+		},
+	}
+	for name, build := range cases {
+		t.Run(name, func(t *testing.T) {
+			operations, machines := aFencedRunningVirtualMachine(), &fakeVirtualMachines{}
+			handler := build(operations, machines).SocketHandler()
+
+			postJSON(t, handler, "/vms/"+testUuid+"/rebuild",
+				wire.RebuildRequest{OperationId: "Task-22", Image: &image})
+
+			if len(machines.rebuildRequests) != 0 {
+				t.Fatalf("the rebuild ran %d times without its source recorded", len(machines.rebuildRequests))
+			}
+			if got := operations.operations["Task-22"].Status; got != model.OperationFailure {
+				t.Fatalf("the operation was recorded %q, want the failure that stopped it", got)
+			}
+		})
+	}
+}
+
 // The guest identity crosses the boundary as bytes. Boat carries an
 // authorized-keys blob and a list of {path, content} files it cannot tell apart
 // from one another, and nothing here knows what any of them are for.
