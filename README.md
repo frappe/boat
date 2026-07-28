@@ -37,25 +37,37 @@ Guest identity crosses the boundary as opaque bytes: Boat writes them into the
 rootfs without parsing them, so a service-semantic field can never become
 something Boat has an opinion about.
 
-## Status: walking skeleton
+## Status: the VM lifecycle, and not much else
 
-This is WO-0. Today Boat can:
+Today Boat serves the nine lifecycle verbs — **start**, **stop**, **pause**,
+**resume**, **sleep**, **wake**, **resize**, **rebuild**, **terminate** — and
+the two calls that define the relationship with Atlas: `PUT /vms/{uuid}` is
+Atlas asserting intent, `GET /export` is Boat asserting fact. Around them:
 
-- **start** a provisioned VM through its `firecracker-vm@<uuid>.service` unit,
-  resuming from a memory snapshot when one is staged;
-- **stop** a VM, cooperatively by default so the guest syncs before the unit goes
-  down;
-- **observe** one VM or all of them — status read off the host, plus host facts
-  and the running version;
-- remember both in a bbolt file, so re-posting an `operation_id` returns the
-  first result instead of running the work twice.
+- **observed state read off the host** — the unit's state and the on-disk
+  markers, never a command's exit code — for one VM, for all of them, or for
+  the whole host in a single document;
+- **an operation journal**, so re-posting an `operation_id` returns the first
+  result instead of running the work twice;
+- **one actor per VM**, so a verb and a reconcile pass are one queue and nothing
+  drives a machine another thing is mid-boot on;
+- **the wake-on-TCP reflex**, resident, deciding with no control plane in the
+  loop;
+- **a fence epoch** that only Atlas issues, without which this host boots
+  nothing it finds on its own disk.
 
-That is the entire surface. Not yet here: adoption and Firecracker re-attach,
-whole-host export and the watch stream, fencing, the reconciler, per-VM
-networking, the wake-on-TCP reflex, migration, bootstrap, self-update, and the
-other ~50 host verbs. Each is its own work order, and until its verb ports the
-Python script on the host remains the implementation. Do not deploy this
-expecting a control plane.
+Almost every verb's whole request is its `operation_id`. A resize reads its
+numbers from the desired state Atlas already asserted rather than being sent
+them, and the per-VM uid comes off the host's own `network.env` — a request that
+could state a shape the store disagrees with is the shape to refuse in review.
+Two verbs carry more: `stop` its two knobs, and `rebuild` the source to lay down
+plus the guest identity to write into it.
+
+Not yet here: provisioning, migration, bootstrap, self-update, per-VM networking
+as a Boat subcommand, and the other ~50 host verbs. Each is its own work order,
+and until its verb ports, the Python script on the host remains the
+implementation. The CLI is narrower still than the API — `boat vm` starts,
+stops, lists and shows, and the other seven verbs are reachable only over HTTP.
 
 ## The API is the whole surface
 
@@ -74,13 +86,22 @@ Central-managed management tunnel. It never binds a public interface.
 api/openapi.yaml      the Atlas<->Boat contract; the source of truth for the wire
 api/codegen.yaml      how internal/wire is generated from it
 cmd/boat/             the multi-call entry point: daemon, vm, host, version
+internal/adopt/       reading a host's existing VMs, and quarantining the rest
 internal/api/         the HTTP surface, implementing the generated interface
+internal/fcattach/    re-attaching to a Firecracker that outlived the daemon
+internal/fence/       the boot gate: whether this host may boot a UUID at all
+internal/hostfacts/   what this host is, measured rather than remembered
+internal/journal/     the write-ahead record of a non-idempotent decision
 internal/model/       the records Boat persists
+internal/park/        the sleeping VM's reachability and the wake-on-TCP reflex
 internal/paths/       every on-host path for a VM, derived from its UUID
+internal/reconcile/   one actor per VM, driving observed state toward desired
 internal/run/         the only package that runs a subprocess
-internal/store/       bbolt: observed VMs and the operation journal
+internal/sidecar/     the KEY=value files the host keeps beside every VM
+internal/store/       bbolt: observed VMs, desired state, fences, the journal
 internal/version/     this build's identity, stamped at link time
-internal/vm/          start, stop, observe
+internal/vm/          the mechanics: one file per verb, plus observe
+internal/watch/       the observed-change stream
 internal/wire/        generated from the IDL. never hand-edited
 systemd/boat.service  the daemon unit
 sudoers.d/boat        the pinned NOPASSWD allow-list for the non-root service user
