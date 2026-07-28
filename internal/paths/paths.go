@@ -201,7 +201,7 @@ func (virtualMachine VirtualMachine) APISocketName() string {
 }
 
 // SleepingMarker is present while the VM sleeps: it suppresses systemd
-// auto-start after a host reboot (the unit's ConditionPathNotExists) and is the
+// auto-start after a host reboot (the unit's ConditionPathExists=! condition) and is the
 // authority for the Sleeping status. Sleep writes it after the stop; wake
 // removes it before the start. It lives outside the jail, in the VM directory,
 // so terminate's rm -rf still sweeps it.

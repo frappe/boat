@@ -106,7 +106,7 @@ func startStep(observed model.VirtualMachine, why trigger) step {
 	case model.StatusSleeping:
 		// Resumed only when someone asked for this VM by name, and resumed by Wake
 		// rather than Start. A sleeping VM's unit carries
-		// ConditionPathNotExists=<the sleeping marker>, so `systemctl start` skips
+		// ConditionPathExists=! condition=<the sleeping marker>, so `systemctl start` skips
 		// the unit, exits 0, and leaves the guest exactly as down as it found it —
 		// the pass then fails on its own is-active check and backs off, forever.
 		// Wake removes the marker first, which is the only order that works.

@@ -48,7 +48,7 @@ import (
 // no systemd and no Firecracker under it.
 //
 // Start and Wake are both here and they are not interchangeable. A sleeping VM
-// carries a marker the unit reads as ConditionPathNotExists, so `systemctl
+// carries a marker the unit reads as ConditionPathExists=! condition, so `systemctl
 // start` skips the unit and exits 0 with the guest still down; only Wake takes
 // the marker off first. A reconciler holding just Start can converge every VM on
 // this host except the ones sleep-on-idle parked.

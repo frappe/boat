@@ -248,7 +248,7 @@ func TestSleepFallsBackWhenTheMemoryFileIsEmpty(t *testing.T) {
 	)
 }
 
-// The marker comes off BEFORE the start: the unit's ConditionPathNotExists sees
+// The marker comes off BEFORE the start: the unit's ConditionPathExists=! condition sees
 // it and silently declines to start, so a start with the marker still there
 // reports success and leaves the VM down.
 func TestWakeRemovesTheMarkerBeforeStartingTheUnit(t *testing.T) {

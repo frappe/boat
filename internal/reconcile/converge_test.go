@@ -161,7 +161,7 @@ func TestAHostThatCannotBeReadIsNotDriven(t *testing.T) {
 // by name — the two halves of sleep-on-idle staying useful.
 //
 // Resumed through Wake, and asserted by what the host BECAME rather than by what
-// it was asked for: a start here is skipped by the unit's ConditionPathNotExists
+// it was asked for: a start here is skipped by the unit's ConditionPathExists=! condition
 // and exits 0, so a reconciler that reached for Start would report a converged
 // pass over a VM that never came back.
 func TestASleepingVirtualMachineIsResumedOnlyWhenAskedFor(t *testing.T) {

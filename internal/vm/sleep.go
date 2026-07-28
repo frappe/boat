@@ -50,7 +50,7 @@ type SleepResult struct {
 // Sleep parks a VM: capture its memory, stop its unit, and mark it sleeping.
 //
 // The marker is the load-bearing artifact, not the snapshot. It is what the
-// unit's ConditionPathNotExists reads, so a sleeping VM does not come back on
+// unit's ConditionPathExists=! condition reads, so a sleeping VM does not come back on
 // the next host reboot, and it is what Observe reports Sleeping from. Which is
 // why every path below writes it AFTER the unit stops, including the paths that
 // gave up on the snapshot: a VM that ends this verb stopped but unmarked would
@@ -311,7 +311,7 @@ func (manager *Manager) parkForWake(ctx context.Context, runner *run.Runner, uui
 
 // Wake starts a sleeping VM: remove the marker, then start the unit.
 //
-// The marker comes off FIRST. The unit's ConditionPathNotExists sees a marker
+// The marker comes off FIRST. The unit's ConditionPathExists=! condition sees a marker
 // and silently declines to start — exit 0, unit skipped — so a start with the
 // marker still in place reports success and leaves the VM down. Removing it
 // first also means a wake that follows a failed wake still clears it.

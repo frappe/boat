@@ -34,7 +34,7 @@ const testDeadline = 5 * time.Second
 var errHostRefused = errors.New("the host refused")
 
 // errStartSkippedWhileSleeping is what a real Start reports for a sleeping VM,
-// and modelling it is the point: the unit's ConditionPathNotExists sees the
+// and modelling it is the point: the unit's ConditionPathExists=! condition sees the
 // sleeping marker, `systemctl start` skips the unit and exits 0, and the
 // trailing `is-active` then fails the whole start. A fake whose Start set
 // Running unconditionally made a reconciler that could not wake anything look
