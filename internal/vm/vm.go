@@ -61,6 +61,7 @@ var _ commands = (*run.Runner)(nil)
 type virtualMachineFiles struct {
 	unit                    string
 	directory               string
+	networkEnvironment      string
 	jailRoot                string
 	jailerLaunch            string
 	firecrackerConfig       string
@@ -81,6 +82,7 @@ func filesFor(uuid string) virtualMachineFiles {
 	return virtualMachineFiles{
 		unit:                    virtualMachine.SystemdUnit(),
 		directory:               virtualMachine.Directory(),
+		networkEnvironment:      virtualMachine.NetworkEnvironment(),
 		jailRoot:                virtualMachine.JailRoot(),
 		jailerLaunch:            virtualMachine.JailerLaunch(),
 		firecrackerConfig:       virtualMachine.FirecrackerConfig(),

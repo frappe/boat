@@ -280,20 +280,27 @@ func TestTheTrapPollsThroughARunnerThatCannotTrace(t *testing.T) {
 	}
 }
 
-func TestTheSidecarIsReadForTheAddressAndNothingElse(t *testing.T) {
-	text := environmentText(testAddress)
-	if got := networkEnvironmentValue(text, addressKey); got != testAddress {
+// The address comes out of the VM's own sidecar rather than from a caller, so a
+// trap can never be armed for a /128 this host stopped holding. The file's
+// syntax is internal/sidecar's business; what is this package's is that the key
+// read is the public /128 and not one of the four others sharing the file.
+func TestTheAddressIsReadFromTheVirtualMachinesOwnSidecar(t *testing.T) {
+	fake := newFakeCommands()
+	fake.outputs[environmentOf(testUUID)] = environmentText(testAddress)
+	parker := &parker{commands: fake, filesFor: testFiles}
+
+	if got := parker.address(context.Background(), testUUID); got != testAddress {
 		t.Errorf("address = %q, want %q", got, testAddress)
 	}
-	// Written to be sourced by a shell: comments are not keys, a quoted value is
-	// unquoted, and a key that is not there is empty rather than a guess.
-	if got := networkEnvironmentValue("# VIRTUAL_MACHINE_IPV6=2001:db8::9\n", addressKey); got != "" {
-		t.Errorf("a commented-out key yielded %q", got)
-	}
-	if got := networkEnvironmentValue(`VIRTUAL_MACHINE_IPV6="2001:db8::9"`, addressKey); got != "2001:db8::9" {
-		t.Errorf("a quoted value yielded %q", got)
-	}
-	if got := networkEnvironmentValue("", addressKey); got != "" {
-		t.Errorf("an empty sidecar yielded %q", got)
+}
+
+// A VM whose sidecar is gone — a terminate that got as far as the files —
+// yields no address, and parking an empty address is a no-op rather than a trap
+// installed for whatever the host holds now.
+func TestAMissingSidecarYieldsNoAddress(t *testing.T) {
+	parker := &parker{commands: newFakeCommands(), filesFor: testFiles}
+
+	if got := parker.address(context.Background(), testUUID); got != "" {
+		t.Errorf("address = %q, want none", got)
 	}
 }

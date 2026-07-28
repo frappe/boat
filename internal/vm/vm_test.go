@@ -34,6 +34,7 @@ func testFiles(uuid string) virtualMachineFiles {
 	return virtualMachineFiles{
 		unit:                    "firecracker-vm@" + uuid + ".service",
 		directory:               directory,
+		networkEnvironment:      directory + "/network.env",
 		jailRoot:                jailRoot,
 		jailerLaunch:            directory + "/jailer-launch.sh",
 		firecrackerConfig:       jailRoot + "/firecracker.json",

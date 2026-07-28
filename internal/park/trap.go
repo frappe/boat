@@ -10,6 +10,7 @@ import (
 
 	"github.com/frappe/boat/internal/paths"
 	"github.com/frappe/boat/internal/run"
+	"github.com/frappe/boat/internal/sidecar"
 )
 
 // addressKey is the network.env key carrying a VM's public /128. provision
@@ -197,22 +198,5 @@ func (parker *parker) address(ctx context.Context, uuid string) string {
 	if err != nil {
 		return ""
 	}
-	return networkEnvironmentValue(text, addressKey)
-}
-
-// networkEnvironmentValue reads one KEY=value out of a network.env. The file was
-// written to be sourced by a shell, so blank lines and comments are skipped and
-// a quoted value is unquoted — provision writes bare values, but reading
-// liberally costs nothing.
-func networkEnvironmentValue(text string, key string) string {
-	for line := range strings.Lines(text) {
-		name, value, found := strings.Cut(strings.TrimSpace(line), "=")
-		if !found || strings.HasPrefix(strings.TrimSpace(name), "#") {
-			continue
-		}
-		if strings.TrimSpace(name) == key {
-			return strings.Trim(strings.TrimSpace(value), `"'`)
-		}
-	}
-	return ""
+	return sidecar.Value(text, addressKey)
 }

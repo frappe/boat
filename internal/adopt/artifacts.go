@@ -2,10 +2,10 @@ package adopt
 
 import (
 	"context"
-	"strings"
 
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/paths"
+	"github.com/frappe/boat/internal/sidecar"
 )
 
 // The network.env keys this package reads. provision writes the sidecar and the
@@ -139,32 +139,15 @@ func examineNetwork(ctx context.Context, commands commands, taken inventory, art
 	}
 }
 
-// parseNetworkEnvironment reads the shell KEY=value sidecar the way sourcing it
-// would. Blank lines and comments are skipped and surrounding quotes stripped:
-// provision writes bare values, but a reader that only handles its own writer's
-// output is a reader that fails on the first hand-edited host.
+// parseNetworkEnvironment names the four artifacts this package cross-checks
+// against the host. The reading is internal/sidecar's; what the keys mean is
+// this package's, which is why the mapping stays here.
 func parseNetworkEnvironment(text string) networkEnvironment {
-	values := map[string]string{}
-	for line := range strings.Lines(text) {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if key, value, found := strings.Cut(line, "="); found {
-			values[strings.TrimSpace(key)] = unquote(strings.TrimSpace(value))
-		}
-	}
+	values := sidecar.Parse(text)
 	return networkEnvironment{
 		namespace: values[namespaceKey],
 		tap:       values[tapKey],
 		hostVeth:  values[hostVethKey],
 		address:   values[addressKey],
 	}
-}
-
-func unquote(value string) string {
-	if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
-		return value[1 : len(value)-1]
-	}
-	return value
 }
