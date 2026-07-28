@@ -275,6 +275,10 @@ paths:
       summary: Resume a paused guest
       description: |
         The inverse of pause. A guest that was not paused is already where this asks it to be.
+
+        Refused while this host holds `desired_power = Stopped` for the VM: an
+        operator's stop is the kind of stop that stays, and unfreezing the vCPUs
+        of a VM that was told to be down would undo it (§11.3).
       operationId: ResumeVirtualMachine
       requestBody:
         required: true
@@ -290,7 +294,16 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/OperationIdentifierConflict"
+          description: |
+            Either the `op_id` names different work, or this host holds
+            `desired_power = Stopped` for the VM. The second becomes possible
+            the moment Atlas asserts `desired_power = Running`, and does not
+            consume the operation identifier, so the retry after the PUT may
+            reuse it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /vms/{uuid}/sleep:
     parameters:
@@ -325,6 +338,11 @@ paths:
       summary: Wake a sleeping VM now
       description: |
         The operator's equivalent of the traffic that would have woken it. Removes the sleeping marker and starts the unit, which resumes from the memory snapshot.
+
+        Waking is booting, so it is gated exactly as a start is: by the fence,
+        and by `desired_power`. An explicit wake does not outrank an explicit
+        stop (§11.3) — otherwise the operator who stopped a VM would have no way
+        to make it stay down.
       operationId: WakeVirtualMachine
       requestBody:
         required: true
@@ -340,22 +358,41 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
-          $ref: "#/components/responses/OperationIdentifierConflict"
+          description: |
+            The `op_id` names different work, or this host holds no usable fence
+            for the VM, or it holds `desired_power = Stopped` for it. Only the
+            first is a caller bug; the other two become possible once Atlas PUTs
+            the epoch or the power, and neither consumes the operation
+            identifier, so the retry after the PUT may reuse it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /vms/{uuid}/rebuild:
     parameters:
       - $ref: "#/components/parameters/VirtualMachineUuid"
     post:
-      summary: Rebuild a VM's root disk from its image
+      summary: Rebuild a VM's root disk from an image or a snapshot
       description: |
-        Destroys the guest's root filesystem and lays it down again from the image, keeping the VM's identity, addresses and data disk.
+        Destroys the guest's root filesystem and lays it down again from the
+        source named here, keeping the VM's identity, addresses and data disk.
+
+        This is the one verb whose request carries more than desired state can
+        supply. The source is a choice made at the moment of asking, not a
+        standing intent, and the guest identity is what the fresh filesystem
+        must be told about itself — neither is anywhere in
+        `DesiredVirtualMachine`. What IS desired state is read from there and
+        not re-sent: the root and data disk sizes the new filesystem is grown
+        to. The per-VM uid is neither, and is read off the host's own
+        `network.env` for the VM.
       operationId: RebuildVirtualMachine
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/OperationRequest"
+              $ref: "#/components/schemas/RebuildRequest"
       responses:
         "200":
           $ref: "#/components/responses/OperationAccepted"
@@ -399,6 +436,15 @@ paths:
         Applies the desired vCPU, memory and disk numbers. A disk only ever
         grows: shrinking a filesystem that has already written past the new
         boundary destroys data, so it is refused rather than attempted.
+
+        It carries none of the numbers. They are desired state, so they arrive
+        by PUT and this asks only for them to be applied now — which is what
+        makes a retry safe and what stops the request and the store from ever
+        stating two different shapes for one VM. The jailer's cgroup caps are
+        derived here from the same numbers, because the guest's RAM and the
+        host's `memory.max` are independent ceilings and a resize that moved
+        only the first would have the kernel OOM-kill Firecracker on the next
+        boot.
       operationId: resizeVirtualMachine
       requestBody:
         required: true
@@ -409,6 +455,15 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/OperationAccepted"
+        "400":
+          description: |
+            This host holds no desired state for the VM, or the desired state it
+            holds states no vCPU or memory. There is nothing to apply, and
+            applying the zero would write a machine config no guest can boot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -835,6 +890,100 @@ components:
         operation_id:
           type: string
           description: The Atlas Task name. Re-posting one returns its recorded result.
+
+    RebuildRequest:
+      type: object
+      required: [operation_id]
+      properties:
+        operation_id:
+          type: string
+          description: The Atlas Task name. Re-posting one returns its recorded result.
+        image:
+          type: string
+          description: |
+            A base image already synced to this host, whose pristine rootfs the
+            new root filesystem is a copy-on-write snapshot of.
+        snapshot_device:
+          type: string
+          description: |
+            The device path of a snapshot volume on this host to restore from,
+            instead of an image. Exactly one source is needed; this one wins
+            when both are given.
+        data_snapshot_device:
+          type: string
+          description: |
+            The data disk's own snapshot, restored the way the root disk is.
+            Absent leaves the live data disk exactly as it is — a rebuild from
+            an image always does, because there is no image source for a data
+            disk, and wiping a tenant's home directory because they asked to
+            reinstall the operating system is not a default.
+        identity:
+          $ref: "#/components/schemas/GuestIdentity"
+
+    GuestIdentity:
+      type: object
+      description: |
+        What makes a freshly laid-down root filesystem this VM's rather than the
+        image's. Boat writes every field of it into the mounted filesystem
+        without interpreting any of it: an address is bytes it puts in a file,
+        an authorized-keys blob is a blob, and `extra_env` is a list of paths
+        and contents Boat cannot tell apart from one another.
+
+        Hostname and machine-id are deliberately absent. Boat derives both from
+        the UUID by a fixed rule it owns, because naming a host after its UUID
+        is mechanics rather than identity, and a value sent for them could
+        disagree with the one the host already uses.
+      properties:
+        ipv6_address:
+          type: string
+        ipv4_guest_cidr:
+          type: string
+          description: |
+            The guest's end of the NAT44 /30 it egresses through. The host's end
+            is not here: a rebuild does not touch host-side networking, so the
+            value would be accepted and ignored.
+        ipv4_gateway:
+          type: string
+        private_address:
+          type: string
+          description: |
+            The VM's /128 on the host mesh, empty for a VM off the private
+            plane. The line is written either way, so the guest's network unit
+            has a defined value to test rather than a missing variable.
+        authorized_keys_blob:
+          type: string
+          description: |
+            The guest's root authorized_keys file, whole and verbatim. One key
+            or six, and whose they are, is not legible from here and is not
+            Boat's business.
+        data_disk_mount_at:
+          type: string
+          description: |
+            Where the data disk is mounted in the guest, so the fresh rootfs
+            regains its fstab line. Empty means no data mount and no line.
+        extra_env:
+          type: array
+          items:
+            $ref: "#/components/schemas/GuestFile"
+          description: |
+            Every other file the control plane wants in the fresh rootfs. This
+            is the guest-service seam: a field named for what a file MEANS would
+            put a service semantic into Boat's vocabulary and make the host care
+            what runs inside the guest, so the files arrive anonymous.
+
+    GuestFile:
+      type: object
+      required: [path, content]
+      properties:
+        path:
+          type: string
+          description: |
+            An absolute path inside the guest. It is joined onto the host's
+            mount point, so a relative path or one containing `..` is refused
+            rather than sanitised — it would write on the host, as root.
+        content:
+          type: string
+          description: The file's bytes, written as they arrived.
 
     StopRequest:
       type: object

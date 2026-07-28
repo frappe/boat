@@ -140,6 +140,56 @@ type Export struct {
 	VirtualMachines []VirtualMachine `json:"virtual_machines"`
 }
 
+// GuestFile defines model for GuestFile.
+type GuestFile struct {
+	// Content The file's bytes, written as they arrived.
+	Content string `json:"content"`
+
+	// Path An absolute path inside the guest. It is joined onto the host's
+	// mount point, so a relative path or one containing `..` is refused
+	// rather than sanitised — it would write on the host, as root.
+	Path string `json:"path"`
+}
+
+// GuestIdentity What makes a freshly laid-down root filesystem this VM's rather than the
+// image's. Boat writes every field of it into the mounted filesystem
+// without interpreting any of it: an address is bytes it puts in a file,
+// an authorized-keys blob is a blob, and `extra_env` is a list of paths
+// and contents Boat cannot tell apart from one another.
+//
+// Hostname and machine-id are deliberately absent. Boat derives both from
+// the UUID by a fixed rule it owns, because naming a host after its UUID
+// is mechanics rather than identity, and a value sent for them could
+// disagree with the one the host already uses.
+type GuestIdentity struct {
+	// AuthorizedKeysBlob The guest's root authorized_keys file, whole and verbatim. One key
+	// or six, and whose they are, is not legible from here and is not
+	// Boat's business.
+	AuthorizedKeysBlob *string `json:"authorized_keys_blob,omitempty"`
+
+	// DataDiskMountAt Where the data disk is mounted in the guest, so the fresh rootfs
+	// regains its fstab line. Empty means no data mount and no line.
+	DataDiskMountAt *string `json:"data_disk_mount_at,omitempty"`
+
+	// ExtraEnv Every other file the control plane wants in the fresh rootfs. This
+	// is the guest-service seam: a field named for what a file MEANS would
+	// put a service semantic into Boat's vocabulary and make the host care
+	// what runs inside the guest, so the files arrive anonymous.
+	ExtraEnv    *[]GuestFile `json:"extra_env,omitempty"`
+	Ipv4Gateway *string      `json:"ipv4_gateway,omitempty"`
+
+	// Ipv4GuestCidr The guest's end of the NAT44 /30 it egresses through. The host's end
+	// is not here: a rebuild does not touch host-side networking, so the
+	// value would be accepted and ignored.
+	Ipv4GuestCidr *string `json:"ipv4_guest_cidr,omitempty"`
+	Ipv6Address   *string `json:"ipv6_address,omitempty"`
+
+	// PrivateAddress The VM's /128 on the host mesh, empty for a VM off the private
+	// plane. The line is written either way, so the guest's network unit
+	// has a defined value to test rather than a missing variable.
+	PrivateAddress *string `json:"private_address,omitempty"`
+}
+
 // Health defines model for Health.
 type Health struct {
 	// BoatVersion The version of the running binary — every unit on this host is this build.
@@ -242,6 +292,40 @@ type Quarantine struct {
 	SeenAt *time.Time `json:"seen_at,omitempty"`
 }
 
+// RebuildRequest defines model for RebuildRequest.
+type RebuildRequest struct {
+	// DataSnapshotDevice The data disk's own snapshot, restored the way the root disk is.
+	// Absent leaves the live data disk exactly as it is — a rebuild from
+	// an image always does, because there is no image source for a data
+	// disk, and wiping a tenant's home directory because they asked to
+	// reinstall the operating system is not a default.
+	DataSnapshotDevice *string `json:"data_snapshot_device,omitempty"`
+
+	// Identity What makes a freshly laid-down root filesystem this VM's rather than the
+	// image's. Boat writes every field of it into the mounted filesystem
+	// without interpreting any of it: an address is bytes it puts in a file,
+	// an authorized-keys blob is a blob, and `extra_env` is a list of paths
+	// and contents Boat cannot tell apart from one another.
+	//
+	// Hostname and machine-id are deliberately absent. Boat derives both from
+	// the UUID by a fixed rule it owns, because naming a host after its UUID
+	// is mechanics rather than identity, and a value sent for them could
+	// disagree with the one the host already uses.
+	Identity *GuestIdentity `json:"identity,omitempty"`
+
+	// Image A base image already synced to this host, whose pristine rootfs the
+	// new root filesystem is a copy-on-write snapshot of.
+	Image *string `json:"image,omitempty"`
+
+	// OperationId The Atlas Task name. Re-posting one returns its recorded result.
+	OperationId string `json:"operation_id"`
+
+	// SnapshotDevice The device path of a snapshot volume on this host to restore from,
+	// instead of an image. Exactly one source is needed; this one wins
+	// when both are given.
+	SnapshotDevice *string `json:"snapshot_device,omitempty"`
+}
+
 // StartRequest defines model for StartRequest.
 type StartRequest struct {
 	// OperationId The Atlas Task name. Re-posting one returns its recorded result.
@@ -336,7 +420,7 @@ type PutVirtualMachineJSONRequestBody = DesiredVirtualMachine
 type PauseVirtualMachineJSONRequestBody = OperationRequest
 
 // RebuildVirtualMachineJSONRequestBody defines body for RebuildVirtualMachine for application/json ContentType.
-type RebuildVirtualMachineJSONRequestBody = OperationRequest
+type RebuildVirtualMachineJSONRequestBody = RebuildRequest
 
 // ResizeVirtualMachineJSONRequestBody defines body for ResizeVirtualMachine for application/json ContentType.
 type ResizeVirtualMachineJSONRequestBody = OperationRequest
@@ -385,7 +469,7 @@ type ServerInterface interface {
 	// Pause a running guest
 	// (POST /vms/{uuid}/pause)
 	PauseVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
-	// Rebuild a VM's root disk from its image
+	// Rebuild a VM's root disk from an image or a snapshot
 	// (POST /vms/{uuid}/rebuild)
 	RebuildVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
 	// Resize a stopped VM
@@ -1347,6 +1431,15 @@ func (response ResizeVirtualMachine200JSONResponse) VisitResizeVirtualMachineRes
 	return json.NewEncoder(w).Encode(response)
 }
 
+type ResizeVirtualMachine400JSONResponse Error
+
+func (response ResizeVirtualMachine400JSONResponse) VisitResizeVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type ResizeVirtualMachine401JSONResponse struct{ UnauthorizedJSONResponse }
 
 func (response ResizeVirtualMachine401JSONResponse) VisitResizeVirtualMachineResponse(w http.ResponseWriter) error {
@@ -1412,9 +1505,7 @@ func (response ResumeVirtualMachine404JSONResponse) VisitResumeVirtualMachineRes
 	return json.NewEncoder(w).Encode(response)
 }
 
-type ResumeVirtualMachine409JSONResponse struct {
-	OperationIdentifierConflictJSONResponse
-}
+type ResumeVirtualMachine409JSONResponse Error
 
 func (response ResumeVirtualMachine409JSONResponse) VisitResumeVirtualMachineResponse(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "application/json")
@@ -1645,9 +1736,7 @@ func (response WakeVirtualMachine404JSONResponse) VisitWakeVirtualMachineRespons
 	return json.NewEncoder(w).Encode(response)
 }
 
-type WakeVirtualMachine409JSONResponse struct {
-	OperationIdentifierConflictJSONResponse
-}
+type WakeVirtualMachine409JSONResponse Error
 
 func (response WakeVirtualMachine409JSONResponse) VisitWakeVirtualMachineResponse(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "application/json")
@@ -1717,7 +1806,7 @@ type StrictServerInterface interface {
 	// Pause a running guest
 	// (POST /vms/{uuid}/pause)
 	PauseVirtualMachine(ctx context.Context, request PauseVirtualMachineRequestObject) (PauseVirtualMachineResponseObject, error)
-	// Rebuild a VM's root disk from its image
+	// Rebuild a VM's root disk from an image or a snapshot
 	// (POST /vms/{uuid}/rebuild)
 	RebuildVirtualMachine(ctx context.Context, request RebuildVirtualMachineRequestObject) (RebuildVirtualMachineResponseObject, error)
 	// Resize a stopped VM
