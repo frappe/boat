@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/frappe/boat/internal/paths"
@@ -84,11 +85,39 @@ func NewTrap(runner *run.Runner, wake func(ctx context.Context, uuid string) err
 	}
 }
 
+// resident is set while a Trap is polling in this process.
+//
+// Package state, which is normally the wrong shape and is the right one here:
+// the question it answers is about the PROCESS rather than about any particular
+// value. A host has one wake reflex, and the code that needs to know whether it
+// is running — internal/vm's sleep gate — must not be wired to a Trap, because a
+// Manager that held one could be built without it and the gate would then assert
+// its own field instead of the host's fact.
+var resident atomic.Bool
+
+// Resident reports whether this process is running the host's wake reflex right
+// now.
+//
+// It is what a sleep is gated on: a VM parked with nothing watching its counter
+// answers nothing and stays dark until an operator clicks Start. False in the
+// window between a daemon building its Trap and the goroutine reaching Run is
+// the honest answer and the safe one — a sleep refused there leaves a VM awake,
+// which is the failure everyone can see, and a sleep allowed there leaves one
+// asleep with nobody listening, which is the failure nobody can.
+//
+// When the trap becomes a unit of its own (`boat wake-trap`, THE RULE), the
+// reflex moves to another process and this stops being the right question. It
+// will read false in the daemon on that day, which fails sleeps loudly rather
+// than silently — the direction that gets it noticed.
+func Resident() bool { return resident.Load() }
+
 // Run sweeps the host's park state, then polls until ctx ends.
 //
 // A cancelled context is how the daemon is asked to stop, so it ends the loop
 // rather than becoming an error: there is nothing an operator would retry.
 func (trap *Trap) Run(ctx context.Context, interval time.Duration) error {
+	resident.Store(true)
+	defer resident.Store(false)
 	trap.sweep(ctx)
 	for {
 		trap.tick(ctx)

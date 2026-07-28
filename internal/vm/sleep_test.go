@@ -10,7 +10,6 @@ import (
 const testFirecrackerUID = 1200
 
 type sleepCommandSet struct {
-	wakeTrap          string
 	launcher          string
 	socket            string
 	dropSnapshot      string
@@ -36,7 +35,6 @@ func sleepCommands() sleepCommandSet {
 	files := testFiles(testUUID)
 	socketArgument := "socket=" + files.apiSocketDirectory + "/firecracker.socket body="
 	return sleepCommandSet{
-		wakeTrap:          "systemctl is-active --quiet atlas-wake-trap.service",
 		launcher:          "sudo grep -q snapshot/READY " + files.jailerLaunch,
 		socket:            "sudo test -S " + files.apiSocket,
 		dropSnapshot:      "sudo rm -rf " + files.memorySnapshotDirectory,
@@ -72,9 +70,8 @@ func aHostWithRoom(fake *fakeCommands, commands sleepCommandSet) {
 // stays dark until an operator clicks Start. Refusing leaves the VM running,
 // which is strictly better, so nothing after this check may run.
 func TestSleepRefusesWhenTheWakeTrapIsNotRunning(t *testing.T) {
-	commands := sleepCommands()
 	fake := newFakeCommands()
-	fake.reply(commands.wakeTrap, false)
+	fake.wakeTrapStopped = true
 
 	result, err := newTestManager(fake).Sleep(
 		context.Background(), nil, testUUID, SleepRequest{FirecrackerUID: testFirecrackerUID},
@@ -83,13 +80,39 @@ func TestSleepRefusesWhenTheWakeTrapIsNotRunning(t *testing.T) {
 	if err == nil {
 		t.Fatal("Sleep succeeded with no wake trap, want a refusal")
 	}
-	if !strings.Contains(err.Error(), "atlas-wake-trap.service") {
-		t.Errorf("the refusal must name the unit: %v", err)
+	if !strings.Contains(err.Error(), "wake trap is not running") {
+		t.Errorf("the refusal must say what is missing: %v", err)
 	}
 	if result.MemorySnapshot {
 		t.Error("a refused sleep reported a memory snapshot")
 	}
-	assertTrace(t, fake, "? "+commands.wakeTrap)
+	// Nothing at all ran: the gate is a hard precondition, so a trap-less host
+	// never gets as far as pausing vCPUs or stopping a unit.
+	assertTrace(t, fake)
+}
+
+// The gate asks about Boat's OWN trap and not about the Python daemon's unit.
+//
+// That daemon stands down while boat.service is active and stays enabled and
+// active while it does (scripts/atlas-wake-trap.py), so `systemctl is-active
+// atlas-wake-trap.service` answers yes for a reflex that has stopped polling —
+// and a host Boat bootstrapped has no such unit at all, so the same question
+// refused every correct sleep. A gate that reaches systemd for this answer is the
+// bug, whatever unit it names.
+func TestSleepDoesNotAskSystemdAboutAWakeTrapUnit(t *testing.T) {
+	fake := newFakeCommands()
+	aHostWithRoom(fake, sleepCommands())
+
+	if _, err := newTestManager(fake).Sleep(
+		context.Background(), nil, testUUID, SleepRequest{FirecrackerUID: testFirecrackerUID},
+	); err != nil {
+		t.Fatalf("Sleep: %v", err)
+	}
+	for _, line := range fake.trace {
+		if strings.Contains(line, "wake-trap") || strings.Contains(line, "is-active") {
+			t.Errorf("the sleep gate asked systemd about a unit: %s", line)
+		}
+	}
 }
 
 func TestSleepCapturesAMemorySnapshotThenStopsAndMarks(t *testing.T) {
@@ -108,7 +131,6 @@ func TestSleepCapturesAMemorySnapshotThenStopsAndMarks(t *testing.T) {
 		t.Errorf("result = %+v, want a 1 GiB memory snapshot", result)
 	}
 	assertTrace(t, fake,
-		"? "+commands.wakeTrap,
 		"? "+commands.launcher,
 		"? "+commands.socket,
 		commands.dropSnapshot,
@@ -148,7 +170,6 @@ func TestSleepStillMarksSleepingWhenTheLauncherPredatesSnapshots(t *testing.T) {
 		t.Errorf("result = %+v, want a plain sleep naming the fix", result)
 	}
 	assertTrace(t, fake,
-		"? "+commands.wakeTrap,
 		"? "+commands.launcher,
 		commands.removeMarker,
 		commands.stop,
@@ -175,7 +196,6 @@ func TestSleepFallsBackWhenTheHostIsShortOfSpace(t *testing.T) {
 		t.Errorf("result = %+v, want a plain sleep with the space reason", result)
 	}
 	assertTrace(t, fake,
-		"? "+commands.wakeTrap,
 		"? "+commands.launcher,
 		"? "+commands.socket,
 		commands.dropSnapshot,
@@ -210,7 +230,6 @@ func TestSleepFallsBackWhenTheMemoryFileIsEmpty(t *testing.T) {
 		t.Error("wrote the READY marker over an incomplete snapshot")
 	}
 	assertTrace(t, fake,
-		"? "+commands.wakeTrap,
 		"? "+commands.launcher,
 		"? "+commands.socket,
 		commands.dropSnapshot,

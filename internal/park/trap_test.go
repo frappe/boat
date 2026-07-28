@@ -124,6 +124,36 @@ func TestATickThatCannotReadTheCountersKeepsPolling(t *testing.T) {
 	}
 }
 
+// The sleep verb refuses to park a VM unless this reflex is running (see
+// internal/vm's requireWakeTrap), so what Resident answers has to be the trap's
+// real lifetime rather than a flag somebody remembered to set: false before Run,
+// true throughout it, and false again the moment the loop returns — which is
+// exactly when a sleep must stop being allowed, because a daemon on its way down
+// is a daemon that will not wake anything.
+func TestResidentIsTrueOnlyWhileTheTrapIsPolling(t *testing.T) {
+	fake := newFakeCommands()
+	fake.output(listCounters, counterListing(wakeCounter{name: "wake_" + testHex, packets: 1}))
+	fake.exists(markerOf(testUUID))
+	var whileWaking bool
+	trap := newTestTrap(fake, func(context.Context, string) error {
+		whileWaking = Resident()
+		return nil
+	})
+
+	if Resident() {
+		t.Fatal("Resident answered true with no trap running in this process")
+	}
+	if err := trap.Run(context.Background(), time.Second); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !whileWaking {
+		t.Error("Resident answered false while the trap was polling")
+	}
+	if Resident() {
+		t.Error("Resident stayed true after the loop returned")
+	}
+}
+
 func TestRunPollsAtTheIntervalItIsGiven(t *testing.T) {
 	fake := newFakeCommands()
 	trap := newTestTrap(fake, recordWakes(&[]string{}))

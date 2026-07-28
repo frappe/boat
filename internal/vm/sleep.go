@@ -2,6 +2,7 @@ package vm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,10 +12,6 @@ import (
 )
 
 const (
-	// wakeTrapUnit is the host daemon that turns a trapped inbound SYN into a
-	// start. Sleep refuses without it; see requireWakeTrap.
-	wakeTrapUnit = "atlas-wake-trap.service"
-
 	// The memory file is the size of the guest's RAM. Require that much plus a
 	// margin to be free, so a snapshot can never wedge the host filesystem
 	// against full — the host that runs out of space mid-snapshot loses far more
@@ -67,7 +64,7 @@ func (manager *Manager) Sleep(
 ) (SleepResult, error) {
 	commands := manager.commandsFor(runner)
 	files := manager.filesFor(uuid)
-	if err := manager.requireWakeTrap(ctx, commands); err != nil {
+	if err := manager.requireWakeTrap(); err != nil {
 		return SleepResult{}, err
 	}
 	reason, err := manager.memorySnapshotPreflight(ctx, commands, files)
@@ -114,17 +111,37 @@ type SleepRequest struct {
 // re-bootstrapped carried the trap's code with no unit file (units ship at
 // bootstrap, not with a script sync); VMs slept there and could not be woken by
 // traffic at all. Fail loudly and leave the VM running instead — the operation
-// record says why, and the fix is to bootstrap the server.
+// record says why.
+//
+// What it asserts is BOAT'S OWN trap, resident in this process (internal/park,
+// started by the daemon's background loops). It used to ask systemd about
+// atlas-wake-trap.service — the Python daemon — and that named the wrong reflex
+// in both directions:
+//
+//   - A host Boat bootstrapped has no such unit at all, so every sleep on the
+//     correctly configured host was refused as unsafe.
+//   - A host carrying both is worse, because the Python daemon deliberately
+//     STANDS DOWN while boat.service is active and stays enabled and active while
+//     it does (scripts/atlas-wake-trap.py, _boat_owns_the_wake_reflex) — so
+//     `is-active` answered yes for a daemon that had stopped polling, and the
+//     gate passed for a reflex nobody was running. A gate that reports a
+//     precondition it did not check is worse than no gate.
+//
+// The two decisions compose because neither asks the other a question: Python
+// stands down when boat.service is up, Boat asserts the loop in its own process,
+// and there is no unit whose state means one thing to one of them and something
+// else to the other.
 //
 // A hard precondition, so it runs before anything touches the VM: a trap-less
 // host never gets as far as pausing vCPUs or stopping a unit.
-func (manager *Manager) requireWakeTrap(ctx context.Context, commands commands) error {
-	if commands.OK(ctx, "systemctl is-active --quiet {}", wakeTrapUnit) {
+func (manager *Manager) requireWakeTrap() error {
+	if manager.wakeTrapResident() {
 		return nil
 	}
-	return fmt.Errorf(
-		"refusing to sleep: %s is not active on this host, so an inbound connection could not "+
-			"wake the VM; bootstrap the server to install and enable it", wakeTrapUnit,
+	return errors.New(
+		"refusing to sleep: this host's wake trap is not running, so an inbound connection could " +
+			"not wake the VM; the trap is one of boat's background loops, so check the daemon's log " +
+			"for a loop that ended",
 	)
 }
 
