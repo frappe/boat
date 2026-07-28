@@ -28,10 +28,17 @@ usage:
   boat daemon [--listen ADDR] [--socket PATH] [--store PATH] [--token-file PATH]
   boat vm start <uuid>
   boat vm stop <uuid> [--graceful=false] [--stop-timeout-seconds N]
+  boat vm pause|resume|sleep|wake|terminate|resize <uuid>
+  boat vm rebuild <uuid> (--image NAME | --snapshot-device DEV)
+                         --identity-file PATH [--data-snapshot-device DEV]
   boat vm ls
   boat vm show <uuid>
   boat host facts
   boat version
+
+The six verbs on one line take a UUID and nothing else: their arguments are the
+desired state Atlas already asserted, which the host reads for itself. A resize
+run here re-applies that asserted shape rather than taking new numbers.
 
 Every verb but daemon is a client of the daemon's HTTP API over its local
 socket (default /run/boat/boat.sock, override with BOAT_SOCKET).
@@ -71,6 +78,14 @@ func virtualMachineCommand(arguments []string, output io.Writer, errorOutput io.
 		return startVirtualMachine(arguments[1:], client, output, errorOutput)
 	case "stop":
 		return stopVirtualMachine(arguments[1:], client, output, errorOutput)
+	// The verb name is also the path segment, which is not a coincidence to be
+	// tidied away: the CLI is a client of the documented API and nothing else, so
+	// a verb reachable here that the API does not serve is a 404 rather than a
+	// second way into the host.
+	case "pause", "resume", "sleep", "wake", "terminate", "resize":
+		return plainVerb(arguments[0], arguments[1:], client, output, errorOutput)
+	case "rebuild":
+		return rebuildVirtualMachine(arguments[1:], client, output, errorOutput)
 	case "ls":
 		return listVirtualMachines(client, output, errorOutput)
 	case "show":
