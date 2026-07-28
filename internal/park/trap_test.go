@@ -334,3 +334,45 @@ func TestAMissingSidecarYieldsNoAddress(t *testing.T) {
 		t.Errorf("address = %q, want none", got)
 	}
 }
+
+// The boot sweep walks a list it materialized at the top, so a VM woken while
+// it works must not be re-parked. Re-parking a running VM routes its /128 into
+// the black-hole dummy and drops every inbound SYN, and nothing ever undoes it:
+// the poll only acts on VMs whose marker is present, and this one's is gone.
+func TestTheBootSweepDoesNotReParkAVirtualMachineWokenWhileItRan(t *testing.T) {
+	fake := newFakeCommands().withScaffold()
+	fake.withSleeping(testUUID, testAddress)
+	trap := newTestTrap(fake, recordWakes(&[]string{}))
+	// The turn is where a wake would have been excluded, so it is also where the
+	// marker is re-read. Clearing it here is the wake landing between the listing
+	// and this VM's turn.
+	trap.SerializeWith(func(ctx context.Context, uuid string, fn func(context.Context) error) error {
+		fake.present[markerOf(uuid)] = false
+		return fn(ctx)
+	})
+
+	trap.sweep(context.Background())
+
+	if fake.issued(addRule) || fake.issued(routeReplace) || fake.issued(neighReplace) {
+		t.Errorf("the sweep re-parked a VM that had woken:\n  %s", strings.Join(fake.trace, "\n  "))
+	}
+}
+
+// Every re-park takes that VM's own turn, so the sweep is never a second driver
+// of a machine a verb or a reconcile pass is already driving.
+func TestTheBootSweepTakesEachVirtualMachinesTurn(t *testing.T) {
+	fake := newFakeCommands().withScaffold()
+	fake.withSleeping(testUUID, testAddress)
+	trap := newTestTrap(fake, recordWakes(&[]string{}))
+	var turns []string
+	trap.SerializeWith(func(ctx context.Context, uuid string, fn func(context.Context) error) error {
+		turns = append(turns, uuid)
+		return fn(ctx)
+	})
+
+	trap.sweep(context.Background())
+
+	if len(turns) != 1 || turns[0] != testUUID {
+		t.Errorf("turns taken: %v, want one for %s", turns, testUUID)
+	}
+}

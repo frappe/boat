@@ -59,7 +59,11 @@ type Trap struct {
 	// record the way the poll does not.
 	sweeper *parker
 	wake    func(ctx context.Context, uuid string) error
-	clock   clock
+	// serialize runs a re-park as the VM's single actor, so the boot sweep cannot
+	// drive a machine a verb or a reconcile pass is already driving. Nil means
+	// this Trap is the only thing touching the host; see reparkInTurn.
+	serialize func(ctx context.Context, uuid string, fn func(context.Context) error) error
+	clock     clock
 }
 
 // NewTrap returns the trap.
@@ -83,6 +87,22 @@ func NewTrap(runner *run.Runner, wake func(ctx context.Context, uuid string) err
 		wake:    wake,
 		clock:   systemClock{},
 	}
+}
+
+// SerializeWith gives the trap the reconciler's per-VM turn, so the boot sweep
+// takes each VM's turn before it re-parks it. Without it the sweep is a second
+// driver of the host — the one path in this daemon that mutates a VM outside an
+// actor — and it acts on a list that may already be stale.
+func (trap *Trap) SerializeWith(
+	serialize func(ctx context.Context, uuid string, fn func(context.Context) error) error,
+) {
+	trap.serialize = serialize
+}
+
+// stillSleeping re-reads the marker, through sudo for the same 0700 reason the
+// listing does.
+func (trap *Trap) stillSleeping(ctx context.Context, uuid string) bool {
+	return trap.sweeper.commands.OK(ctx, "sudo test -f {}", trap.sweeper.filesFor(uuid).sleepingMarker)
 }
 
 // resident is set while a Trap is polling in this process.
@@ -182,7 +202,22 @@ func (trap *Trap) sweep(ctx context.Context) {
 		slog.Error("could not bring up the park device", "device", Device, "error", err)
 	}
 	for _, uuid := range trap.sleeping(ctx) {
-		if err := trap.sweeper.park(ctx, uuid, trap.sweeper.address(ctx, uuid)); err != nil {
+		// Each VM's re-park takes that VM's turn, and the marker is read AGAIN
+		// inside it. Both halves are load-bearing, and the reason is that this
+		// sweep walks a list it materialized at the top.
+		//
+		// A wake — an operator's verb, or the reconciler's stepWake — removes the
+		// marker and then starts the unit, whose ExecStartPre unparks and builds
+		// the VM's real network path. A sweep still walking its stale list would
+		// then re-install the /128 route into the black-hole dummy and the rule
+		// that counts and DROPS every inbound SYN, on a VM that is now RUNNING.
+		// Nothing would ever undo it: the poll only acts on VMs whose marker is
+		// present, and this one's is gone. Atlas reads Running, the tenant gets a
+		// black hole, and the only exits are another sleep/wake cycle or a reboot.
+		//
+		// The turn is what makes the re-read meaningful rather than a smaller
+		// window: a wake cannot begin while this VM's turn is held.
+		if err := trap.reparkInTurn(ctx, uuid); err != nil {
 			// Best effort per VM: one VM whose rule will not install must not
 			// leave the rest of this host's sleeping VMs unreachable.
 			slog.Error("could not re-park a sleeping virtual machine", "uuid", uuid, "error", err)
@@ -190,10 +225,39 @@ func (trap *Trap) sweep(ctx context.Context) {
 	}
 }
 
+// reparkInTurn re-parks one VM as that VM's single actor.
+//
+// A Trap built with no serializer parks directly. That is legitimate — a test,
+// or a tool that owns the host outright — and it is spelled as a branch here
+// rather than as a nil check at the call site so there is exactly one place
+// where "no serializer" has to be read as a decision rather than an oversight.
+func (trap *Trap) reparkInTurn(ctx context.Context, uuid string) error {
+	repark := func(ctx context.Context) error {
+		if !trap.stillSleeping(ctx, uuid) {
+			// Woken between the listing and this turn. Its unit is running and has
+			// rebuilt the real path; re-parking now would take it back down.
+			return nil
+		}
+		return trap.sweeper.park(ctx, uuid, trap.sweeper.address(ctx, uuid))
+	}
+	if trap.serialize == nil {
+		return repark(ctx)
+	}
+	return trap.serialize(ctx, uuid, repark)
+}
+
 // sleeping is every VM directory still carrying a sleeping marker: the DB-free
 // set of VMs that are supposed to be parked right now.
 func (trap *Trap) sleeping(ctx context.Context) []string {
-	listing, err := trap.sweeper.commands.RunUnchecked(ctx, "ls -1 {}", paths.VirtualMachinesDirectory)
+	// Through sudo, for the same reason the marker check below is: the VM tree is
+	// 0700 and root-owned. Listing it unprivileged fails with EACCES on every
+	// bootstrapped host, and reading that failure as "this host has no VMs" made
+	// the sweep a no-op exactly where it is load-bearing — after a reboot, when
+	// nftables is empty and every sleeping VM's unit is suppressed by its own
+	// marker, so nothing else rebuilds their counters. Every sleeping VM on the
+	// host would then be unreachable for good, which is the case this sweep exists
+	// to cover.
+	listing, err := trap.sweeper.commands.RunUnchecked(ctx, "sudo ls -1 {}", paths.VirtualMachinesDirectory)
 	if err != nil {
 		// A host that cannot list its VM directory has nothing this sweep can
 		// rebuild. Said once, and the poll still starts: the counters of any VM

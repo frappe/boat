@@ -62,7 +62,7 @@ const (
 	addRule = "sudo nft add rule inet atlas forward ip6 daddr " + testAddress +
 		" tcp flags syn / fin,syn,rst,ack counter name wake_" + testHex + " drop"
 
-	listVirtualMachines = "ls -1 /var/lib/atlas/virtual-machines"
+	listVirtualMachines = "sudo ls -1 /var/lib/atlas/virtual-machines"
 )
 
 // A host with an IPv6 uplink answers this, and `ip -j` is JSON because scraping

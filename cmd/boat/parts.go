@@ -79,6 +79,13 @@ func assemble(database *store.Store) *daemonParts {
 	}
 	parts.reconciler = reconcile.New(database, parts.machines, decisions)
 	parts.trap = park.NewTrap(parts.runner, parts.wake)
+	// The boot sweep re-parks through the reconciler, so it takes each VM's turn
+	// like every other mutation. Without this the sweep is the one path in the
+	// daemon that drives a VM outside an actor, and it does so from a list it
+	// materialized before it started: a VM woken meanwhile would be re-parked —
+	// its /128 routed into the black-hole dummy and its inbound SYNs dropped —
+	// while running, with nothing left to undo it.
+	parts.trap.SerializeWith(parts.reconciler.Do)
 	parts.api = api.NewServer(parts.dependencies())
 	return parts
 }
