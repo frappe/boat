@@ -15,13 +15,6 @@ import (
 	"github.com/frappe/boat/internal/wire"
 )
 
-// The verbs are named in the host CLI's grammar, so an operation record reads
-// the same after the port as the Task row it replaces did before it.
-const (
-	verbStartVirtualMachine = "start-vm"
-	verbStopVirtualMachine  = "stop-vm"
-)
-
 // errUnknownVirtualMachine is a failure like any other as far as the journal is
 // concerned: the operation was claimed, so it owes a terminal record even when
 // the answer to the caller is 404.

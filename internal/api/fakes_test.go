@@ -63,6 +63,15 @@ func (fake *fakeStore) fence(uuid string, epoch int64) {
 	fake.fences[uuid] = epoch
 }
 
+// desire records what Atlas asserted, the way a PUT would. The verbs that read
+// desired state instead of taking numbers on the wire are unreadable without
+// it, and so is the precedence rule that outranks a wake.
+func (fake *fakeStore) desire(record model.DesiredVirtualMachine) {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
+	fake.desired[record.UUID] = record
+}
+
 func (fake *fakeStore) ClaimOperation(identifier, verb, uuid string) (model.Operation, bool, error) {
 	fake.mutex.Lock()
 	defer fake.mutex.Unlock()
@@ -237,6 +246,21 @@ type fakeVirtualMachines struct {
 	observed     model.VirtualMachine
 	observeError error
 
+	// One counter per WO-2 verb, and the request each was handed. The requests
+	// are what the desired-state tests are about: a verb that ran is not the same
+	// claim as a verb that ran with the numbers Atlas asserted.
+	pauses            int
+	resumes           int
+	wakes             int
+	terminates        int
+	sleepRequests     []vm.SleepRequest
+	resizeRequests    []vm.ResizeRequest
+	rebuildRequests   []vm.RebuildRequest
+	verbError         error
+	sleepResult       vm.SleepResult
+	firecrackerUID    int
+	firecrackerUIDErr error
+
 	// hold is how long a verb pretends to take, and overlapped is whether a
 	// second one ever ran while it did. Counters alone cannot see the failure the
 	// serialization tests are about — a stop and a start that both ran, correctly
@@ -261,6 +285,67 @@ func (fake *fakeVirtualMachines) Stop(ctx context.Context, runner *run.Runner, u
 	fake.stopRequests = append(fake.stopRequests, request)
 	fake.writeTrace()
 	return fake.stopError
+}
+
+func (fake *fakeVirtualMachines) Pause(ctx context.Context, runner *run.Runner, uuid string) error {
+	defer fake.enter()()
+	fake.pauses++
+	fake.writeTrace()
+	return fake.verbError
+}
+
+func (fake *fakeVirtualMachines) Resume(ctx context.Context, runner *run.Runner, uuid string) error {
+	defer fake.enter()()
+	fake.resumes++
+	fake.writeTrace()
+	return fake.verbError
+}
+
+func (fake *fakeVirtualMachines) Sleep(
+	ctx context.Context, runner *run.Runner, uuid string, request vm.SleepRequest,
+) (vm.SleepResult, error) {
+	defer fake.enter()()
+	fake.sleepRequests = append(fake.sleepRequests, request)
+	fake.writeTrace()
+	return fake.sleepResult, fake.verbError
+}
+
+func (fake *fakeVirtualMachines) Wake(ctx context.Context, runner *run.Runner, uuid string) error {
+	defer fake.enter()()
+	fake.wakes++
+	fake.writeTrace()
+	return fake.verbError
+}
+
+func (fake *fakeVirtualMachines) Resize(
+	ctx context.Context, runner *run.Runner, uuid string, request vm.ResizeRequest,
+) error {
+	defer fake.enter()()
+	fake.resizeRequests = append(fake.resizeRequests, request)
+	fake.writeTrace()
+	return fake.verbError
+}
+
+func (fake *fakeVirtualMachines) Rebuild(
+	ctx context.Context, runner *run.Runner, uuid string, request vm.RebuildRequest,
+) error {
+	defer fake.enter()()
+	fake.rebuildRequests = append(fake.rebuildRequests, request)
+	fake.writeTrace()
+	return fake.verbError
+}
+
+func (fake *fakeVirtualMachines) Terminate(ctx context.Context, runner *run.Runner, uuid string) error {
+	defer fake.enter()()
+	fake.terminates++
+	fake.writeTrace()
+	return fake.verbError
+}
+
+func (fake *fakeVirtualMachines) FirecrackerUID(
+	ctx context.Context, runner *run.Runner, uuid string,
+) (int, error) {
+	return fake.firecrackerUID, fake.firecrackerUIDErr
 }
 
 // enter records that a verb is running on the host and returns the function

@@ -50,6 +50,34 @@ func (response *errorResponse) VisitStopVirtualMachineResponse(writer http.Respo
 	return response.write(writer)
 }
 
+func (response *errorResponse) VisitPauseVirtualMachineResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
+func (response *errorResponse) VisitResumeVirtualMachineResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
+func (response *errorResponse) VisitSleepVirtualMachineResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
+func (response *errorResponse) VisitWakeVirtualMachineResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
+func (response *errorResponse) VisitRebuildVirtualMachineResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
+func (response *errorResponse) VisitTerminateVirtualMachineResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
+func (response *errorResponse) VisitResizeVirtualMachineResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
 func (response *errorResponse) VisitPutVirtualMachineResponse(writer http.ResponseWriter) error {
 	return response.write(writer)
 }

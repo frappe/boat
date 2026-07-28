@@ -55,13 +55,35 @@ type StateStore interface {
 	Snapshot() (model.Export, error)
 }
 
-// VirtualMachines is the slice of the VM manager the handlers need.
+// VirtualMachines is the slice of the VM manager the handlers need: one method
+// per verb the contract serves, plus the two questions every verb asks of the
+// host around it.
+//
+// It is the widest interface in this package because the API is the surface
+// that serves every verb — narrowing it would mean a second path to the manager
+// for the verbs left out, which is the thing internal/reconcile exists to
+// prevent. FirecrackerUID is here for the same reason it is on the manager at
+// all: the verbs that need the VM's uid read it off the host rather than take
+// it from a caller who might hold a stale copy.
 type VirtualMachines interface {
 	Start(ctx context.Context, runner *run.Runner, uuid string) (bool, error)
 	Stop(ctx context.Context, runner *run.Runner, uuid string, request vm.StopRequest) error
+	Pause(ctx context.Context, runner *run.Runner, uuid string) error
+	Resume(ctx context.Context, runner *run.Runner, uuid string) error
+	Sleep(ctx context.Context, runner *run.Runner, uuid string, request vm.SleepRequest) (vm.SleepResult, error)
+	Wake(ctx context.Context, runner *run.Runner, uuid string) error
+	Resize(ctx context.Context, runner *run.Runner, uuid string, request vm.ResizeRequest) error
+	Rebuild(ctx context.Context, runner *run.Runner, uuid string, request vm.RebuildRequest) error
+	Terminate(ctx context.Context, runner *run.Runner, uuid string) error
+	FirecrackerUID(ctx context.Context, runner *run.Runner, uuid string) (int, error)
 	Observe(ctx context.Context, runner *run.Runner, uuid string) (model.VirtualMachine, error)
 	Exists(ctx context.Context, runner *run.Runner, uuid string) bool
 }
+
+// The one implementation outside tests. Asserted here so a manager that drifts
+// out of the shape the handlers were written against fails to compile, rather
+// than failing at the call site in whichever verb happens to be edited next.
+var _ VirtualMachines = (*vm.Manager)(nil)
 
 // Dependencies are the collaborators a Server answers with.
 //
