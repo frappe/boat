@@ -57,19 +57,61 @@ command lines asserted byte-for-byte vs the Python, no host needed):
 - The CAS on the host reserved-IP slot (§11.2/§11.5) is the *Atlas* side; the
   Boat endpoint is its first caller but Boat itself does not CAS reserved-ip.
 
-## Deferred / remaining WO-3b work (for review)
-- **The big one: per-VM network-up/down apply** (netns/veth/tap/NAT44/proxy-NDP/
-  EUI-64/off-link route/per-VM nft isolation, port of `vm-network-up.py` 306 LOC
-  + `vm-network-down.py` 140 LOC + `private_network.py` + `wireguard.py` +
-  `firewall.py`). Largest, riskiest module (§3.5). Not started this pass.
-- **Customer-gateway host forwarding** (Atlas-computed, Boat-applied).
-- **Live-host differential harness** (§3.5): no harness runs Go verb beside the
-  Python one on a live machine and diffs host effects. Still owed before any
-  network-apply verb cuts over to native-only. Reserved-ip apply is verified at
-  unit level only this pass; a live proxy-VM+reserved-IP exercise is NOT done
-  (no proxy VM on the boat hosts tonight).
-- **Boat hosts run stale builds** (e77b6e0/b1e7279 vs main); redeploy needed to
-  exercise anything shipped here on staging.
+**local-ownership.json writer — shipped (library, not yet wired).** Commit
+`feat(localownership): the ANCP ownership cache writer, flock and atomic`.
+`internal/netapply/localownership`: `Read`/`Add`/`Remove`, POSIX flock +
+atomic rename + dir-fsync + fail-loud-on-corrupt, ported from
+`networkd/localownership.py`. Race-tested (20 concurrent adds, none clobbered).
+The lock is co-located with the cache, so on `DefaultPath` it is exactly the
+Python's `/etc/atlas-networkd/local-ownership.lock` — a Python bring-up and a Go
+one interlock — and tests lock a temp file instead of needing root.
+- **To review:** it has no caller yet. It is the writer the network-up/down port
+  (below) will call; landed ahead of it the way WO-2's components were built
+  before wiring. If you'd rather it land WITH its caller, hold it.
+
+**Atlas side — `feat/boat-split` @ `2c93d30`** (in the boat-split worktree, NOT
+this repo): `feat(reserved-ip): route the host 1:1-NAT through Boat when enabled`.
+`Reserved IP._run_nat_task` now does `run = run_boat_task if boat_enabled else
+run_task` (mirrors every other verb); added `BoatClient.reserved_ip_virtual_machine`
++ `RESERVED_IP_VERB` dispatch in `_run_verb`; two tests in `test_boat_client.py`.
+- **To review — Atlas:** the atlas test suite was NOT run (the local bench runs on
+  `main`; running the suite against the boat-split worktree is out of scope for an
+  autonomous pass). Verified by `py_compile` + pattern-match against the tested
+  start/stop/rebuild dispatch only. **Run `bench run-tests --module
+  atlas.tests.test_boat_client` on a boat-split bench before trusting it.**
+- **CAS not implemented.** The plan wants reserved-ip attach CAS-gated on the
+  host reserved-IP slot (§11.2/§11.5). Not done: the mirror does not model the
+  reserved-IP slot yet, and the Frappe row already guards the one-IP-one-VM
+  invariant transactionally. Left as the documented follow-up the "first caller"
+  was meant to exercise.
+
+## Deferred / remaining WO-3b work (for review) — deliberately NOT rushed
+- **The big one: per-VM network-up/down apply** — port of `vm-network-up.py`
+  (306 LOC) + `vm-network-down.py` (140 LOC). netns/veth/tap, NAT44 masquerade,
+  host IMDS-drop, proxy-NDP, /128 + /32 routes, sysctls, per-VM nft isolation,
+  and it also calls `private_network.py` / `wireguard.py` / `firewall.py` (the
+  ANCP-adjacent private plane) + `localownership.add/remove` + the reserved-ip
+  apply this pass already ported. **Deliberately not started this pass:** it is
+  the `firecracker-vm@` ExecStartPre hook — the most restart-sensitive path — a
+  rendering slip here is "a VM off the network", §3.5 mandates the live-host
+  differential harness before it cuts over, and I had no proxy/test VM to
+  differential-test against tonight. This wants a careful dedicated pass on a
+  live host, not an overnight port. Note the public-vs-private (ANCP) boundary
+  is a real decision inside this module — which of apply_private_network /
+  apply_persisted_tunnels / apply_persisted_firewall are Boat's vs stay
+  networkd's must be settled first (spec §6.1 says the wg peer table is ANCP's).
+- **Customer-gateway host forwarding** (Atlas-computed, Boat-applied) — smaller,
+  self-contained; a good next bounded slice after the network-up decision above.
+- **Live-host differential harness** (§3.5) still owed. Reserved-ip + everything
+  this pass is unit/golden-verified only.
 
 ## Known gaps / things to double-check
-_(appended as found)_
+- **Nothing shipped this pass has been exercised on a live host.** The boat hosts
+  (host-1 e77b6e0, host-2 b1e7279) run builds behind main and have no VMs; the
+  "meo" host has a VM but no boat. A redeploy of `boat` to a host with a running
+  proxy VM + a reserved IP is what would actually exercise the reserved-ip apply.
+- Reserved-ip verb string `vm-reserved-ip` must match on BOTH sides — it does
+  (boat `verbReservedIPVirtualMachine`, atlas `RESERVED_IP_VERB`). Grep both if
+  either is renamed.
+- `make check` (boat) is green at every commit; commits `3c88c6f`..`bb3a943` on
+  `main`. Nothing pushed. Atlas commit on `feat/boat-split` (worktree), unpushed.
