@@ -132,6 +132,24 @@ of it. Golden command traces are locked in `vmnetwork_test.go`. host-1 left clea
   Python-managed host accumulates dead duplicate accepts (functionally harmless,
   but the counter is wrong, which misleads the sleepy-VM idle sweep).
 
+## The cutover, and a boat-host gap it exposed (for review)
+- **The cutover is a clean 2-line swap** in `scripts/systemd/firecracker-vm@.service`:
+  `ExecStartPre=/var/lib/atlas/venv/bin/python /var/lib/atlas/bin/vm-network-up.py %i`
+  → `ExecStartPre=/usr/local/bin/boat vm-network-up %i` (and the ExecStopPost
+  twin). NOT done: the template is shared fleet-wide with no per-host gate, and it
+  wants a real bootable VM to prove connectivity through the Go-created netns
+  (the differential proved the host-side setup is byte-identical, which is strong
+  evidence, but not a booted guest). This is the go-live decision — yours to make.
+- **Finding: boat-bootstrapped hosts have no networking path at all yet.** On
+  host-1: `/var/lib/atlas/bin` is absent (no Python durable package) AND
+  `firecracker-vm@.service` is not installed. So a VM start on a boat host would
+  `systemctl start` a unit that does not exist, and even if it did its
+  ExecStartPre would point at a Python hook that is not there. This makes the
+  vm-network port REQUIRED (not an optimization) for the boat fleet to run VMs —
+  but the missing unit-template install is a separate gap, WO-1b (bootstrap)
+  territory, not WO-3b. Flagging so it is not a surprise when the first VM lands
+  on a boat host.
+
 ## Known gaps / things to double-check
 - **Nothing shipped this pass has been exercised on a live host.** The boat hosts
   (host-1 e77b6e0, host-2 b1e7279) run builds behind main and have no VMs; the
