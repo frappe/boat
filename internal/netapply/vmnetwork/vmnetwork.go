@@ -289,17 +289,28 @@ func (bringUp *bringUp) hostRoutesAndProxyNDP(ctx context.Context, facts facts, 
 // forwardRules installs the per-VM v6 forward accepts — one each way — that carry
 // a `counter` poll-vm-traffic reads for idle detection. Guarded on the live chain
 // so a restart does not split a counter across two rules.
+//
+// The guard matches against a quote-stripped listing, and that is a fix, not a
+// port. nft echoes an interface name back QUOTED — `oifname "atlas-hdeadbe"` — so
+// the Python's unquoted `oifname {host_veth}` substring never matches its own rule
+// on a re-list, and vm-network-up.py therefore adds BOTH accepts again on every
+// restart, splitting the very counter its comment warns about. Stripping the
+// quotes before the match makes the check see the rule that is actually there, so
+// a restart is the no-op it was meant to be. The rendered `add` is byte-identical
+// to the Python's; only the idempotency guard diverges, and only to stop a
+// duplicate. See llm/wo-3b-notes.md.
 func (bringUp *bringUp) forwardRules(ctx context.Context, facts facts) error {
 	forward, err := bringUp.commands.Run(ctx, "sudo nft list chain inet atlas forward")
 	if err != nil {
 		return err
 	}
-	if !strings.Contains(forward, "ip6 daddr "+facts.virtualMachine+" oifname "+facts.hostVeth) {
+	present := strings.ReplaceAll(forward, "\"", "")
+	if !strings.Contains(present, "ip6 daddr "+facts.virtualMachine+" oifname "+facts.hostVeth) {
 		if _, err := bringUp.commands.Run(ctx, "sudo nft add rule inet atlas forward ip6 daddr {} oifname {} counter accept", facts.virtualMachine, facts.hostVeth); err != nil {
 			return err
 		}
 	}
-	if !strings.Contains(forward, "ip6 saddr "+facts.virtualMachine+" iifname "+facts.hostVeth) {
+	if !strings.Contains(present, "ip6 saddr "+facts.virtualMachine+" iifname "+facts.hostVeth) {
 		if _, err := bringUp.commands.Run(ctx, "sudo nft add rule inet atlas forward ip6 saddr {} iifname {} counter accept", facts.virtualMachine, facts.hostVeth); err != nil {
 			return err
 		}

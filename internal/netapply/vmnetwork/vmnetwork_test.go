@@ -202,6 +202,56 @@ func TestDownRendersThePublicPlaneLikeThePython(t *testing.T) {
 	})
 }
 
+// A restart is the case this path exists to survive: on a host whose scaffold and
+// per-VM rules already stand, the bring-up re-asserts the namespace but adds no
+// nft rule twice — a duplicate forward rule would split the traffic counter the
+// idle sweep reads across two entries. The namespace is still torn down and
+// rebuilt (its delete is what makes a restart start clean); only the guarded nft
+// adds are skipped.
+func TestUpIsIdempotentWhenTheScaffoldAndRulesExist(t *testing.T) {
+	const forwardChain = "ip daddr 169.254.169.254 drop\n" +
+		"ip6 daddr 2001:db8::2 oifname \"atlas-hdeadbe\" counter accept\n" +
+		"ip6 saddr 2001:db8::2 iifname \"atlas-hdeadbe\" counter accept\n"
+	fake := newFakeCommands().output("sudo cat "+environmentPath, testEnvironment).
+		output("ip -j -6 route show default", `[{"dev":"eth0"}]`).
+		output("ip -j route show default", `[{"dev":"eth0"}]`).
+		exists("sudo nft list table inet atlas").
+		exists("sudo nft list chain inet atlas forward").
+		exists("sudo nft list chain inet atlas postrouting").
+		output("sudo nft list chain inet atlas forward", forwardChain).
+		output("sudo nft list chain inet atlas postrouting", "ip saddr 100.64.0.0/16 oifname \"eth0\" masquerade\n")
+
+	bringUp := &bringUp{
+		commands:           fake,
+		unpark:             func(context.Context) error { return nil },
+		attachReservedIP:   func(context.Context, string, string, string) error { return nil },
+		networkEnvironment: environmentPath,
+	}
+	if err := bringUp.run(context.Background()); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	for _, forbidden := range []string{"add table", "add chain", "add rule"} {
+		for _, command := range fake.trace {
+			if strings.Contains(command, forbidden) {
+				t.Errorf("a re-run issued %q; the scaffold and rules were already present", command)
+			}
+		}
+	}
+	// The namespace is still rebuilt from scratch — that is what a restart needs.
+	if !containsCommand(fake.trace, "sudo ip netns add atlas-deadbeefns") {
+		t.Error("a re-run did not rebuild the namespace")
+	}
+}
+
+func containsCommand(trace []string, command string) bool {
+	for _, recorded := range trace {
+		if recorded == command {
+			return true
+		}
+	}
+	return false
+}
+
 // A garbled sidecar must not render into a command: the bring-up refuses before
 // touching the host beyond the unpark and the read.
 func TestUpRefusesAMalformedAddress(t *testing.T) {
