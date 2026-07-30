@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/frappe/boat/internal/netapply/localownership"
 	"github.com/frappe/boat/internal/netapply/reservedip"
 	"github.com/frappe/boat/internal/park"
 	"github.com/frappe/boat/internal/paths"
@@ -47,6 +48,10 @@ const (
 	ipv4HostCIDRKey   = "IPV4_HOST_CIDR"
 	ipv4GuestCIDRKey  = "IPV4_GUEST_CIDR"
 	reservedIPv4Key   = "RESERVED_IPV4"
+	// The private-plane pair, present once the VM is enrolled in universal private
+	// addressing. Absent on a public-only VM, so the whole private block is skipped.
+	privateAddressKey = "PRIVATE_ADDRESS"
+	tenantPrefixKey   = "TENANT_PREFIX"
 )
 
 // commands is the host-touching surface, one implementation in production
@@ -70,15 +75,20 @@ func Up(ctx context.Context, runner *run.Runner, uuid string) error {
 			_, err := reservedip.Attach(ctx, runner, guestIPv4, hostVeth, reservedIPv4)
 			return err
 		},
+		addLocalOwned:      func(address string) error { return localownership.Add(localownership.DefaultPath, address) },
 		networkEnvironment: paths.ForVirtualMachine(uuid).NetworkEnvironment(),
 	}
 	return bringUp.run(ctx)
 }
 
 type bringUp struct {
-	commands           commands
-	unpark             func(ctx context.Context) error
-	attachReservedIP   func(ctx context.Context, guestIPv4, hostVeth, reservedIPv4 string) error
+	commands         commands
+	unpark           func(ctx context.Context) error
+	attachReservedIP func(ctx context.Context, guestIPv4, hostVeth, reservedIPv4 string) error
+	// addLocalOwned records the VM's private /128 in the ANCP ownership cache. A
+	// field because it writes a root-owned file directly rather than through the
+	// command seam, so a test substitutes it the way it does unpark.
+	addLocalOwned      func(address string) error
 	networkEnvironment string
 }
 
@@ -117,6 +127,14 @@ func (bringUp *bringUp) run(ctx context.Context) error {
 	if err := bringUp.forwardRules(ctx, facts); err != nil {
 		return err
 	}
+	// Step 7a: the private plane, present only once the VM is enrolled in universal
+	// private addressing. Its routes come first, then the isolation rules, then the
+	// ownership-cache record ANCP gossips. Skipped entirely on a public-only VM.
+	if facts.privateAddress != "" {
+		if err := bringUp.privatePlaneUp(ctx, facts); err != nil {
+			return err
+		}
+	}
 	// Step 8: re-apply the inbound-v4 1:1-NAT if a Reserved IP is attached. Absent
 	// on an ordinary VM. The env already carries RESERVED_IPV4, so this is the apply
 	// path (reservedip.Attach does not itself write the env).
@@ -138,6 +156,8 @@ type facts struct {
 	ipv4GuestCIDR    string
 	ipv4GuestAddress string // ipv4GuestCIDR with its prefix stripped
 	reservedIPv4     string
+	privateAddress   string // the VM's private-plane /128, bare; "" on a public VM
+	tenantPrefix     string // the VM's tenant /48
 }
 
 // read parses the sidecar and validates every field that reaches a command. The
@@ -196,7 +216,41 @@ func (bringUp *bringUp) read(ctx context.Context) (facts, error) {
 			return facts{}, fmt.Errorf("%s: %s=%q is not an IPv4 address", bringUp.networkEnvironment, reservedIPv4Key, built.reservedIPv4)
 		}
 	}
+	// The private plane needs BOTH its address and its tenant prefix; the Python
+	// applies it only when both are set. Present-but-one-missing is a public VM here,
+	// as there, but present-and-malformed is refused — these reach isolation rules.
+	privateAddress := value(privateAddressKey)
+	tenantPrefix := value(tenantPrefixKey)
+	if privateAddress != "" && tenantPrefix != "" {
+		canonicalPrivate, ok := canonicalIPv6(privateAddress)
+		if !ok {
+			return facts{}, fmt.Errorf("%s: %s=%q is not a canonical IPv6 address", bringUp.networkEnvironment, privateAddressKey, privateAddress)
+		}
+		canonicalTenant, ok := canonicalIPv6Prefix(tenantPrefix)
+		if !ok {
+			return facts{}, fmt.Errorf("%s: %s=%q is not an IPv6 prefix", bringUp.networkEnvironment, tenantPrefixKey, tenantPrefix)
+		}
+		built.privateAddress = canonicalPrivate
+		built.tenantPrefix = canonicalTenant
+	}
 	return built, nil
+}
+
+// privatePlaneUp routes the VM's private /128 into the namespace and to the host
+// veth, installs the tenant-isolation rules, and records the /128 in the ANCP
+// ownership cache the mesh gossips. The routes mirror the public /128's in steps 4
+// and 6; there is deliberately no proxy-NDP for fdaa:: — it is never on-link.
+func (bringUp *bringUp) privatePlaneUp(ctx context.Context, facts facts) error {
+	if err := bringUp.perform(ctx, []step{
+		checked("sudo ip netns exec {} ip -6 route replace {} dev {}", facts.namespace, facts.privateAddress+"/128", facts.tapDevice),
+		checked("sudo ip -6 route replace {} via fe80::3 dev {}", facts.privateAddress+"/128", facts.hostVeth),
+	}); err != nil {
+		return err
+	}
+	if err := applyPrivateNetwork(ctx, bringUp.commands, facts.hostVeth, facts.privateAddress, facts.tenantPrefix); err != nil {
+		return err
+	}
+	return bringUp.addLocalOwned(facts.privateAddress)
 }
 
 // scaffold re-asserts the host-wide nft floor: the table, the forward chain, the

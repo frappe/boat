@@ -243,6 +243,22 @@ func TestUpIsIdempotentWhenTheScaffoldAndRulesExist(t *testing.T) {
 	}
 }
 
+// assertSuffix checks that want is the final run of commands in got — how the
+// private block, which comes last on the bring-up, is asserted without restating
+// the whole public sequence.
+func assertSuffix(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) < len(want) {
+		t.Fatalf("trace has %d commands, want at least %d:\n  %s", len(got), len(want), strings.Join(got, "\n  "))
+	}
+	tail := got[len(got)-len(want):]
+	for index := range want {
+		if tail[index] != want[index] {
+			t.Errorf("suffix command %d:\ngot:  %s\nwant: %s", index, tail[index], want[index])
+		}
+	}
+}
+
 func containsCommand(trace []string, command string) bool {
 	for _, recorded := range trace {
 		if recorded == command {
@@ -250,6 +266,77 @@ func containsCommand(trace []string, command string) bool {
 		}
 	}
 	return false
+}
+
+// A VM enrolled in the private plane: after the public bring-up, its private /128
+// is routed into the namespace and to the host veth, the four tenant-isolation
+// rules install, and its /128 is recorded in the ownership cache ANCP gossips.
+func TestUpWithThePrivatePlaneRoutesIsolatesAndRecordsOwnership(t *testing.T) {
+	environment := testEnvironment +
+		"PRIVATE_ADDRESS=fdaa:1a2b:3c4d:0:1:2:3:4\nTENANT_PREFIX=fdaa:1a2b:3c4d::/48\n"
+	fake := newFakeCommands().output("sudo cat "+environmentPath, environment).
+		output("ip -j -6 route show default", `[{"dev":"eth0"}]`).
+		output("ip -j route show default", `[{"dev":"eth0"}]`)
+
+	var owned string
+	bringUp := &bringUp{
+		commands:           fake,
+		unpark:             func(context.Context) error { return nil },
+		attachReservedIP:   func(context.Context, string, string, string) error { return nil },
+		addLocalOwned:      func(address string) error { owned = address; return nil },
+		networkEnvironment: environmentPath,
+	}
+	if err := bringUp.run(context.Background()); err != nil {
+		t.Fatalf("Up: %v", err)
+	}
+	if owned != "fdaa:1a2b:3c4d:0:1:2:3:4" {
+		t.Errorf("the private /128 was not recorded in the ownership cache: %q", owned)
+	}
+	assertSuffix(t, fake.trace, []string{
+		"sudo ip netns exec atlas-deadbeefns ip -6 route replace fdaa:1a2b:3c4d:0:1:2:3:4/128 dev atlas-deadtap0",
+		"sudo ip -6 route replace fdaa:1a2b:3c4d:0:1:2:3:4/128 via fe80::3 dev atlas-hdeadbe",
+		"- sudo nft list chain inet atlas forward",
+		"sudo nft add rule inet atlas forward ip6 daddr fdaa::/16 drop",
+		"- sudo nft list chain inet atlas forward",
+		"sudo nft insert rule inet atlas forward iifname atlas-hdeadbe ip6 daddr fdaa::/16 ip6 saddr != fdaa:1a2b:3c4d:0:1:2:3:4 drop",
+		"sudo nft insert rule inet atlas forward iifname atlas-hdeadbe ip6 saddr fdaa:1a2b:3c4d:0:1:2:3:4 ip6 daddr fdaa:1a2b:3c4d::/48 accept",
+		"sudo nft insert rule inet atlas forward iifname atlas-hdeadbe ip6 saddr fdaa:1a2b:3c4d:0:1:2:3:4 ip6 daddr fdaa:0:0::/48 accept",
+		"sudo nft insert rule inet atlas forward iifname wg-mesh oifname atlas-hdeadbe ip6 saddr fdaa:1a2b:3c4d::/48 ip6 daddr fdaa:1a2b:3c4d:0:1:2:3:4 accept",
+	})
+}
+
+// The private teardown runs independently of the public /128 (a dark VM has none):
+// the private route is deleted, the isolation rules scraped by handle, and the
+// ownership record withdrawn.
+func TestDownWithThePrivatePlaneTearsDownIsolationAndWithdrawsOwnership(t *testing.T) {
+	environment := testEnvironment +
+		"PRIVATE_ADDRESS=fdaa:1a2b:3c4d:0:1:2:3:4\nTENANT_PREFIX=fdaa:1a2b:3c4d::/48\n"
+	const privateRules = `iifname "atlas-hdeadbe" ip6 daddr fdaa::/16 ip6 saddr != fdaa:1a2b:3c4d:0:1:2:3:4 drop # handle 20` + "\n"
+	fake := newFakeCommands().
+		output("sudo cat "+environmentPath, environment).
+		output("ip -j -6 route show default", `[{"dev":"eth0"}]`).
+		output("sudo nft -a list chain inet atlas forward", privateRules)
+
+	var withdrawn string
+	bringDown := &bringDown{
+		commands:           fake,
+		unpark:             func(context.Context) error { return nil },
+		detachReservedIP:   func(context.Context, string) error { return nil },
+		removeLocalOwned:   func(address string) error { withdrawn = address; return nil },
+		networkEnvironment: environmentPath,
+	}
+	if err := bringDown.run(context.Background()); err != nil {
+		t.Fatalf("Down: %v", err)
+	}
+	if withdrawn != "fdaa:1a2b:3c4d:0:1:2:3:4" {
+		t.Errorf("the private /128 was not withdrawn from the ownership cache: %q", withdrawn)
+	}
+	if !containsCommand(fake.trace, "- sudo ip -6 route del fdaa:1a2b:3c4d:0:1:2:3:4/128 dev atlas-hdeadbe") {
+		t.Error("the private host route was not deleted")
+	}
+	if !containsCommand(fake.trace, "- sudo nft delete rule inet atlas forward handle 20") {
+		t.Error("the private isolation rule was not scraped by handle")
+	}
 }
 
 // A garbled sidecar must not render into a command: the bring-up refuses before

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/frappe/boat/internal/netapply/localownership"
 	"github.com/frappe/boat/internal/netapply/reservedip"
 	"github.com/frappe/boat/internal/park"
 	"github.com/frappe/boat/internal/paths"
@@ -30,6 +31,7 @@ func Down(ctx context.Context, runner *run.Runner, uuid string) error {
 		commands:           runner,
 		unpark:             func(ctx context.Context) error { return park.Unpark(ctx, runner, uuid) },
 		detachReservedIP:   func(ctx context.Context, guestIPv4 string) error { return reservedip.Detach(ctx, runner, guestIPv4) },
+		removeLocalOwned:   func(address string) error { return localownership.Remove(localownership.DefaultPath, address) },
 		networkEnvironment: paths.ForVirtualMachine(uuid).NetworkEnvironment(),
 	}
 	return bringDown.run(ctx)
@@ -39,6 +41,7 @@ type bringDown struct {
 	commands           commands
 	unpark             func(ctx context.Context) error
 	detachReservedIP   func(ctx context.Context, guestIPv4 string) error
+	removeLocalOwned   func(address string) error
 	networkEnvironment string
 }
 
@@ -72,6 +75,7 @@ func (bringDown *bringDown) run(ctx context.Context) error {
 		guestAddress = stripPrefix(guestCIDR)
 	}
 	reservedIPv4, _ := canonicalIPv4(sidecar.Value(text, reservedIPv4Key))
+	privateAddress, _ := canonicalIPv6(sidecar.Value(text, privateAddressKey))
 
 	// Drop the inbound-v4 1:1-NAT first, while the guest /30 is still known — the
 	// namespace delete below would otherwise strand the host-table rules and the
@@ -94,6 +98,9 @@ func (bringDown *bringDown) run(ctx context.Context) error {
 		if virtualMachine != "" {
 			steps = append(steps, unchecked("sudo ip -6 route del {} dev {}", virtualMachine+"/128", hostVeth))
 		}
+		if privateAddress != "" {
+			steps = append(steps, unchecked("sudo ip -6 route del {} dev {}", privateAddress+"/128", hostVeth))
+		}
 		if guestAddress != "" {
 			steps = append(steps, unchecked("sudo ip -4 route del {} dev {}", guestAddress+"/32", hostVeth))
 		}
@@ -111,7 +118,19 @@ func (bringDown *bringDown) run(ctx context.Context) error {
 	// The two public forward rules, deleted by handle. Look them up by the VM's
 	// /128 — the one match key common to both — tolerating an absent chain.
 	if virtualMachine != "" {
-		return bringDown.removeForwardRules(ctx, virtualMachine)
+		if err := bringDown.removeForwardRules(ctx, virtualMachine); err != nil {
+			return err
+		}
+	}
+	// The private-plane isolation rules, deleted independently of the public /128:
+	// a dark VM has no public address at all, so a public-gated sweep would miss its
+	// tenant rules and leave a stale accept pointing at a recycled veth — a leak.
+	// The ownership-cache withdrawal follows, which ANCP gossips on its next scan.
+	if privateAddress != "" && hostVeth != "" {
+		if err := removePrivateNetwork(ctx, bringDown.commands, privateAddress, hostVeth); err != nil {
+			return err
+		}
+		return bringDown.removeLocalOwned(privateAddress)
 	}
 	return nil
 }
