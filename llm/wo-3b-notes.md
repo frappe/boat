@@ -30,7 +30,32 @@ command lines asserted byte-for-byte vs the Python, no host needed):
 6. Atlas (feat/boat-split): `Reserved IP.attach/detach` → BoatClient, CAS-gated
 
 ## Shipped (this pass)
-_(appended as each commit lands)_
+
+**Reserved-IP 1:1 NAT — Boat side, complete & `make check` green.** Commits:
+1. `feat(sidecar): pure network.env writers, upsert and remove a key` — `Upsert`/
+   `Remove`, golden-tested against `network_env.py`.
+2. `feat(reservedip): render the 1:1-NAT rules, held to the Python's output` —
+   `internal/netapply/reservedip/rules.go`, nft rule builders + injection guards
+   (`canonicalIPv4`), golden strings captured from `reserved_ip_nat.py`.
+3. `feat(reservedip): apply and remove the NAT, both delivery models` — anchor
+   discovery, DO-anchor + routed-flexible-IP apply, detach by handle, egress
+   policy route; full command-sequence goldens via a recorder.
+4. `feat(vm): the reserved-ip verb — durable flag, then the live NAT` —
+   `vm.Manager.ReservedIP`: reads the sidecar, writes RESERVED_IPV4, dispatches.
+5. `feat(api): the reserved-ip endpoint, validated and serialized` —
+   `POST /vms/{uuid}/reserved-ip` (openapi + regen wire), handler validates the
+   reserved IP at the boundary, serialized through `perform`/reconciler; reports
+   the delivery model as the operation result.
+
+**To review — reserved-IP:**
+- Verb string chosen `vm-reserved-ip` (matches the Python script name, not the
+  `<verb>-vm` shape). Atlas's `boat_client` verb table must add the same string.
+- Not fenced (attaches NAT to a running VM, boots nothing) — deliberate, see the
+  handler doc-comment. Confirm that matches intent.
+- Live apply NOT exercised on a host this pass (needs a proxy VM with a reserved
+  IP; the boat hosts have no VMs tonight). Verified at unit/golden level only.
+- The CAS on the host reserved-IP slot (§11.2/§11.5) is the *Atlas* side; the
+  Boat endpoint is its first caller but Boat itself does not CAS reserved-ip.
 
 ## Deferred / remaining WO-3b work (for review)
 - **The big one: per-VM network-up/down apply** (netns/veth/tap/NAT44/proxy-NDP/
