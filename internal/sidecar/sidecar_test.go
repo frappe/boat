@@ -39,3 +39,77 @@ func TestAnEmptyFileHasNoValues(t *testing.T) {
 		t.Errorf("Parse(\"\") = %v, want no values", values)
 	}
 }
+
+// The wanted strings are what upsert_network_env in network_env.py actually
+// returned for these inputs — the writer is held to the Python's rendering byte
+// for byte, because a cold boot re-reads exactly this file.
+func TestUpsertMatchesThePythonWriter(t *testing.T) {
+	for _, testCase := range []struct {
+		name, text, key, value, want string
+	}{
+		{
+			name: "append a missing key preserving order",
+			text: "IPV4_GUEST_CIDR=100.64.0.2/30\nHOST_VETH=veth-abc\n",
+			key:  "RESERVED_IPV4", value: "146.190.11.153",
+			want: "IPV4_GUEST_CIDR=100.64.0.2/30\nHOST_VETH=veth-abc\nRESERVED_IPV4=146.190.11.153\n",
+		},
+		{
+			name: "replace an existing key in place",
+			text: "IPV4_GUEST_CIDR=100.64.0.2/30\nRESERVED_IPV4=1.1.1.1\nHOST_VETH=x\n",
+			key:  "RESERVED_IPV4", value: "2.2.2.2",
+			want: "IPV4_GUEST_CIDR=100.64.0.2/30\nRESERVED_IPV4=2.2.2.2\nHOST_VETH=x\n",
+		},
+		{
+			name: "an empty file becomes one line", text: "",
+			key: "RESERVED_IPV4", value: "9.9.9.9", want: "RESERVED_IPV4=9.9.9.9\n",
+		},
+		{
+			name: "a file with no trailing newline still ends in one", text: "A=1",
+			key: "B", value: "2", want: "A=1\nB=2\n",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := Upsert(testCase.text, testCase.key, testCase.value); got != testCase.want {
+				t.Errorf("Upsert(%q, %q, %q) = %q, want %q", testCase.text, testCase.key, testCase.value, got, testCase.want)
+			}
+		})
+	}
+}
+
+// remove_network_env's rendering, likewise captured from the Python: the last
+// key removed empties the file to "" (not a lone newline), and a commented
+// assignment is never a match.
+func TestRemoveMatchesThePythonWriter(t *testing.T) {
+	for _, testCase := range []struct {
+		name, text, key, want string
+	}{
+		{
+			name: "drop one key, keep the rest and their order",
+			text: "A=1\nRESERVED_IPV4=1.1.1.1\nB=2\n", key: "RESERVED_IPV4", want: "A=1\nB=2\n",
+		},
+		{
+			name: "removing the only key empties the file",
+			text: "RESERVED_IPV4=1.1.1.1\n", key: "RESERVED_IPV4", want: "",
+		},
+		{
+			name: "a commented assignment is not a match",
+			text: "A=1\n# RESERVED_IPV4=keepme\nB=2\n", key: "RESERVED_IPV4",
+			want: "A=1\n# RESERVED_IPV4=keepme\nB=2\n",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := Remove(testCase.text, testCase.key); got != testCase.want {
+				t.Errorf("Remove(%q, %q) = %q, want %q", testCase.text, testCase.key, got, testCase.want)
+			}
+		})
+	}
+}
+
+// Upsert then read-back is the round trip attach relies on: the value written is
+// the value Parse sees, whatever surrounded it.
+func TestUpsertRoundTripsThroughValue(t *testing.T) {
+	updated := Upsert("IPV4_GUEST_CIDR=100.64.0.2/30\n", "RESERVED_IPV4", "203.0.113.7")
+	if got := Value(updated, "RESERVED_IPV4"); got != "203.0.113.7" {
+		t.Errorf("Value after Upsert = %q, want %q", got, "203.0.113.7")
+	}
+}

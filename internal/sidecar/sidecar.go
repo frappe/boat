@@ -48,3 +48,76 @@ func unquote(value string) string {
 	}
 	return value
 }
+
+// Upsert returns text with key=value set — replacing the existing line in place,
+// keeping the order of everything around it, or appending the line when the key
+// is absent. The output always ends in one newline.
+//
+// This is how a reserved IP's durable flag lands in a running VM's network.env
+// at attach time: the sidecar is the host's own record of what a VM owns, so a
+// later cold boot re-creates the 1:1 NAT from disk exactly as provision would.
+// The caller does the atomic write; this is only the text. Ported from
+// upsert_network_env in scripts/lib/atlas/network_env.py.
+func Upsert(text string, key string, value string) string {
+	lines := splitLines(text)
+	rendered := key + "=" + value
+	for index, line := range lines {
+		if lineKey(line) == key {
+			lines[index] = rendered
+			return strings.Join(lines, "\n") + "\n"
+		}
+	}
+	return strings.Join(append(lines, rendered), "\n") + "\n"
+}
+
+// Remove returns text with any key= line taken out — the detach twin of Upsert,
+// so a detached VM's env no longer carries the key and a reboot brings it up
+// without it. An empty result is the empty string, not a lone newline, so a file
+// emptied of its last key reads as absent rather than blank. Ported from
+// remove_network_env.
+func Remove(text string, key string) string {
+	lines := splitLines(text)
+	kept := lines[:0]
+	for _, line := range lines {
+		if lineKey(line) != key {
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	return strings.Join(kept, "\n") + "\n"
+}
+
+// lineKey is the KEY of a KEY=value line, or "" for a blank line, a comment, or
+// anything else that names no key. A value carrying an `=` keeps its own value
+// (only the first `=` splits the key off), and surrounding whitespace on the key
+// is trimmed — the same read Parse does, so Upsert replaces exactly the line
+// Value would have read.
+func lineKey(line string) string {
+	stripped := strings.TrimSpace(line)
+	if stripped == "" || strings.HasPrefix(stripped, "#") {
+		return ""
+	}
+	key, _, _ := strings.Cut(stripped, "=")
+	return strings.TrimSpace(key)
+}
+
+// splitLines splits text into lines the way Python's str.splitlines does for the
+// newline-terminated files Boat handles: the terminating newline of the last
+// line produces no trailing empty element, an empty string is no lines at all,
+// and a `\r\n` writer's carriage return is dropped. Matching that exactly is
+// what lets Upsert/Remove reproduce the Python transform byte for byte.
+func splitLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(text, "\n")
+	for index, line := range lines {
+		lines[index] = strings.TrimSuffix(line, "\r")
+	}
+	if last := len(lines) - 1; lines[last] == "" {
+		lines = lines[:last]
+	}
+	return lines
+}
