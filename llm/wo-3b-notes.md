@@ -159,6 +159,17 @@ host.** The only thing standing between this and live is the cutover (below).
 NOTE: `apt install wireguard-tools` was run on host-1 (a real boat host needs it
 for tunnels anyway); leave it.
 
+## Beyond WO-3b — the disk bring-up hook (same session)
+**`vm-disk-up` ported & live-proven** (`internal/vmdisk`, commit `4f5ff9b`; `boat
+vm-disk-up` CLI). Activates the VM's activation-skip thin snapshot LV and re-mknods
+its jail node with the current major:minor — the disk analogue of vm-network-up.
+Differential on host-1 with a **loop-backed thin pool** (built + torn down; recipe
+now in `TESTING.md §6a`): LV active state, node major:minor, owner and perms all
+**byte-identical** to `vm-disk-up.py`. Activation + mknod only — NOT the lvcreate/
+snapshot CoW paths, which stay in the unported bulk of `lvm.py`. The last
+`firecracker-vm@` hook is `vm-restore` (FC-API snapshot resume) — needs a live VM +
+a staged snapshot to diff, which no boat host has.
+
 ## The cutover — exact steps + its real dependencies (do NOT force fleet-wide)
 The go-live is re-pointing the `firecracker-vm@.service` hooks:
 ```
