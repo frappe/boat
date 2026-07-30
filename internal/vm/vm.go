@@ -122,6 +122,10 @@ type Manager struct {
 	// field for the same reason the others are: it runs real ip and nft commands,
 	// and a test that could not substitute it would have to touch the host.
 	park func(ctx context.Context, runner *run.Runner, uuid string) error
+	// retire is park's undo, and terminate is its only caller: a VM going away for
+	// good has to have its trap, its route and its proxy-NDP entry withdrawn while
+	// the sidecar naming its address is still on disk.
+	retire func(ctx context.Context, runner *run.Runner, uuid string) error
 	// liveness confirms that a Firecracker is answering on a VM's API socket and
 	// reports the guest state it named. A field for the same reason park is: it
 	// speaks HTTP to a jailed process through sudo, and a test that could not
@@ -140,6 +144,7 @@ func NewManager() *Manager {
 		filesFor:         filesFor,
 		clock:            systemClock{},
 		park:             park.ParkVirtualMachine,
+		retire:           park.Retire,
 		liveness:         fcattach.Find,
 		wakeTrapResident: park.Resident,
 	}

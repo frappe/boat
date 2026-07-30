@@ -13,6 +13,7 @@ import (
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/store"
+	"github.com/frappe/boat/internal/units"
 	"github.com/frappe/boat/internal/vm"
 	"github.com/frappe/boat/internal/watch"
 )
@@ -35,16 +36,21 @@ type fakeStore struct {
 	fences          map[string]int64
 	decisions       []model.Decision
 	epoch           int64
-	units           []model.UnitLiveness
 	logicalVolumes  []model.LogicalVolume
-	desiredWrites   int
-	fenceWrites     int
-	claimError      error
-	completeError   error
-	decisionError   error
-	readError       error
-	writeError      error
-	snapshotError   error
+	// movedAt is the observed epoch the CAS pretends each VM's record was last
+	// written at. The real store stamps it on every observed write; here it is set
+	// by hand, so a test can state "this VM moved at epoch 12" without driving
+	// twelve observations to get there.
+	movedAt        map[string]int64
+	desiredWrites  int
+	desiredDeletes int
+	fenceWrites    int
+	claimError     error
+	completeError  error
+	decisionError  error
+	readError      error
+	writeError     error
+	snapshotError  error
 }
 
 func newFakeStore() *fakeStore {
@@ -53,6 +59,7 @@ func newFakeStore() *fakeStore {
 		virtualMachines: map[string]model.VirtualMachine{},
 		desired:         map[string]model.DesiredVirtualMachine{},
 		fences:          map[string]int64{},
+		movedAt:         map[string]int64{},
 	}
 }
 
@@ -192,6 +199,19 @@ func (fake *fakeStore) PutDesired(record model.DesiredVirtualMachine) error {
 	return nil
 }
 
+// DeleteDesired keeps the store's asymmetry: the assertion goes and the fence
+// epoch stays, which is what the retraction tests are about.
+func (fake *fakeStore) DeleteDesired(uuid string) error {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
+	if fake.writeError != nil {
+		return fake.writeError
+	}
+	delete(fake.desired, uuid)
+	fake.desiredDeletes++
+	return nil
+}
+
 func (fake *fakeStore) GetDesired(uuid string) (model.DesiredVirtualMachine, bool, error) {
 	fake.mutex.Lock()
 	defer fake.mutex.Unlock()
@@ -237,6 +257,22 @@ func (fake *fakeStore) ObservedEpoch() (int64, error) {
 	return fake.epoch, nil
 }
 
+// CheckVirtualMachineUnmoved keeps the real rule rather than stubbing it: an
+// epoch newer than the host has reached is a token from another store, and a
+// record written after the epoch offered has moved. Stubbing either would make
+// every CAS test a test of the fake.
+func (fake *fakeStore) CheckVirtualMachineUnmoved(uuid string, offered int64) error {
+	fake.mutex.Lock()
+	defer fake.mutex.Unlock()
+	if fake.readError != nil {
+		return fake.readError
+	}
+	if offered > fake.epoch || fake.movedAt[uuid] > offered {
+		return fmt.Errorf("%w: vm %s", store.ErrObservationMoved, uuid)
+	}
+	return nil
+}
+
 func (fake *fakeStore) Snapshot() (model.Export, error) {
 	fake.mutex.Lock()
 	defer fake.mutex.Unlock()
@@ -247,7 +283,6 @@ func (fake *fakeStore) Snapshot() (model.Export, error) {
 		ObservedEpoch:   fake.epoch,
 		TakenAt:         time.Date(2026, 7, 27, 10, 0, 0, 0, time.UTC),
 		VirtualMachines: fake.observed(),
-		Units:           fake.units,
 		LogicalVolumes:  fake.logicalVolumes,
 		FenceEpochs:     maps.Clone(fake.fences),
 	}, nil
@@ -286,6 +321,10 @@ type fakeVirtualMachines struct {
 	// Ordering is the whole of the write-ahead rule, and it is invisible to any
 	// assertion made after the request returns.
 	beforeRebuild func()
+	// beforeTerminate is the same seam for the same reason: whether the desired
+	// state was already retracted when the host was reached is only observable
+	// from inside the verb, and a crash lands in exactly that window.
+	beforeTerminate func()
 
 	// hold is how long a verb pretends to take, and overlapped is whether a
 	// second one ever ran while it did. Counters alone cannot see the failure the
@@ -366,6 +405,9 @@ func (fake *fakeVirtualMachines) Rebuild(
 
 func (fake *fakeVirtualMachines) Terminate(ctx context.Context, runner *run.Runner, uuid string) error {
 	defer fake.enter()()
+	if fake.beforeTerminate != nil {
+		fake.beforeTerminate()
+	}
 	fake.terminates++
 	fake.writeTrace()
 	return fake.verbError
@@ -434,12 +476,17 @@ func (fake *fakeVirtualMachines) writeTrace() {
 // the same store, and a test that split them could not catch a handler reading
 // an epoch that belongs to another snapshot.
 func newTestServer(operations *fakeStore, machines *fakeVirtualMachines) *Server {
+	return newTestServerWithUnits(operations, machines, newFakeUnits())
+}
+
+func newTestServerWithUnits(operations *fakeStore, machines *fakeVirtualMachines, supervisor *fakeUnits) *Server {
 	server := NewServer(Dependencies{
 		Operations:      operations,
 		State:           operations,
 		VirtualMachines: machines,
 		Decisions:       operations,
 		Watch:           watch.NewHub(),
+		Units:           supervisor,
 		StartedAt:       time.Date(2026, 7, 27, 9, 0, 0, 0, time.UTC),
 	})
 	server.newRunner = func(trace io.Writer) *run.Runner {
@@ -452,4 +499,46 @@ func newTestServer(operations *fakeStore, machines *fakeVirtualMachines) *Server
 		return model.HostFacts{Hostname: "boat-test-host", KernelVersion: "6.19.0"}, nil
 	}
 	return server
+}
+
+// fakeUnits is the sibling-unit supervisor without systemd. It keeps the one
+// rule the handlers lean on — a name outside the supervised set is refused —
+// because that rule is what stops this endpoint reaching a per-VM unit, and a
+// fake that let it slide would make every test about it pass for free.
+type fakeUnits struct {
+	liveness []model.UnitLiveness
+	acted    []string
+	readErr  error
+	actErr   error
+}
+
+func newFakeUnits() *fakeUnits { return &fakeUnits{liveness: []model.UnitLiveness{}} }
+
+func (fake *fakeUnits) Liveness(ctx context.Context, runner *run.Runner) ([]model.UnitLiveness, error) {
+	if fake.readErr != nil {
+		return nil, fake.readErr
+	}
+	return fake.liveness, nil
+}
+
+func (fake *fakeUnits) LivenessOf(
+	ctx context.Context, runner *run.Runner, name string,
+) (model.UnitLiveness, bool, error) {
+	if fake.readErr != nil {
+		return model.UnitLiveness{}, false, fake.readErr
+	}
+	if !units.IsSupervised(name) {
+		return model.UnitLiveness{}, false, fmt.Errorf("this host supervises no unit named %q", name)
+	}
+	for _, unit := range fake.liveness {
+		if unit.Name == name {
+			return unit, true, nil
+		}
+	}
+	return model.UnitLiveness{}, false, nil
+}
+
+func (fake *fakeUnits) Act(ctx context.Context, runner *run.Runner, name string, action units.Action) error {
+	fake.acted = append(fake.acted, string(action)+" "+name)
+	return fake.actErr
 }

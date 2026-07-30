@@ -184,16 +184,19 @@ func isReadOnly(command string) bool {
 		}
 	}
 	// The one command that reads inside a namespace: `sudo ip -n <ns> -o link
-	// show <device>`.
+	// show`, with no device named — the whole namespace is listed and the tap
+	// looked for in the output, because `ip link show <missing device>` reports
+	// its perfectly ordinary negative on stderr with exit 1 and is therefore
+	// indistinguishable from a denied sudo.
 	//
-	// Deliberately NOT `ip netns exec <ns> ip link show <device>`, which runs
-	// whatever follows the namespace as root — a netns isolates networking, not
-	// the filesystem, so that form is a root shell wearing a network command's
+	// Deliberately NOT `ip netns exec <ns> ip link show`, which runs whatever
+	// follows the namespace as root — a netns isolates networking, not the
+	// filesystem, so that form is a root shell wearing a network command's
 	// clothes, and no sudoers pattern can constrain it (a wildcard for the
 	// namespace name also matches a command). `ip -n` takes the namespace as a
 	// flag and can only ever re-execute ip itself.
 	fields := strings.Fields(command)
-	return len(fields) == 8 &&
+	return len(fields) == 7 &&
 		strings.Join(fields[:3], " ") == "sudo ip -n" &&
-		strings.Join(fields[4:7], " ") == "-o link show"
+		strings.Join(fields[4:], " ") == "-o link show"
 }

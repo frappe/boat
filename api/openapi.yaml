@@ -63,6 +63,101 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /units/{name}:
+    parameters:
+      - $ref: "#/components/parameters/UnitName"
+    get:
+      summary: One supervised unit's liveness
+      description: |
+        The sibling units are the host's own services — the thin pool, the
+        network control plane, the wake trap, the management firewall. This
+        reports what systemd says about one of them, verbatim.
+
+        The name must be one this Boat supervises, and the supervised set is a
+        closed list of literal names compiled into the binary. A name outside it
+        is a 404 rather than a read, which is what keeps `sshd.service`,
+        `boat.service` and every `firecracker-vm@<uuid>.service` unreachable
+        from here. The per-VM units are not an oversight: they have their own
+        verbs, their own fence and their own journal, and a second way to reach
+        them would be a way around all three.
+      operationId: getUnit
+      responses:
+        "200":
+          description: The unit's liveness
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnitLiveness"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: |
+            This host supervises no unit by that name, or it supervises it and
+            systemd reports the unit is not installed here. The two are
+            different facts and the sentence says which.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    post:
+      summary: Start or restart a supervised unit
+      description: |
+        The verb set is `start` and `restart`, and it deliberately does not
+        include `stop`.
+
+        Supervision here means keeping the host's own services up: "be running"
+        and "be running afresh" are the only states a control plane ever wants
+        this host's pool, network daemon, wake trap or firewall in, and
+        `restart` already covers every legitimate use of a stop-then-start —
+        including the config re-apply the mesh unit's own ExecStop exists for.
+        A stop is the verb with teeth and no driver behind it: stopping the wake
+        trap strands every sleeping VM on the host with nothing left watching
+        its counter, and nothing in the reconciler would ever notice, because
+        the reconciler reconciles VMs and not units. An operator who genuinely
+        must take one down has SSH break-glass, which the split keeps
+        deliberately (§12).
+
+        It carries no `op_id`, unlike every VM verb. A verb needs one when a
+        retry could run it twice into two guests, two addresses or two volumes;
+        this one is idempotent by outcome — both actions converge the unit to
+        "running, now", and re-posting converges it again. What bounds a retry
+        storm is the unit's own `StartLimitBurst`, which systemd enforces and
+        which Boat is deliberately not granted the `reset-failed` to clear: a
+        rate limit that the thing being rate-limited can reset is not one.
+
+        The reply is the unit's liveness read back AFTER the action, so a caller
+        learns what the unit became rather than that a command was accepted.
+      operationId: actOnUnit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnitActionRequest"
+      responses:
+        "200":
+          description: The unit's liveness after the action
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UnitLiveness"
+        "400":
+          description: The action is not one this host performs on a unit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: |
+            This host supervises no unit by that name, or it supervises it and
+            systemd reports the unit is not installed here.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /vms:
     get:
       summary: List every VM this host observes
@@ -106,7 +201,14 @@ paths:
 
         It also carries the fence epoch, which is the only channel by which a
         Boat learns it may boot a UUID at all. Atlas is the sole issuer.
+
+        A caller that DECIDED something from the mirror, rather than merely
+        re-asserting what it already knew, sends `If-Match` and is refused if
+        this host's observation of the VM moved since the snapshot that decision
+        was taken from (§11.2).
       operationId: putVirtualMachine
+      parameters:
+        - $ref: "#/components/parameters/ObservedEpochPrecondition"
       requestBody:
         required: true
         content:
@@ -120,17 +222,67 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DesiredVirtualMachine"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "409":
+        "400":
           description: |
-            The epoch offered is older than the one this host already holds. An
-            epoch never goes backwards, because a fence that can regress
-            re-opens the window it exists to close.
+            The document names a different VM than the path, states a
+            `desired_power` that is not one of the two, or carries an `If-Match`
+            that is not an observed epoch.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: |
+            Two refusals share this code and a caller must act on them
+            differently, so `reason` tells them apart rather than leaving it to
+            parse a sentence.
+
+            `fence-regression`: the epoch offered is older than the one this
+            host already holds. An epoch never goes backwards, because a fence
+            that can regress re-opens the window it exists to close. Retrying
+            this is wrong — the caller is asserting a claim this host has
+            already seen superseded.
+
+            `stale-observation`: an `If-Match` was offered and this host's
+            observation of the VM has been written since. Retrying this is
+            right, after re-reading `GET /export` and re-taking the decision
+            against what the host is now.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      summary: Retract this VM's desired state
+      description: |
+        Atlas withdrawing its assertion — the mirror image of the PUT, and the
+        half of §16.0 a source Boat needs once a migration has repointed a VM
+        away from it. Without it a host keeps `{epoch, Running}` for a VM it no
+        longer owns forever, and its sweep starts that VM again the moment it
+        observes it stopped.
+
+        It touches nothing on the host. It is not a terminate: no unit is
+        stopped and no volume is removed, and a VM running here goes on running.
+        What ends is Boat's authority to act on it — the reconciler treats a VM
+        with no desired record as one it was never told about (§1), so the sweep
+        leaves it exactly as the host has it.
+
+        It deliberately does NOT clear the fence epoch. The epoch answers "which
+        incarnation of this UUID may boot here", and dropping it would let a
+        partitioned Atlas re-assert an older one and boot a VM that has since
+        moved to another host — the split-brain the fence exists to prevent
+        (§11.1). A retraction removes an authority; it must not hand one back.
+
+        Idempotent: retracting what was never asserted answers 204 as well,
+        because the caller's question is "hold nothing for this UUID" and the
+        answer is the same either way.
+      operationId: deleteVirtualMachine
+      responses:
+        "204":
+          description: This host holds no desired state for the VM
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 
   /export:
     get:
@@ -516,6 +668,44 @@ components:
       schema:
         type: string
 
+    UnitName:
+      name: name
+      in: path
+      required: true
+      description: |
+        A systemd unit name, spelled in full with its `.service` suffix. It must
+        be one of the units this Boat supervises; the set is closed and
+        compiled in, and no per-VM `firecracker-vm@` instance is in it.
+      schema:
+        type: string
+
+    ObservedEpochPrecondition:
+      name: If-Match
+      in: header
+      required: false
+      description: |
+        The compare-and-set precondition of §11.2, and the whole of what makes
+        the mirror safe to decide from. Its value is an `observed_epoch` read
+        out of a `GET /export`, optionally wrapped in the quotes an HTTP entity
+        tag carries (`42` and `"42"` are the same precondition).
+
+        The token is whole-host and the COMPARISON is per-resource: Boat refuses
+        the write if the record for the VM this request names has been written
+        since that epoch, not if anything at all on the host has. The difference
+        decides whether the mechanism is usable — a host running forty VMs bumps
+        its epoch on every one of their observations, so a whole-host comparison
+        against a mirror refreshed every five minutes would refuse every write,
+        and a precondition that always fails is a precondition somebody turns
+        off. It also refuses an epoch NEWER than any this host has issued, which
+        is the caller quoting a snapshot of a different store — a Boat whose
+        bbolt file was lost and restarted from zero.
+
+        Omit it when re-asserting intent already known, which is what Atlas does
+        before every verb: there is no decision to protect, and a precondition
+        on a re-assert would make reconnect fail exactly when it matters.
+      schema:
+        type: string
+
   responses:
     OperationAccepted:
       description: |
@@ -560,7 +750,7 @@ components:
 
     Host:
       type: object
-      required: [hostname, boat_version, started_at, virtual_machine_count]
+      required: [hostname, boat_version, started_at, virtual_machine_count, units]
       properties:
         hostname:
           type: string
@@ -573,6 +763,20 @@ components:
         virtual_machine_count:
           type: integer
           description: How many VMs this host currently observes.
+        units:
+          type: array
+          items:
+            $ref: "#/components/schemas/UnitLiveness"
+          description: |
+            The sibling units this Boat supervises, and what systemd says about
+            each. Required, and an empty array is an answer rather than a
+            silence: it means this host was asked and runs none of them.
+
+            Only the units this host actually HAS appear. A supervised unit
+            systemd reports as `not-found` is not a unit that is down, it is a
+            service this host does not run, and listing it would flag every host
+            in the fleet as permanently degraded — which is how a health field
+            stops being read.
 
     VirtualMachineStatus:
       type: string
@@ -733,8 +937,29 @@ components:
           type: string
         active_state:
           type: string
+          description: systemd's ActiveState for the unit, verbatim. `active` is up.
         sub_state:
           type: string
+          description: |
+            systemd's SubState, verbatim, and the field that carries what
+            ActiveState flattens away — a oneshot that ran and left is
+            `active`/`exited`, a daemon that is up is `active`/`running`, and a
+            unit systemd is waiting to retry is `activating`/`auto-restart`.
+
+    UnitAction:
+      type: string
+      description: |
+        What Boat may ask of a sibling unit. Both converge it upward, and there
+        is no `stop`: see the operation's description for why the verb with
+        teeth is the one that is missing.
+      enum: [start, restart]
+
+    UnitActionRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          $ref: "#/components/schemas/UnitAction"
 
     LogicalVolume:
       type: object
@@ -863,6 +1088,25 @@ components:
         error:
           type: string
           description: Set when status is Failure. The failure, stated once.
+        result:
+          type: object
+          additionalProperties: true
+          description: |
+            The verb's typed result: the same payload the SSH script's one
+            `ATLAS_RESULT=` line carries, so a Task reads the same either way.
+            Atlas folds it back onto the Task's stdout as that line
+            (`boat_client.OPERATION_RESULT_FIELD`).
+
+            `output` is the trace an operator reads; this is the handful of
+            values a CALLER acts on. `sleep-vm` is the one verb with any today —
+            `memory_snapshot`, plus `reason` when the snapshot was skipped and
+            `memory_snapshot_bytes` when one was taken — and without it Atlas
+            cannot learn whether a slept VM resumes from RAM or cold-boots, which
+            is decided on the host and stated nowhere else.
+
+            **Absent is not false.** A verb with no result omits the field, and
+            so does one that failed, so a caller reading a value out of it is
+            reading something the host actually reported.
 
     Error:
       type: object
@@ -876,7 +1120,16 @@ components:
           description: |
             A stable token for the cases a caller must tell apart by code rather
             than by prose. Absent when the sentence is the whole answer.
-          enum: [operation-identifier-conflict, no-fence, stale-fence]
+
+            `fence-regression` and `stale-observation` are the two 409s a PUT
+            can return, and they call for opposite behaviour: one must not be
+            retried, the other must be retried against a fresh export.
+          enum:
+            - operation-identifier-conflict
+            - no-fence
+            - stale-fence
+            - fence-regression
+            - stale-observation
 
     OperationRequest:
       type: object

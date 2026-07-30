@@ -23,10 +23,11 @@ func TestExportCarriesTheSnapshotTheHostFactsAndTheEpoch(t *testing.T) {
 		Sleeping:       true,
 	}
 	state.fence(testUuid, 4)
-	state.units = []model.UnitLiveness{{Name: "boat.service", ActiveState: "active", SubState: "running"}}
 	state.logicalVolumes = []model.LogicalVolume{{Name: "vm-" + testUuid, SizeBytes: 42, Pool: "atlas"}}
 	state.epoch = 11
-	server := newTestServer(state, &fakeVirtualMachines{})
+	supervisor := newFakeUnits()
+	supervisor.liveness = []model.UnitLiveness{{Name: "atlas-pool.service", ActiveState: "active", SubState: "exited"}}
+	server := newTestServerWithUnits(state, &fakeVirtualMachines{}, supervisor)
 	server.hostFacts = func(ctx context.Context, runner *run.Runner) (model.HostFacts, error) {
 		return model.HostFacts{Hostname: "atlas-host-1", VCPUsTotal: 8, MemoryMegabytesFree: 2048}, nil
 	}
@@ -53,8 +54,11 @@ func TestExportCarriesTheSnapshotTheHostFactsAndTheEpoch(t *testing.T) {
 	if export.FenceEpochs == nil || (*export.FenceEpochs)[testUuid] != 4 {
 		t.Errorf("got fences %v, want epoch 4 for the one VM", export.FenceEpochs)
 	}
-	if export.Units == nil || len(*export.Units) != 1 || (*export.Units)[0].Name != "boat.service" {
-		t.Errorf("got units %v, want the one the snapshot held", export.Units)
+	// Unit liveness is read from the host at export time, not carried in the
+	// store's snapshot: a cached ActiveState is a claim about a service that may
+	// have died since.
+	if export.Units == nil || len(*export.Units) != 1 || (*export.Units)[0].Name != "atlas-pool.service" {
+		t.Errorf("got units %v, want the one the supervisor reported", export.Units)
 	}
 	if export.LogicalVolumes == nil || len(*export.LogicalVolumes) != 1 {
 		t.Errorf("got volumes %v, want the one the snapshot held", export.LogicalVolumes)
@@ -79,11 +83,45 @@ func TestExportOmitsWhatTheSnapshotDidNotObserve(t *testing.T) {
 	var export wire.Export
 	decode(t, get(t, server.SocketHandler(), "/export"), &export)
 
-	if export.Units != nil || export.LogicalVolumes != nil {
-		t.Errorf("got units %v and volumes %v, want both absent", export.Units, export.LogicalVolumes)
+	if export.LogicalVolumes != nil {
+		t.Errorf("got volumes %v, want them absent", export.LogicalVolumes)
 	}
 	if export.VirtualMachines == nil {
 		t.Error("the observed set is a fact the store does hold, so it must be present and empty")
+	}
+}
+
+// Units are the opposite case to the volumes above, and the contrast is the
+// point: the supervisor asks systemd about every supervised name on every
+// export, so an empty answer means "this host runs none of them" and is a fact.
+// An absent array would mean "not looked at", which is what it meant before this
+// endpoint had a supervisor behind it and what Atlas's mirror still reads it as.
+func TestExportReportsAnEmptyUnitSetRatherThanOmittingIt(t *testing.T) {
+	server := newTestServer(newFakeStore(), &fakeVirtualMachines{})
+
+	var export wire.Export
+	decode(t, get(t, server.SocketHandler(), "/export"), &export)
+
+	if export.Units == nil {
+		t.Fatal("got no units array at all, which says this host was never asked")
+	}
+	if len(*export.Units) != 0 {
+		t.Errorf("got units %v, want an empty array", *export.Units)
+	}
+}
+
+// The export is how a partitioned Atlas rebuilds its mirror, so a host that
+// cannot answer for its own services must fail the whole document rather than
+// send one that simply does not mention them.
+func TestExportFailsWhenTheUnitsCannotBeRead(t *testing.T) {
+	supervisor := newFakeUnits()
+	supervisor.readErr = errors.New("systemd is not answering")
+	server := newTestServerWithUnits(newFakeStore(), &fakeVirtualMachines{}, supervisor)
+
+	recorder := get(t, server.SocketHandler(), "/export")
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("got %d, want 500: %s", recorder.Code, recorder.Body)
 	}
 }
 

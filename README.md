@@ -42,7 +42,11 @@ something Boat has an opinion about.
 Today Boat serves the nine lifecycle verbs — **start**, **stop**, **pause**,
 **resume**, **sleep**, **wake**, **resize**, **rebuild**, **terminate** — and
 the two calls that define the relationship with Atlas: `PUT /vms/{uuid}` is
-Atlas asserting intent, `GET /export` is Boat asserting fact. Around them:
+Atlas asserting intent, `GET /export` is Boat asserting fact. `DELETE
+/vms/{uuid}` is the PUT's mirror — Atlas taking an assertion back, so this host
+stops driving a VM it no longer owns. It touches nothing on the host, and it
+keeps the fence epoch: retraction ends an authority and must not hand back
+permission to boot. Around them:
 
 - **observed state read off the host** — the unit's state and the on-disk
   markers, never a command's exit code — for one VM, for all of them, or for
@@ -58,7 +62,19 @@ Atlas asserting intent, `GET /export` is Boat asserting fact. Around them:
 - **the wake-on-TCP reflex**, resident, deciding with no control plane in the
   loop;
 - **a fence epoch** that only Atlas issues, without which this host boots
-  nothing it finds on its own disk.
+  nothing it finds on its own disk;
+- **supervision of the host's own units** — the thin pool, the network control
+  plane, the wake trap, the management firewall — reported in `GET /host` and in
+  the export, and startable and restartable by name. The verb set stops there:
+  there is no stop, because nothing in Boat wants a sibling unit down and
+  stopping the wake trap would strand every sleeping VM on the host with nothing
+  watching its counter;
+- **a compare-and-set on the desired-state PUT** — `If-Match: <observed-epoch>`
+  — for a caller that decided something from the mirror rather than merely
+  re-asserting it. The token is the whole-host epoch the export carries and the
+  comparison is scoped to the VM the request names, because a whole-host
+  comparison would be invalidated by every unrelated observation and would refuse
+  every write on a busy host.
 
 Almost every verb's whole request is its `operation_id`. A resize reads its
 numbers from the desired state Atlas already asserted rather than being sent
@@ -67,8 +83,15 @@ could state a shape the store disagrees with is the shape to refuse in review.
 Two verbs carry more: `stop` its two knobs, and `rebuild` the source to lay down
 plus the guest identity to write into it.
 
+An operation carries the verb's trace and, for the one verb that has one, its
+typed **result** — `sleep` reports whether the guest's RAM was captured, and why
+not when it was not, because that is decided on the host and stated nowhere else.
+Absent is not false: a verb with nothing to report, or one that failed, carries no
+result at all.
+
 Not yet here: provisioning, migration, bootstrap, self-update, per-VM networking
-as a Boat subcommand, and the other ~50 host verbs. Each is its own work order,
+as a Boat subcommand, reserved-IP NAT — which is the first caller the CAS above
+is waiting for — and the other ~50 host verbs. Each is its own work order,
 and until its verb ports, the Python script on the host remains the
 implementation. The CLI is narrower still than the API — `boat vm` starts,
 stops, lists and shows, and the other seven verbs are reachable only over HTTP.
@@ -103,6 +126,7 @@ internal/reconcile/   one actor per VM, driving observed state toward desired
 internal/run/         the only package that runs a subprocess
 internal/sidecar/     the KEY=value files the host keeps beside every VM
 internal/store/       bbolt: observed VMs, desired state, fences, the journal
+internal/units/       the host's own units: which ones, their liveness, start/restart
 internal/version/     this build's identity, stamped at link time
 internal/vm/          the mechanics: one file per verb, plus observe
 internal/watch/       the observed-change stream
@@ -143,8 +167,9 @@ sudo systemctl daemon-reload && sudo systemctl enable --now boat.service
 ```
 
 Read the comments in both files before installing them; each non-obvious line
-says why it is there, and the sudoers file names the one command it could not pin
-as tightly as the rest.
+says why it is there, and the few lines that cannot be pinned to a single shape —
+a VM's own IPv6, a caller-chosen guest path — name the residual risk they carry
+and the code-side check that is their first line of defence.
 
 ## Spec
 

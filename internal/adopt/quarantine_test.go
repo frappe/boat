@@ -210,7 +210,10 @@ func TestAnActiveUnitWithNoNetworkNamespaceIsQuarantined(t *testing.T) {
 func TestANamespaceWithNoTapIsQuarantined(t *testing.T) {
 	host := newFakeHost().withRunning(firstUUID)
 	network := networkingOf[firstUUID]
-	host.present["sudo ip -n "+network.namespace+" -o link show "+network.tap] = false
+	// The namespace lists, and the tap is simply not among its links. That is the
+	// negative answer; a listing that FAILED would be a failure to look, and
+	// TestATapListingThatFailsFailsTheScan... asserts it is treated as one.
+	host.outputs[linksIn(network.namespace)] = "1: lo: <LOOPBACK,UP> mtu 65536\n"
 
 	result, err := host.scan(t)
 

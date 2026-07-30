@@ -27,9 +27,9 @@ func (server *Server) StartVirtualMachine(ctx context.Context, request wire.Star
 	if failure := server.refuseUnfenced(request.Uuid); failure != nil {
 		return failure, nil
 	}
-	start := func(runner *run.Runner) error {
+	start := func(runner *run.Runner) (model.OperationResult, error) {
 		_, err := server.virtualMachines.Start(ctx, runner, request.Uuid)
-		return err
+		return nil, err
 	}
 	operation, failure := server.perform(ctx, request.Body.OperationId, verbStartVirtualMachine, request.Uuid, start)
 	if failure != nil {
@@ -45,8 +45,8 @@ func (server *Server) StopVirtualMachine(ctx context.Context, request wire.StopV
 		return missingOperationIdentifier(), nil
 	}
 	stopRequest := stopRequestFrom(request.Body)
-	stop := func(runner *run.Runner) error {
-		return server.virtualMachines.Stop(ctx, runner, request.Uuid, stopRequest)
+	stop := func(runner *run.Runner) (model.OperationResult, error) {
+		return nil, server.virtualMachines.Stop(ctx, runner, request.Uuid, stopRequest)
 	}
 	operation, failure := server.perform(ctx, request.Body.OperationId, verbStopVirtualMachine, request.Uuid, stop)
 	if failure != nil {
@@ -76,6 +76,17 @@ func stopRequestFrom(body *wire.StopRequest) vm.StopRequest {
 	return request
 }
 
+// hostWork is one verb's mechanics as perform runs them: the work itself, and
+// the typed result it produced.
+//
+// The result is in the signature rather than captured by the closure because
+// perform is what writes the terminal record, and a value that reached the
+// record any other way would be a second path out of a verb — the thing this
+// package keeps closing. Eight of the nine verbs return nil: they report their
+// trace and nothing else, and nil is how "nothing to report" stays
+// distinguishable from "reported false".
+type hostWork func(runner *run.Runner) (model.OperationResult, error)
+
 // perform is the shared body of every verb: claim, take the VM's turn, run,
 // record — in that order, and never any other.
 //
@@ -88,7 +99,14 @@ func stopRequestFrom(body *wire.StopRequest) vm.StopRequest {
 // Every verb in this package goes through here, which is what makes "a verb
 // never touches the host directly" structural rather than a rule each new
 // handler has to remember.
-func (server *Server) perform(ctx context.Context, identifier, verb, uuid string, execute func(*run.Runner) error) (model.Operation, *errorResponse) {
+func (server *Server) perform(ctx context.Context, identifier, verb, uuid string, execute hostWork) (model.Operation, *errorResponse) {
+	// Before the claim and before any host command: a malformed uuid must not
+	// even reserve an operation identifier, let alone reach the runner. Every one
+	// of the nine verbs funnels through here, which is what makes this the one
+	// place the boundary check has to live for them.
+	if failure := server.refuseMalformedUUID(uuid); failure != nil {
+		return model.Operation{}, failure
+	}
 	operation, claimed, err := server.operations.ClaimOperation(identifier, verb, uuid)
 	switch {
 	case errors.Is(err, store.ErrOperationConflict):
@@ -108,7 +126,7 @@ func (server *Server) perform(ctx context.Context, identifier, verb, uuid string
 // verb's trace then covers its own commands and not the tail of the operation
 // it was waiting for.
 func (server *Server) asActor(
-	ctx context.Context, operation model.Operation, uuid string, execute func(*run.Runner) error,
+	ctx context.Context, operation model.Operation, uuid string, execute hostWork,
 ) (model.Operation, *errorResponse) {
 	recorded, failure := operation, (*errorResponse)(nil)
 	err := server.reconciler.Do(ctx, uuid, func(ctx context.Context) error {
@@ -135,7 +153,7 @@ func (server *Server) asActor(
 // incarnation for exactly that reason.
 func (server *Server) abandoned(operation model.Operation, uuid string, cause error) (model.Operation, *errorResponse) {
 	var trace bytes.Buffer
-	recorded, failure := server.record(operation, &trace, fmt.Errorf("waiting for a turn on %s: %w", uuid, cause))
+	recorded, failure := server.record(operation, &trace, nil, fmt.Errorf("waiting for a turn on %s: %w", uuid, cause))
 	if failure == nil {
 		failure = internalFault("This request was abandoned before it could run.", cause)
 	}
@@ -145,30 +163,39 @@ func (server *Server) abandoned(operation model.Operation, uuid string, cause er
 // runClaimed runs the verb behind a claim and journals the outcome before the
 // response is written: nothing may outlive the request without a record behind
 // it, or a crash would leave Atlas holding an answer the host never kept.
-func (server *Server) runClaimed(ctx context.Context, operation model.Operation, uuid string, execute func(*run.Runner) error) (model.Operation, *errorResponse) {
+func (server *Server) runClaimed(ctx context.Context, operation model.Operation, uuid string, execute hostWork) (model.Operation, *errorResponse) {
 	var trace bytes.Buffer
 	runner := server.newRunner(&trace)
 	if !server.virtualMachines.Exists(ctx, runner, uuid) {
-		recorded, failure := server.record(operation, &trace, errUnknownVirtualMachine)
+		recorded, failure := server.record(operation, &trace, nil, errUnknownVirtualMachine)
 		if failure == nil {
 			failure = notFound("This host has no virtual machine " + uuid + ".")
 		}
 		return recorded, failure
 	}
-	verbError := execute(runner)
+	result, verbError := execute(runner)
 	if verbError == nil {
 		server.observe(ctx, runner, uuid, &trace)
 	}
-	return server.record(operation, &trace, verbError)
+	return server.record(operation, &trace, result, verbError)
 }
 
 // record writes the terminal journal entry. The trace buffer becomes Output, so
-// the Task row Atlas shows carries the same `+ command` lines it always has.
-func (server *Server) record(operation model.Operation, trace *bytes.Buffer, verbError error) (model.Operation, *errorResponse) {
+// the Task row Atlas shows carries the same `+ command` lines it always has, and
+// the verb's typed result rides beside it — Atlas folds that back into the one
+// `ATLAS_RESULT=` line an SSH script would have printed, so a caller parses one
+// Task the same way whichever transport filled it.
+//
+// Only a SUCCEEDING verb's result is kept. A verb that failed may still have
+// computed half of one, and recording it would hand a caller a value to act on
+// out of an operation that did not finish.
+func (server *Server) record(operation model.Operation, trace *bytes.Buffer, result model.OperationResult, verbError error) (model.Operation, *errorResponse) {
 	operation.EndedAt = time.Now().UTC()
 	operation.Output = trace.String()
 	operation.Status = model.OperationSuccess
+	operation.Result = result
 	if verbError != nil {
+		operation.Result = nil
 		operation.Status = model.OperationFailure
 		operation.Error = verbError.Error()
 		operation.ExitCode = exitCodeOf(verbError)

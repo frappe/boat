@@ -2,11 +2,13 @@ package vm
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
 type terminateCommandSet struct {
 	disable      string
+	retire       string
 	removeTree   string
 	rootClone    string
 	dataClone    string
@@ -22,6 +24,7 @@ func terminateCommands() terminateCommandSet {
 	files := testFiles(testUUID)
 	return terminateCommandSet{
 		disable:      "sudo systemctl disable --now " + files.unit,
+		retire:       "retire " + testUUID,
 		removeTree:   "sudo rm -rf " + files.directory,
 		rootClone:    "sudo dmsetup info atlas-vm-" + testUUID + "-clone",
 		dataClone:    "sudo dmsetup info atlas-vm-" + testUUID + "-data-clone",
@@ -49,6 +52,7 @@ func TestTerminateRemovesTheUnitBeforeTheDisks(t *testing.T) {
 	}
 	assertTrace(t, fake,
 		"- "+commands.disable,
+		commands.retire,
 		commands.removeTree,
 		"? "+commands.rootClone,
 		"? "+commands.dataClone,
@@ -76,6 +80,7 @@ func TestTerminateSucceedsWhenTheVirtualMachineIsAlreadyGone(t *testing.T) {
 	}
 	assertTrace(t, fake,
 		"- "+commands.disable,
+		commands.retire,
 		commands.removeTree,
 		"? "+commands.rootClone,
 		"? "+commands.dataClone,
@@ -98,6 +103,7 @@ func TestTerminateConvergesALeftoverCloneBeforeRemovingTheVolume(t *testing.T) {
 	}
 	assertTrace(t, fake,
 		"- "+commands.disable,
+		commands.retire,
 		commands.removeTree,
 		"? "+commands.rootClone,
 		"- "+commands.removeClone,
@@ -119,7 +125,68 @@ func TestTerminateReportsATreeItCouldNotRemove(t *testing.T) {
 	}
 	// It stops there: the volumes are still referenced by nodes in a tree that
 	// is still present, and removing them anyway would leave the worse mess.
-	assertTrace(t, fake, "- "+commands.disable, commands.removeTree)
+	assertTrace(t, fake, "- "+commands.disable, commands.retire, commands.removeTree)
+}
+
+// The defect this file exists to keep fixed. `systemctl disable --now` on an
+// ALREADY-INACTIVE unit does not re-run ExecStopPost — checked on a host, not
+// reasoned about — so a stopped or sleeping VM's networking is torn down by
+// nothing at all unless the terminate does it, and `rm -rf` takes the sidecar
+// that names the address first. What is left behind is a forward-chain rule that
+// counts and DROPS every inbound SYN to a /128 Atlas is free to hand to the next
+// VM on this host.
+func TestTerminateWithdrawsTheParkedNetworkOfAStoppedVirtualMachine(t *testing.T) {
+	commands := terminateCommands()
+	fake := newFakeCommands()
+	// A VM whose unit is already inactive: the disable exits non-zero, and its
+	// ExecStopPost does not run.
+	fake.reply(commands.disable, false)
+	fake.reply(commands.rootClone, false)
+	fake.reply(commands.dataClone, false)
+
+	if err := newTestManager(fake).Terminate(context.Background(), nil, testUUID); err != nil {
+		t.Fatalf("Terminate: %v", err)
+	}
+	if fake.trace[1] != commands.retire {
+		t.Fatalf("the parked network was not withdrawn: %v", fake.trace)
+	}
+	// BEFORE the tree, because network.env lives in it and is the only record of
+	// which address to withdraw.
+	if indexOfTrace(t, fake, commands.retire) > indexOfTrace(t, fake, commands.removeTree) {
+		t.Error("the VM directory was removed before its address could be withdrawn")
+	}
+}
+
+// A teardown that could not be done is a terminate that must not proceed. The
+// tree still holds the sidecar, so the retry can still read the address; carrying
+// on would destroy the only record of what was left behind on the host.
+func TestTerminateStopsWhenTheParkedNetworkCannotBeWithdrawn(t *testing.T) {
+	commands := terminateCommands()
+	fake := newFakeCommands()
+	fake.retireError = errCommandFailed
+
+	err := newTestManager(fake).Terminate(context.Background(), nil, testUUID)
+
+	if err == nil {
+		t.Fatal("Terminate succeeded with the parked network still installed")
+	}
+	if !strings.Contains(err.Error(), "parked networking") {
+		t.Errorf("got %q, want an error naming what was left on the host", err)
+	}
+	assertTrace(t, fake, "- "+commands.disable, commands.retire)
+}
+
+// indexOfTrace is where a command appears in the recorded sequence, so an
+// ordering assertion fails with the sequence rather than with two numbers.
+func indexOfTrace(t *testing.T, fake *fakeCommands, command string) int {
+	t.Helper()
+	for index, recorded := range fake.trace {
+		if recorded == command {
+			return index
+		}
+	}
+	t.Fatalf("%q was never run:\n  %s", command, strings.Join(fake.trace, "\n  "))
+	return -1
 }
 
 // The guard exists so that a bug which passed the wrong name to a per-VM verb

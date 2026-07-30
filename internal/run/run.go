@@ -46,13 +46,20 @@ func (commandError *CommandError) Error() string {
 }
 
 // Runner runs commands and writes a `set -x` style trace of them.
-type Runner struct{ trace io.Writer }
+type Runner struct {
+	trace io.Writer
+	// spoolPath is the ONE file InstallFile stages content through before
+	// install(1) copies it into place. It is a field, defaulted by NewRunner, so
+	// a test can redirect it off /var/lib/boat; production always uses the fixed
+	// path the sudoers install lines name literally. See install.go.
+	spoolPath string
+}
 
 // NewRunner writes its command trace to trace. A nil trace discards it, which
 // is what an always-on poller wants: atlas-wake-trap reads the same counters
 // every second, and a per-second trace line is journal noise with no
 // diagnostic value.
-func NewRunner(trace io.Writer) *Runner { return &Runner{trace: trace} }
+func NewRunner(trace io.Writer) *Runner { return &Runner{trace: trace, spoolPath: DefaultSpoolPath} }
 
 // Run renders template, runs it with no shell, and returns its stdout.
 //
@@ -69,21 +76,39 @@ func (runner *Runner) Run(ctx context.Context, template string, parameters ...an
 // RunUnchecked is Run with the exit code discarded — the guarded `|| true`.
 // It still returns stdout, and errors only when the command could not be run at
 // all: a missing binary, or a context that ended first.
+//
+// It is for a command whose FAILURE IS ACCEPTABLE, never for one whose OUTPUT is
+// an answer. A denied `sudo ls` returns ("", nil) from here, so a caller that
+// dutifully checks err reads an empty listing off a host full of VMs and has no
+// way to know: that is one half of the bug Probe exists to end, and the other
+// half is OK below. If the output decides anything, use Run and let the failure
+// be a failure.
 func (runner *Runner) RunUnchecked(ctx context.Context, template string, parameters ...any) (string, error) {
 	result, _, err := runner.invoke(ctx, "", template, parameters)
 	return result.standardOutput, err
 }
 
-// OK runs a command purely as a boolean gate — `cmd >/dev/null 2>&1` inside an
-// `if`. It never traces, never forwards output and never errors; true means
-// exit 0. This is how an existence probe (`lvs <volume>`) ports.
+// OK collapses Probe's three answers into two, and every use of it is a claim
+// that the collapse is free.
+//
+// It is free in exactly one shape: GUARDING A MUTATION THAT WOULD FAIL LOUDLY ON
+// ITS OWN. `if !OK(nft list counter …) { Run(nft add counter …) }` is safe
+// because a guard that answered wrongly — because the read was denied — reaches
+// an add that is denied too, and that one returns an error. The wrong answer
+// costs a wasted command and nothing else.
+//
+// It is not free anywhere the answer is REPORTED or DECIDED UPON. There the
+// collapse is silent and it always falls the same way: a probe that could not be
+// made reads as an artifact that is not there, which is how an adoption scan
+// reports a host holding zero VMs, how an observation calls a sleeping VM
+// stopped, and how a wake trap declines to wake anything. Ask those questions
+// with Probe, which keeps the third answer and says which one it gave.
+//
+// It traces, unlike the version that shipped: a guard whose failure is invisible
+// leaves an operator with a host behaving oddly and a journal saying nothing.
 func (runner *Runner) OK(ctx context.Context, template string, parameters ...any) bool {
-	argv, err := Render(template, parameters...)
-	if err != nil {
-		return false
-	}
-	result, err := execute(ctx, argv, "")
-	return err == nil && result.exitCode == 0
+	answer, _ := runner.Probe(ctx, template, parameters...)
+	return answer == Yes
 }
 
 // Input runs a command with stdin fed to it — the `printf … | sudo cmd` form,

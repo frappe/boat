@@ -2,6 +2,7 @@ package fcattach
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -71,10 +72,23 @@ func (fake *fakeCommands) Run(_ context.Context, template string, parameters ...
 	return fake.outputs[command], fake.errors[command]
 }
 
-func (fake *fakeCommands) OK(_ context.Context, template string, parameters ...any) bool {
+// Probe answers in three values, and the third one is the whole point of the
+// fake carrying an `errors` map for a gate at all. A bool here could not tell a
+// socket that is genuinely absent from one the daemon was refused permission to
+// look at, so a wrong fix — swallow the denial, keep the signature — passed
+// every test in this package.
+func (fake *fakeCommands) Probe(
+	_ context.Context, template string, parameters ...any,
+) (run.Answer, error) {
 	command := render(template, parameters...)
 	fake.trace = append(fake.trace, "? "+command)
-	return fake.gates[command]
+	if err := fake.errors[command]; err != nil {
+		return run.Unknown, err
+	}
+	if fake.gates[command] {
+		return run.Yes, nil
+	}
+	return run.No, nil
 }
 
 // render substitutes each {} with its parameter the way run.Substitute does,
@@ -289,5 +303,27 @@ func TestTheAbsoluteSocketPathIsTooLongToConnectTo(t *testing.T) {
 	}
 	if files.directory+"/"+files.name != files.socket {
 		t.Errorf("directory %q + name %q does not reassemble %q", files.directory, files.name, files.socket)
+	}
+}
+
+// The gate is the one place this package's "an error is never folded into
+// not-found" promise was broken, so it needs a test that scripts a failure on
+// the GATE rather than on the curl below it. Without this, a fix that keeps the
+// signature and swallows the denial passes everything else here.
+func TestFindReportsAnErrorWhenTheSocketGateItselfIsRefused(t *testing.T) {
+	fake := newFakeCommands()
+	files := filesFor(testUUID)
+	fake.errors["sudo test -S "+files.socket] = errors.New("sudo: a password is required")
+
+	_, found, err := find(t.Context(), fake, files, testUUID)
+
+	if err == nil {
+		t.Fatalf("a refused gate was reported as an answer: found=%v", found)
+	}
+	if found {
+		t.Error("a refused gate must not report a live Firecracker")
+	}
+	if !strings.Contains(err.Error(), testUUID) {
+		t.Errorf("the error does not name the VM: %v", err)
 	}
 }

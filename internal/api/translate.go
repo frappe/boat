@@ -105,9 +105,16 @@ func desiredToWire(record model.DesiredVirtualMachine) wire.DesiredVirtualMachin
 
 // exportToWire renders the whole-host document.
 //
-// Units and logical volumes are carried only when the snapshot holds them. An
-// empty array would say "this host has no logical volumes", which is a claim
-// nothing in WO-1 has looked at the host closely enough to make.
+// Logical volumes are carried only when the snapshot holds them. An empty array
+// would say "this host has no logical volumes", which is a claim nothing has yet
+// looked at the host closely enough to make.
+//
+// Units are different, and the difference is the whole reason the two are not
+// handled the same way. The supervisor asks systemd about every supervised name
+// on every export, so an empty slice HAS looked: it means this host runs none of
+// them, which is true of a machine that was never bootstrapped and is a fact
+// worth reporting. Absent here would mean "not looked at" — which is what it
+// meant until this work order, and what Atlas's mirror still reads it as.
 func exportToWire(export model.Export) wire.Export {
 	document := wire.Export{
 		ObservedEpoch:   export.ObservedEpoch,
@@ -166,12 +173,16 @@ func hostFactsToWire(facts model.HostFacts) wire.HostFacts {
 	return document
 }
 
-func unitsToWire(units []model.UnitLiveness) []wire.UnitLiveness {
-	documents := make([]wire.UnitLiveness, 0, len(units))
-	for _, unit := range units {
-		documents = append(documents, wire.UnitLiveness{Name: unit.Name, ActiveState: unit.ActiveState, SubState: unit.SubState})
+func unitsToWire(liveness []model.UnitLiveness) []wire.UnitLiveness {
+	documents := make([]wire.UnitLiveness, 0, len(liveness))
+	for _, unit := range liveness {
+		documents = append(documents, unitToWire(unit))
 	}
 	return documents
+}
+
+func unitToWire(unit model.UnitLiveness) wire.UnitLiveness {
+	return wire.UnitLiveness{Name: unit.Name, ActiveState: unit.ActiveState, SubState: unit.SubState}
 }
 
 func logicalVolumesToWire(volumes []model.LogicalVolume) []wire.LogicalVolume {
@@ -229,6 +240,14 @@ func operationToWire(operation model.Operation) wire.Operation {
 	}
 	if operation.Error != "" {
 		document.Error = &operation.Error
+	}
+	// A verb with nothing to report leaves the field off entirely rather than
+	// sending an empty object. Atlas folds a present result into the Task's one
+	// ATLAS_RESULT= line, and an empty line is a result that says nothing while
+	// looking like one that says every flag in it is false.
+	if len(operation.Result) > 0 {
+		values := map[string]any(operation.Result)
+		document.Result = &values
 	}
 	return document
 }

@@ -45,13 +45,19 @@ func (server *Server) refuseUnfenced(uuid string) *errorResponse {
 // case compares the held epoch with itself. fence.ErrStaleEpoch is therefore
 // unreachable from this function.
 //
-// Closing it needs two things that do not exist yet, both on the Atlas side:
-// Atlas must BUMP the epoch at a migration's repoint (nothing in Atlas writes
-// boot_epoch except the initial 1), and it must be able to RETRACT or supersede
-// desired state on the host that no longer owns the VM (there is no DELETE, and
-// the source keeps its stale record forever). Until both land, split-brain is
-// prevented by phase ordering and desired_power — which spec/33 §9 says
-// explicitly is NOT what should prevent it.
+// Closing it needs two things. One now exists: desired state can be RETRACTED,
+// so a host that no longer owns a VM can be told to stop holding intent for it
+// (DELETE /vms/{uuid}, and terminate does it for itself). The retraction
+// deliberately leaves the epoch behind — see retract — so a source host that has
+// been evacuated still refuses a boot under an epoch it has already seen
+// superseded, once there is one.
+//
+// The other does not: Atlas must BUMP the epoch at a migration's repoint, and
+// nothing in Atlas writes boot_epoch except the initial 1. Until it does, every
+// epoch this host ever sees for a UUID is the same number, and the comparison
+// above has nothing to refuse. Split-brain is meanwhile prevented by phase
+// ordering and desired_power — which spec/33 §9 says explicitly is NOT what
+// should prevent it.
 //
 // Do not delete this comment when the comparison starts working; delete it when
 // a test proves a stale epoch is refused.

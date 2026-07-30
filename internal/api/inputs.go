@@ -13,9 +13,30 @@ package api
 
 import (
 	"github.com/frappe/boat/internal/model"
+	"github.com/frappe/boat/internal/paths"
 	"github.com/frappe/boat/internal/vm"
 	"github.com/frappe/boat/internal/wire"
 )
+
+// refuseMalformedUUID is the API-boundary validation the sudoers header names as
+// the first line of defence, made real (sudoers.d/boat, §"Boat validates the
+// UUID at the API boundary"). A uuid is not merely an identifier here: it is a
+// path segment spliced into every host command a verb renders and matched by a
+// `*` in the sudo allow-list, and the allow-list cannot express "and this
+// segment is a UUID". This can, and it runs before the name is ever rendered.
+//
+// It is needed because the IDL types the `{uuid}` path parameter as a bare
+// string and the generated binder checks no pattern, so a caller can put any
+// bytes there. Every verb reaches the host through server.perform, and the two
+// store-only endpoints (GET and PUT of a VM) reach the store with the same name,
+// so all three check here — the reconciler and the adoption scan validate names
+// they learn from the host themselves.
+func (server *Server) refuseMalformedUUID(uuid string) *errorResponse {
+	if paths.IsUUID(uuid) {
+		return nil
+	}
+	return badRequest("This is not a virtual machine UUID, so this host will not act on it.")
+}
 
 // refuseStoppedDesire is §11.3: an explicit request to bring a VM back does not
 // outrank an explicit assertion that it should be down.

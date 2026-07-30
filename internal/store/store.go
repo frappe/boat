@@ -132,17 +132,26 @@ func (store *Store) Close() error {
 // earlier observation. Observations are latest-wins, not a journal: only the
 // operations bucket is append-only.
 //
-// The record and the observed-epoch bump land in one transaction. Callers CAS
-// against the epoch they read out of a Snapshot, so an epoch that could lag the
-// write it describes would hand a caller a token for state it never read, and
-// the caller would act on it believing nothing had changed underneath.
+// The record, the observed-epoch bump and the stamp of that epoch ONTO the
+// record all land in one transaction. Callers CAS against the epoch they read
+// out of a Snapshot, so an epoch that could lag the write it describes would
+// hand a caller a token for state it never read, and the caller would act on it
+// believing nothing had changed underneath.
+//
+// The bump comes first so the record can carry the number it was written at.
+// That stamp is what lets a CAS ask "has THIS VM moved" rather than "has
+// anything on this host moved", which is the difference between a precondition
+// that can pass and one that cannot — see CheckVirtualMachineUnmoved. The
+// caller's copy of the record is left alone: the stamp is the store's to write,
+// and a caller that could set it could forge a CAS token.
 func (store *Store) PutVirtualMachine(record model.VirtualMachine) error {
 	return store.database.Update(func(transaction *bbolt.Tx) error {
-		if err := putRecord(transaction.Bucket(virtualMachinesBucket), record.UUID, record); err != nil {
+		epoch, err := bumpObservedEpoch(transaction)
+		if err != nil {
 			return err
 		}
-		_, err := bumpObservedEpoch(transaction)
-		return err
+		record.ObservedEpoch = epoch
+		return putRecord(transaction.Bucket(virtualMachinesBucket), record.UUID, record)
 	})
 }
 

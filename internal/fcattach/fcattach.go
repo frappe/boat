@@ -79,7 +79,7 @@ type Process struct {
 // second.
 type commands interface {
 	Run(ctx context.Context, template string, parameters ...any) (string, error)
-	OK(ctx context.Context, template string, parameters ...any) bool
+	Probe(ctx context.Context, template string, parameters ...any) (run.Answer, error)
 }
 
 var _ commands = (*run.Runner)(nil)
@@ -132,7 +132,20 @@ func find(ctx context.Context, commands commands, files socketFiles, uuid string
 	// No socket at all is the ordinary answer for every stopped and sleeping VM
 	// on the host, so it is settled with one cheap `test` before any curl. `-S`
 	// and not `-f`: the socket is a socket, and `test -f` is false for one.
-	if !commands.OK(ctx, "sudo test -S {}", files.socket) {
+	//
+	// Probe rather than a bool, because this gate was breaking the package's own
+	// contract. The header promises that "an error here is reported as an error
+	// and never folded into 'not found'", and classify() below is meticulous
+	// about it — while this line folded a denied sudo, a missing binary and a
+	// cancelled context into a confident "no Firecracker is running", before
+	// classify could see any of them. In the adoption scan that answer
+	// quarantines a healthy VM as "unit is active but no Firecracker answered";
+	// in Observe it would report a running guest as not there.
+	answer, err := commands.Probe(ctx, "sudo test -S {}", files.socket)
+	if err != nil {
+		return Process{}, false, fmt.Errorf("looking for the API socket of %s: %w", uuid, err)
+	}
+	if answer != run.Yes {
 		return Process{}, false, nil
 	}
 	state, live, err := instanceInfo(ctx, commands, files)

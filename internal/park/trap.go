@@ -271,6 +271,16 @@ func (trap *Trap) sleeping(ctx context.Context) []string {
 		if uuid == "" {
 			continue
 		}
+		// A directory name is learned from the host here, not handed down by
+		// Atlas, so it is validated before it becomes a path or an nft identifier —
+		// the same check the adoption scan makes (internal/adopt) and for the same
+		// reason. park splices this name into `nft add counter`/`add rule` as a
+		// bare identifier, where a name carrying a space or a `;` would inject; a
+		// bootstrapped tree holds only UUID-named directories, so a name that fails
+		// this is something else that wandered in, not a VM this sweep should park.
+		if !paths.IsUUID(uuid) {
+			continue
+		}
 		// Through sudo, and not an in-process stat: the VM tree is 0700 owned by
 		// the per-VM uid, so a stat would report "absent" for a marker that is
 		// plainly there and the sweep would skip every sleeping VM on the host.

@@ -59,6 +59,16 @@ type VirtualMachine struct {
 	// anything from it: the socket answering is the liveness claim, and a pid on
 	// its own would prove nothing (see internal/fcattach).
 	FirecrackerPID int `json:"firecracker_pid"`
+	// ObservedEpoch is the host's observed epoch at the instant this record was
+	// written, stamped by the store inside the same transaction as the bump. It is
+	// what scopes the CAS of §11.2 to one VM: a caller offers the whole-host epoch
+	// it decided from, and the write is refused only if THIS record has moved
+	// since — not if any of the host's other VMs has.
+	//
+	// It is deliberately not on the wire. Atlas needs one token and already has
+	// it, in the export's observed_epoch; a second copy per VM would be a second
+	// number for the same fact to disagree with itself in.
+	ObservedEpoch int64 `json:"observed_epoch"`
 }
 
 // OperationStatus is where one operation stands in its journal record.
@@ -96,7 +106,25 @@ type Operation struct {
 	ExitCode    int       `json:"exit_code"`
 	Output      string    `json:"output"`
 	Error       string    `json:"error"`
+	// Result is what the verb produced beside its trace, and only a verb that
+	// SUCCEEDED has one. Absent is not false: a caller reading a value out of it
+	// is reading something the host actually reported.
+	Result OperationResult `json:"result,omitempty"`
 }
+
+// OperationResult is a verb's typed result — the few values a CALLER acts on, as
+// against Output, which is the trace an operator reads.
+//
+// A map rather than a struct per verb, because this is the wire's shape and the
+// wire's shape is what the two transports have to agree on: an SSH script states
+// exactly this as one `ATLAS_RESULT=` JSON line, and Atlas folds a Boat
+// operation's result back into that same line so a Task row reads the same
+// whichever transport filled it. A per-verb struct would be flattened to this at
+// the boundary anyway, and the flattening is where the two spellings would drift.
+//
+// Nil is the ordinary case: eight of the nine verbs report nothing but their
+// trace, and a verb that reports nothing must not appear to report zero.
+type OperationResult map[string]any
 
 // Finished reports whether this operation reached a terminal state.
 func (operation Operation) Finished() bool {

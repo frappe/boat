@@ -9,6 +9,7 @@ import (
 
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/paths"
+	"github.com/frappe/boat/internal/run"
 )
 
 const (
@@ -84,8 +85,8 @@ func takeInventory(ctx context.Context, commands commands) (inventory, error) {
 		namespaces: parseNamespaces(reading.read("ip netns list")),
 		links:      parseLinks(reading.read("ip -o link show")),
 		proxies:    parseProxies(reading.read("ip -6 neigh show proxy")),
-		volumes: parseVolumes(reading.readIfPresent(
-			presence{"sudo vgs --noheadings -o vg_name {}", []any{volumeGroup}},
+		volumes: parseVolumes(reading.readIfListed(
+			listed{volumeGroup, "sudo vgs --noheadings -o vg_name"},
 			"sudo lvs --noheadings --nosuffix --units b --separator , "+
 				"-o lv_name,lv_size,pool_lv,origin {}", volumeGroup,
 		)),
@@ -141,8 +142,16 @@ type presence struct {
 // directory". A host serving VMs reported that it held none, which is the one
 // answer a control plane must never be handed by accident.
 //
-// So the probe answers "is it there", the read answers "what is in it", and a
-// read that fails when the probe said yes fails the whole scan like any other.
+// The version after THAT one proved absence with `test -d` and asked it through
+// run.Runner.OK, which reproduced the same outcome one layer down: OK cannot
+// tell a proven no from a denied sudo either, so a host whose probe rule was
+// missing adopted zero VMs again — and, because OK did not trace, said less
+// about it than the version it replaced. run.Probe is the fix, and the reason it
+// returns three answers rather than a bool is this exact function.
+//
+// So the probe answers "is it there", the read answers "what is in it", a probe
+// that could not be MADE fails the scan like any other unreadable enumeration,
+// and a read that fails when the probe said yes does too.
 //
 // Every other enumeration stays fatal without a probe. A scan missing one of
 // those reports a host holding fewer VMs than it holds, and that is
@@ -153,14 +162,53 @@ func (enumeration *enumeration) readIfPresent(
 	if enumeration.err != nil {
 		return ""
 	}
-	if !enumeration.commands.OK(enumeration.ctx, probe.template, probe.parameters...) {
-		return ""
-	}
-	output, err := enumeration.commands.Run(enumeration.ctx, template, parameters...)
+	answer, err := enumeration.commands.Probe(enumeration.ctx, probe.template, probe.parameters...)
 	if err != nil {
 		enumeration.err = err
+		return ""
 	}
-	return output
+	if answer != run.Yes {
+		return ""
+	}
+	return enumeration.read(template, parameters...)
+}
+
+// listed is the other way an optional subject proves it is there: a listing that
+// names it, rather than a probe that exits zero for it.
+type listed struct {
+	subject  string
+	template string
+}
+
+// readIfListed is readIfPresent for a subject that cannot be probed, because the
+// command that would answer the question EXPLAINS its negative.
+//
+// The `atlas` volume group is that subject. Measured on a host:
+//
+//	vgs --noheadings -o vg_name atlas   exit 5, `Volume group "atlas" not found`
+//
+// which is a bare host's ordinary answer and is shaped exactly like a denial —
+// non-zero, with a complaint on stderr. run.Probe's rule cannot separate the
+// two, and neither can the exit code, since LVM spends 5 on every kind of
+// failure it has. Asked that way the question has no honest answer, so it is not
+// asked that way.
+//
+// Listing the host's volume groups instead exits ZERO whether or not `atlas` is
+// among them (measured: exit 0 and empty output with every device filtered out),
+// which puts the negative in the output where nothing can confuse it with a
+// failure — and leaves every non-zero exit unambiguously ours to report. It
+// costs one more allow-list line than the probe did and buys back the
+// distinction the probe never had.
+func (enumeration *enumeration) readIfListed(
+	among listed, template string, parameters ...any,
+) string {
+	if enumeration.err != nil {
+		return ""
+	}
+	if !slices.Contains(parseListing(enumeration.read(among.template)), among.subject) {
+		return ""
+	}
+	return enumeration.read(template, parameters...)
 }
 
 // candidates is every UUID any artifact class names, sorted.

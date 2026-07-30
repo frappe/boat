@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -172,6 +173,38 @@ func TestCompleteOperationWritesTheTerminalRecord(t *testing.T) {
 	}
 }
 
+// A verb's typed result is journalled with the rest of its record, because the
+// caller that most needs it is the retry: a replayed Task reads this record
+// instead of re-running the verb, and a result that lived only in the first
+// response would be lost to exactly that read.
+func TestCompleteOperationKeepsTheVerbsResult(t *testing.T) {
+	store := newTestStore(t)
+	claim, _, err := store.ClaimOperation("task-1", "sleep-vm", "vm-a")
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	finished := succeeded(claim, "+ systemctl stop")
+	finished.Result = model.OperationResult{"memory_snapshot": true, "memory_snapshot_bytes": int64(536870912)}
+	if err := store.CompleteOperation(finished); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	recorded, found, err := store.GetOperation("task-1")
+	if err != nil || !found {
+		t.Fatalf("get: found=%v err=%v", found, err)
+	}
+	if recorded.Result["memory_snapshot"] != true {
+		t.Fatalf("recorded %+v, want the memory snapshot the verb reported", recorded.Result)
+	}
+	// The record is JSON, which has one number type, so the size comes back a
+	// float. It re-encodes to the same digits, which is what a caller reads — the
+	// value survives, the Go type it arrives in does not.
+	size, ok := recorded.Result["memory_snapshot_bytes"].(float64)
+	if !ok || int64(size) != 536870912 {
+		t.Fatalf("size = %v, want the 512 MiB the verb reported", recorded.Result["memory_snapshot_bytes"])
+	}
+}
+
 func TestCompleteOperationKeepsTheFirstOutcome(t *testing.T) {
 	store := newTestStore(t)
 	claim, _, err := store.ClaimOperation("task-1", "start", "vm-a")
@@ -245,7 +278,10 @@ func TestGetOperationAbsentIsNotAnError(t *testing.T) {
 	if found {
 		t.Fatalf("found = true for an identifier the journal never saw")
 	}
-	if operation != (model.Operation{}) {
+	// DeepEqual rather than ==: an Operation carries a verb's typed result, which
+	// is a map, so the struct is no longer comparable. The assertion is the same
+	// one — absence returns the zero record and not a half-filled one.
+	if !reflect.DeepEqual(operation, model.Operation{}) {
 		t.Fatalf("operation = %+v, want the zero value", operation)
 	}
 }

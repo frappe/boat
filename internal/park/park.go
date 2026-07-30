@@ -57,6 +57,7 @@ package park
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/frappe/boat/internal/paths"
@@ -203,6 +204,19 @@ func (parker *parker) park(ctx context.Context, uuid string, address string) err
 	if address == "" {
 		return nil
 	}
+	// Validate and re-render before anything is installed: the address reaches an
+	// nft rule below, and nft re-parses `;` and `#` out of a value run.Quote
+	// treats as one safe token. A failure here is loud on purpose — a VM whose
+	// sidecar holds something that is not a /128 does not get a trap armed around
+	// a string this daemon could not vouch for. See park.canonicalAddress.
+	canonical, ok := canonicalAddress(address)
+	if !ok {
+		return fmt.Errorf(
+			"refusing to arm a wake trap for %s: %q is not a canonical IPv6 /128, and rendering it into an nft rule unchecked is how the ruleset is injected",
+			uuid, address,
+		)
+	}
+	address = canonical
 	if err := parker.ensureDevice(ctx); err != nil {
 		return err
 	}

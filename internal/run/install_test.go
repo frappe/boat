@@ -18,7 +18,7 @@ func TestInstallFileWritesTheContentWithItsMode(t *testing.T) {
 	fakeCommand(t, directory, "sudo", recordingCommand(record)+"\nexec \"$@\"")
 	destination := filepath.Join(t.TempDir(), "network.env")
 
-	if err := NewRunner(nil).InstallFile(context.Background(), "TAP_DEVICE=tap0\n", destination, "0640"); err != nil {
+	if err := spooling(t).InstallFile(context.Background(), "TAP_DEVICE=tap0\n", destination, "0640"); err != nil {
 		t.Fatalf("InstallFile: %v", err)
 	}
 
@@ -46,7 +46,7 @@ func TestInstallFileSpoolsToASeekableFile(t *testing.T) {
 	fakeCommand(t, directory, "sudo", recordingCommand(record)+"\nexec \"$@\"")
 	destination := filepath.Join(t.TempDir(), "spooled")
 
-	if err := NewRunner(nil).InstallFile(context.Background(), "content", destination, "0644"); err != nil {
+	if err := spooling(t).InstallFile(context.Background(), "content", destination, "0644"); err != nil {
 		t.Fatalf("InstallFile: %v", err)
 	}
 
@@ -68,7 +68,7 @@ func TestInstallFileReportsAFailedInstall(t *testing.T) {
 	record := filepath.Join(t.TempDir(), "sudo-argv")
 	fakeCommand(t, directory, "sudo", recordingCommand(record)+"\nexit 1")
 
-	err := NewRunner(nil).InstallFile(context.Background(), "content", "/etc/nowhere", "0644")
+	err := spooling(t).InstallFile(context.Background(), "content", "/etc/nowhere", "0644")
 	var commandError *CommandError
 	if !errors.As(err, &commandError) {
 		t.Fatalf("InstallFile error = %v, want *CommandError", err)
@@ -94,6 +94,17 @@ func TestInstallDirectoryCreatesWithAnExplicitMode(t *testing.T) {
 	if !info.IsDir() || info.Mode().Perm() != 0o700 {
 		t.Errorf("destination = %v, want a 0700 directory", info.Mode())
 	}
+}
+
+// spooling is a Runner whose spool is redirected into the test's temp directory:
+// the real DefaultSpoolPath is /var/lib/boat/spool/install, which a test host
+// neither has nor may create, and the spool being one fixed path is exactly what
+// the sudoers install lines depend on — so a test names its own path rather than
+// racing the real one.
+func spooling(t *testing.T) *Runner {
+	runner := NewRunner(nil)
+	runner.spoolPath = filepath.Join(t.TempDir(), "spool", "install")
+	return runner
 }
 
 func statError(path string) error {

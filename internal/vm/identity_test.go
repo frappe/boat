@@ -172,6 +172,29 @@ func TestRebuildRefusesAGuestFilePathThatLeavesTheFilesystem(t *testing.T) {
 	}
 }
 
+// The data-disk mount point comes from the rebuild request too, and it is joined
+// onto the host mount point and handed to `mkdir -p`, so a path that walks out of
+// the filesystem makes a root-owned directory on the host. It is refused the same
+// way a guest file path is — the sibling check writeExtraEnvironment already made.
+func TestRebuildRefusesADataDiskMountThatLeavesTheFilesystem(t *testing.T) {
+	for name, mountAt := range map[string]string{
+		"relative": "mnt/data",
+		"walks up": "/mnt/../../etc/cron.d",
+	} {
+		fake := newFakeCommands()
+		aRebuiltHost(fake)
+		identity := testIdentity
+		identity.DataDiskMountAt = mountAt
+		request := RebuildRequest{
+			Image: testImage, DiskGB: 40, FirecrackerUID: testFirecrackerUID, Identity: identity,
+		}
+
+		if err := newTestManager(fake).Rebuild(context.Background(), nil, testUUID, request); err == nil {
+			t.Errorf("%s: the rebuild accepted data-disk mount %q", name, mountAt)
+		}
+	}
+}
+
 func TestHostnameAndMachineIdentifierAreDerivedFromTheUUID(t *testing.T) {
 	if got := hostnameFor(testUUID); got != testHostname {
 		t.Errorf("hostnameFor = %q, want %q", got, testHostname)

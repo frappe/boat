@@ -134,20 +134,27 @@ func TestRunUncheckedStillReportsACommandThatCannotStart(t *testing.T) {
 	}
 }
 
-func TestOKIsAPureBooleanGate(t *testing.T) {
+// OK is Probe with the two negative answers collapsed, and the collapse is the
+// whole of what it adds. What it must NOT also do any more is hide the collapse:
+// a guard that could not be made leaves a line in the record, so the operator of
+// a host behaving oddly has something to read.
+func TestOKCollapsesTheTwoNegativeAnswersAndSaysSo(t *testing.T) {
 	trace := &bytes.Buffer{}
 	runner := NewRunner(trace)
 	if !runner.OK(context.Background(), "/bin/sh -c {}", "exit 0") {
 		t.Error("OK on a successful command = false")
 	}
-	if runner.OK(context.Background(), "/bin/sh -c {}", "echo noisy >&2; exit 1") {
-		t.Error("OK on a failing command = true")
+	if runner.OK(context.Background(), "/bin/sh -c {}", "exit 1") {
+		t.Error("OK on a command that answered no = true")
+	}
+	if runner.OK(context.Background(), "/bin/sh -c {}", "echo denied >&2; exit 1") {
+		t.Error("OK on a command that could not be made = true")
 	}
 	if runner.OK(context.Background(), "/bin/echo {} {}", "arity") {
 		t.Error("OK on an unrenderable template = true")
 	}
-	if trace.Len() != 0 {
-		t.Errorf("trace = %q, want a gate to stay silent", trace.String())
+	if !strings.Contains(trace.String(), "denied") {
+		t.Errorf("trace = %q, want the guard's own complaint in it", trace.String())
 	}
 }
 

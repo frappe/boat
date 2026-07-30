@@ -95,6 +95,13 @@ func TestVirtualMachineRoundTrip(t *testing.T) {
 		t.Fatalf("observed at = %v, want %v", read.ObservedAt, written.ObservedAt)
 	}
 	read.ObservedAt = written.ObservedAt // time.Time carries a monotonic reading JSON cannot.
+	// The store stamps the epoch it wrote at onto the record, so the caller's copy
+	// is not what comes back and must not be: a caller that could set this field
+	// could forge the token a CAS is matched against.
+	if read.ObservedEpoch != 1 {
+		t.Errorf("observed epoch = %d, want the 1 this first write bumped to", read.ObservedEpoch)
+	}
+	written.ObservedEpoch = read.ObservedEpoch
 	if read != written {
 		t.Fatalf("read back %+v, want %+v", read, written)
 	}

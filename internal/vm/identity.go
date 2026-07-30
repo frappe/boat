@@ -224,6 +224,19 @@ func (manager *Manager) ensureHostKeys(
 func (manager *Manager) writeDataDiskMount(
 	ctx context.Context, commands commands, mountPoint string, mountAt string,
 ) error {
+	// The same guard writeExtraEnvironment makes on a guest path, and for the
+	// same reason: mountAt comes from the rebuild request body, and it is joined
+	// onto the host's mount point and handed to `mkdir -p`. An absolute path with
+	// no `..` stays inside the rebuilt filesystem; anything else walks out onto
+	// the host, where mkdir -p would create a root-owned directory. Refused rather
+	// than sanitised — a caller that meant a guest path and sent something else
+	// has a bug worth hearing about.
+	if !strings.HasPrefix(mountAt, "/") || strings.Contains(mountAt, "..") {
+		return fmt.Errorf(
+			"data-disk mount point %q must be an absolute path with no '..' in it, or it would not stay inside the rebuilt filesystem",
+			mountAt,
+		)
+	}
 	fstab := mountPoint + "/etc/fstab"
 	if commands.OK(ctx, "sudo grep -q {} {}", dataDiskLabelLine, fstab) {
 		return nil

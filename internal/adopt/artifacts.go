@@ -3,6 +3,7 @@ package adopt
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/paths"
@@ -109,7 +110,9 @@ func (scanner *Scanner) examine(
 			return hostArtifacts{}, err
 		}
 	}
-	examineNetwork(ctx, commands, taken, &artifacts)
+	if err := examineNetwork(ctx, commands, taken, &artifacts); err != nil {
+		return hostArtifacts{}, err
+	}
 	return artifacts, nil
 }
 
@@ -127,14 +130,24 @@ func (scanner *Scanner) examine(
 // so a Firecracker that segfaulted leaves a socket behind that stat is perfectly
 // happy with — and a scan that read that as a running VM would adopt a dead one
 // as healthy and report it to Atlas as Running. internal/fcattach talks to the
-// far end instead, which is the test it was written for. A probe that could not
-// be made at all is an error and fails the scan; "nothing answered" is an answer
-// and is not.
+// far end instead, which is the test it was written for.
+//
+// BOTH probes obey the same rule, and until run.Probe existed only one of them
+// did: a probe that could not be MADE is an error and fails the scan, while "it
+// is not there" and "nothing answered" are answers and are not. The jail check
+// was a bool, so a denied `test -d` recorded a jail tree as missing — and a
+// directory with no jail is a half-removed tree, which quarantines. One absent
+// allow-list line would have quarantined every VM on the host, with evidence
+// blaming the host for it.
 func (scanner *Scanner) examineDisk(
 	ctx context.Context, commands commands, runner *run.Runner, uuid string, artifacts *hostArtifacts,
 ) error {
 	files := paths.ForVirtualMachine(uuid)
-	artifacts.jail = commands.OK(ctx, "sudo test -d {}", files.JailRoot())
+	jail, err := commands.Probe(ctx, "sudo test -d {}", files.JailRoot())
+	if err != nil {
+		return fmt.Errorf("could not tell whether %s has a jail tree: %w", uuid, err)
+	}
+	artifacts.jail = jail == run.Yes
 	artifacts.environment = parseNetworkEnvironment(readNetworkEnvironment(ctx, commands, files))
 	_, live, err := scanner.liveness(ctx, runner, uuid)
 	if err != nil {
@@ -163,16 +176,41 @@ func readNetworkEnvironment(ctx context.Context, commands commands, files paths.
 // the ones the host is actually carrying. The tap is the one artifact no
 // host-wide enumeration can see: it lives inside the VM's namespace, so it is
 // asked for there.
-func examineNetwork(ctx context.Context, commands commands, taken inventory, artifacts *hostArtifacts) {
+//
+// And because that one is a command rather than a lookup in an inventory already
+// taken, it is the one that can fail — which is why this returns an error at all.
+// A tap read as missing is an active VM with no tap, which is a contradiction and
+// quarantines it; doing that to a healthy VM because the namespace could not be
+// entered would hide it from Atlas over a fault of ours.
+//
+// The namespace's links are LISTED and the tap looked for among them, rather
+// than named to `ip link show` and the exit code read. Measured on a host:
+//
+//	ip -o link show <a device that is not there>   exit 1, `Device "…" does not exist.`
+//
+// which is the ordinary answer for a VM whose tap is genuinely gone, and is
+// shaped exactly like a denied sudo — same exit code, both complaining on
+// stderr. Nothing separates them, so the question is asked in the form that has
+// no ambiguity to separate: the listing exits zero, an absent tap is a name that
+// is not in it, and every non-zero exit is a fault. A namespace that vanished
+// between `ip netns list` and here answers 255 and fails the scan, which is the
+// honest reading of a host that changed under us mid-scan.
+func examineNetwork(
+	ctx context.Context, commands commands, taken inventory, artifacts *hostArtifacts,
+) error {
 	environment := artifacts.environment
 	artifacts.namespace = taken.hasNamespace(environment.namespace)
 	artifacts.hostVeth = taken.hasLink(environment.hostVeth)
 	artifacts.proxy = taken.hasProxy(environment.address)
-	if artifacts.namespace && environment.tap != "" {
-		artifacts.tap = commands.OK(
-			ctx, "sudo ip -n {} -o link show {}", environment.namespace, environment.tap,
-		)
+	if !artifacts.namespace || environment.tap == "" {
+		return nil
 	}
+	listing, err := commands.Run(ctx, "sudo ip -n {} -o link show", environment.namespace)
+	if err != nil {
+		return fmt.Errorf("could not read the links in namespace %s: %w", environment.namespace, err)
+	}
+	artifacts.tap = slices.Contains(parseLinks(listing), environment.tap)
+	return nil
 }
 
 // parseNetworkEnvironment names the four artifacts this package cross-checks

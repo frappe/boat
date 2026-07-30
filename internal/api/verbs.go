@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/frappe/boat/internal/model"
@@ -28,8 +29,8 @@ const (
 
 func (server *Server) PauseVirtualMachine(ctx context.Context, request wire.PauseVirtualMachineRequestObject) (wire.PauseVirtualMachineResponseObject, error) {
 	operation, failure := server.operation(ctx, request.Body, verbPauseVirtualMachine, request.Uuid,
-		func(runner *run.Runner) error {
-			return server.virtualMachines.Pause(ctx, runner, request.Uuid)
+		func(runner *run.Runner) (model.OperationResult, error) {
+			return nil, server.virtualMachines.Pause(ctx, runner, request.Uuid)
 		})
 	if failure != nil {
 		return failure, nil
@@ -52,8 +53,8 @@ func (server *Server) ResumeVirtualMachine(ctx context.Context, request wire.Res
 		return failure, nil
 	}
 	operation, failure := server.operation(ctx, request.Body, verbResumeVirtualMachine, request.Uuid,
-		func(runner *run.Runner) error {
-			return server.virtualMachines.Resume(ctx, runner, request.Uuid)
+		func(runner *run.Runner) (model.OperationResult, error) {
+			return nil, server.virtualMachines.Resume(ctx, runner, request.Uuid)
 		})
 	if failure != nil {
 		return failure, nil
@@ -71,7 +72,9 @@ func (server *Server) ResumeVirtualMachine(ctx context.Context, request wire.Res
 // See vm.Manager.FirecrackerUID.
 func (server *Server) SleepVirtualMachine(ctx context.Context, request wire.SleepVirtualMachineRequestObject) (wire.SleepVirtualMachineResponseObject, error) {
 	operation, failure := server.operation(ctx, request.Body, verbSleepVirtualMachine, request.Uuid,
-		func(runner *run.Runner) error { return server.sleep(ctx, runner, request.Uuid) })
+		func(runner *run.Runner) (model.OperationResult, error) {
+			return server.sleep(ctx, runner, request.Uuid)
+		})
 	if failure != nil {
 		return failure, nil
 	}
@@ -80,24 +83,58 @@ func (server *Server) SleepVirtualMachine(ctx context.Context, request wire.Slee
 	}, nil
 }
 
-// sleep takes the memory snapshot if it can and parks the VM either way.
+// sleep takes the memory snapshot if it can, parks the VM either way, and states
+// which of the two happened.
 //
-// The reason a snapshot was not taken is logged rather than returned, because
-// the sleep succeeded: the caller asked for the VM's RAM back and got it. What
-// the reason costs is the next wake's speed, and the fact that it will be a cold
-// boot is already observable — it is `has_memory_snapshot` on the record this
-// verb writes afterwards. The sentence explaining WHY exists only here, and an
-// operator reading the daemon's log is the one who can act on it.
-func (server *Server) sleep(ctx context.Context, runner *run.Runner, uuid string) error {
+// It is the one verb of the nine with a typed result, and that result is not a
+// nicety. Whether the guest's RAM was captured is decided ON THE HOST — an old
+// launcher, a full filesystem or a socket that will not answer each fall back to
+// a plain stop — and it is stated nowhere else, so Atlas books
+// `has_memory_snapshot` from it. Before the contract had a field to carry it,
+// Atlas's sleep raised AFTER the verb had already succeeded: the VM parked, the
+// Task committed Success, the row stayed Running, and the idle sweeper re-slept
+// the same VM once a minute forever.
+func (server *Server) sleep(
+	ctx context.Context, runner *run.Runner, uuid string,
+) (model.OperationResult, error) {
 	firecrackerUID, err := server.virtualMachines.FirecrackerUID(ctx, runner, uuid)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	result, err := server.virtualMachines.Sleep(ctx, runner, uuid, vm.SleepRequest{FirecrackerUID: firecrackerUID})
-	if err == nil && result.Reason != "" {
+	if err != nil {
+		return nil, err
+	}
+	if result.Reason != "" {
 		slog.Warn("a virtual machine slept without a memory snapshot", "uuid", uuid, "reason", result.Reason)
 	}
-	return err
+	return sleepResult(result), nil
+}
+
+// sleepResult is what this verb's one `ATLAS_RESULT=` line has always carried,
+// so a Task row reads the same whichever transport filled it — the three fields
+// of scripts/sleep-vm.py's SleepVmResult, and of the Fake provider that stands in
+// for it (atlas/atlas/providers/fake_tasks.py).
+//
+// `memory_snapshot` is always stated, because it is the answer and an absent key
+// must never be read as a false one. The other two are stated only when they say
+// something: an empty reason is not a reason and a zero size is not a
+// measurement, and a key that is present and empty invites a reader to show it.
+//
+// The reason travels rather than staying in the daemon's log because it is the
+// sole record of WHY this VM will cold-boot on its next wake, and it names a host
+// fault an operator can fix — a launcher that predates memory snapshots wants a
+// re-provision, a full filesystem wants space. The log is on the host; the
+// operator is in Atlas, reading the Task.
+func sleepResult(result vm.SleepResult) model.OperationResult {
+	values := model.OperationResult{"memory_snapshot": result.MemorySnapshot}
+	if result.Reason != "" {
+		values["reason"] = result.Reason
+	}
+	if result.MemorySnapshotBytes != 0 {
+		values["memory_snapshot_bytes"] = result.MemorySnapshotBytes
+	}
+	return values
 }
 
 // WakeVirtualMachine resumes a sleeping VM now, instead of waiting for the SYN
@@ -117,8 +154,8 @@ func (server *Server) WakeVirtualMachine(ctx context.Context, request wire.WakeV
 		return failure, nil
 	}
 	operation, failure := server.operation(ctx, request.Body, verbWakeVirtualMachine, request.Uuid,
-		func(runner *run.Runner) error {
-			return server.virtualMachines.Wake(ctx, runner, request.Uuid)
+		func(runner *run.Runner) (model.OperationResult, error) {
+			return nil, server.virtualMachines.Wake(ctx, runner, request.Uuid)
 		})
 	if failure != nil {
 		return failure, nil
@@ -128,10 +165,33 @@ func (server *Server) WakeVirtualMachine(ctx context.Context, request wire.WakeV
 	}, nil
 }
 
+// TerminateVirtualMachine deletes everything this host holds for a VM, and
+// retracts the desired state that would otherwise bring it back.
+//
+// The retraction is part of the verb rather than a second call Atlas is trusted
+// to make afterwards, because the failure it prevents needs no mistake by Atlas
+// at all: a terminate leaves the VM Stopped, the sweep sees Stopped against a
+// desired_power of Running, passes the fence — which is still held — and runs
+// `systemctl start` on a VM whose root volume was just lvremoved. Every thirty
+// seconds, forever. A verb that destroys a VM and leaves the assertion that
+// resurrects it has not finished.
+//
+// It runs BEFORE the mechanics, and that order is deliberate. Desired state is
+// stale from the instant Atlas asks for a terminate — nothing Boat does next can
+// make Running true again — so the record that would fight the teardown is gone
+// before the teardown starts, and a crash anywhere inside the mechanics leaves a
+// half-torn-down VM that nothing tries to boot. The other order leaves precisely
+// the window this verb exists to close, at the moment the VM is least able to
+// survive being started.
+//
+// The fence epoch is deliberately kept; see retract.
 func (server *Server) TerminateVirtualMachine(ctx context.Context, request wire.TerminateVirtualMachineRequestObject) (wire.TerminateVirtualMachineResponseObject, error) {
 	operation, failure := server.operation(ctx, request.Body, verbTerminateVirtualMachine, request.Uuid,
-		func(runner *run.Runner) error {
-			return server.virtualMachines.Terminate(ctx, runner, request.Uuid)
+		func(runner *run.Runner) (model.OperationResult, error) {
+			if err := server.state.DeleteDesired(request.Uuid); err != nil {
+				return nil, fmt.Errorf("the desired state of %s could not be retracted: %w", request.Uuid, err)
+			}
+			return nil, server.virtualMachines.Terminate(ctx, runner, request.Uuid)
 		})
 	if failure != nil {
 		return failure, nil
@@ -153,8 +213,8 @@ func (server *Server) ResizeVirtualMachine(ctx context.Context, request wire.Res
 		return failure, nil
 	}
 	operation, failure := server.operation(ctx, request.Body, verbResizeVirtualMachine, request.Uuid,
-		func(runner *run.Runner) error {
-			return server.virtualMachines.Resize(ctx, runner, request.Uuid, resize)
+		func(runner *run.Runner) (model.OperationResult, error) {
+			return nil, server.virtualMachines.Resize(ctx, runner, request.Uuid, resize)
 		})
 	if failure != nil {
 		return failure, nil
@@ -180,16 +240,16 @@ func (server *Server) RebuildVirtualMachine(ctx context.Context, request wire.Re
 	if failure != nil {
 		return failure, nil
 	}
-	build := func(runner *run.Runner) error {
+	build := func(runner *run.Runner) (model.OperationResult, error) {
 		if err := server.decisions.Record(rebuildSource(request.Body.OperationId, rebuild)); err != nil {
-			return err
+			return nil, err
 		}
 		firecrackerUID, err := server.virtualMachines.FirecrackerUID(ctx, runner, request.Uuid)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		rebuild.FirecrackerUID = firecrackerUID
-		return server.virtualMachines.Rebuild(ctx, runner, request.Uuid, rebuild)
+		return nil, server.virtualMachines.Rebuild(ctx, runner, request.Uuid, rebuild)
 	}
 	operation, failure := server.perform(ctx, request.Body.OperationId, verbRebuildVirtualMachine, request.Uuid, build)
 	if failure != nil {
@@ -233,7 +293,7 @@ func rebuildSource(operationID string, request vm.RebuildRequest) model.Decision
 // operation identifier: refuse what could not be replayed, then take it through
 // perform like everything else.
 func (server *Server) operation(
-	ctx context.Context, body *wire.OperationRequest, verb string, uuid string, execute func(*run.Runner) error,
+	ctx context.Context, body *wire.OperationRequest, verb string, uuid string, execute hostWork,
 ) (model.Operation, *errorResponse) {
 	if body == nil || body.OperationId == "" {
 		return model.Operation{}, missingOperationIdentifier()

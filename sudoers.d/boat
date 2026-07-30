@@ -30,10 +30,10 @@
 # that has grown the command a second operand, and no amount of care about the
 # rest of the line undoes that.
 #
-# THE RULE: a `*` is pinned by the literal text that follows it. Where that
-# literal does no work, the field is spelled out character by character instead.
-# Three places the literal provably does no work, all found by probing a real
-# host rather than by reading:
+# THE RULE: a `*` is pinned by the literal text that follows it ONLY when the
+# attacker cannot supply that literal himself. Where the literal does no work, the
+# field is spelled out character by character instead. Four ways the literal does
+# no work, every one found by probing a real host rather than by reading:
 #
 #   - `firecracker-vm@*.service`. Every unit on the host ends in `.service`, so
 #     the suffix pins nothing: `systemctl stop firecracker-vm@x.service
@@ -46,15 +46,26 @@
 #     therefore has every variable field spelled out.
 #   - a `*` with nothing after it at all, on a command that destroys: `rm -rf` of
 #     a VM tree, `lvremove` of a volume.
+#   - a `*` that stands for a UUID path segment, EVEN with a literal after it,
+#     because the attacker appends that literal to his own last operand. `cat
+#     .../*/network.env` with `*`=`x /etc/shadow x` renders `cat .../x /etc/shadow
+#     x/network.env` and reads /etc/shadow; `test -d .../*` is an `-r/-w/-e` oracle
+#     the same way. The trailing `/network.env` looked load-bearing and was not, so
+#     every read and marker line that names a VM by `*` now spells its UUID out
+#     too — the reads are no longer trusted to be harmless just because they read.
 #
 # So the forms are:
 #
-#   `*`           a name with load-bearing literal text after it. The default.
+#   `*`           a field with NO fixed shape and a genuinely load-bearing literal
+#                 after it, or a value a code-side check has already validated
+#                 (an address netip parsed, a numeric jq argument). The comment on
+#                 the line says which, and what the residual is.
 #   `?`           a field whose length is fixed by construction (the eight hex
 #                 digits of a hostname suffix).
 #   `[0-9a-f]`    the 8-4-4-4-12 UUID, spelled out. A class matches neither a
 #                 space nor a `/`, so the field cannot grow an operand and cannot
-#                 walk out of its directory.
+#                 walk out of its directory. This is now the default for a UUID
+#                 wherever one appears — read, marker, write or destroy alike.
 #   `[0-9A-Za-z]` the six characters mktemp generates, which is what anchors the
 #                 whole rebuild identity block.
 #
@@ -63,9 +74,13 @@
 # worth less than one that holds.
 #
 # Boat validates the UUID at the API boundary before any of these are rendered —
-# sudoers is the second line of defence, not the first. Where a `*` still stands
-# for a UUID, that first line is what makes it safe, and the comment on the line
-# says what the second line is still buying.
+# sudoers is the second line of defence, not the first. That first line is now
+# real: internal/api refuses a request whose {uuid} is not the 8-4-4-4-12 shape
+# (api.refuseMalformedUUID), and internal/park validates a directory name learned
+# from the host before it becomes a path or an nft identifier, the way the
+# adoption scan already did. It used to be a claim with no caller — paths.IsUUID
+# existed and nothing on an HTTP path called it — which is exactly why the UUID is
+# ALSO spelled out here: the boundary and the allow-list each hold on their own.
 #
 # Scope is every verb internal/vm and internal/park render today: start, stop,
 # observe, pause, resume, sleep, wake, resize, rebuild, terminate, adopt, and the
@@ -111,24 +126,46 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_UNIT = \
 
 # --- Observation: the on-disk markers --------------------------------------
 # The VM tree is 0700-owned by the per-VM uid, so even a stat needs root. All
-# four are `test`: they return a boolean and change nothing, which is why a
-# trailing wildcard on the directory check is acceptable here and would not be
-# on a command that writes.
+# four are `test`: they return a boolean and change nothing.
+#
+# The UUID is spelled out even though these only read, and that is the correction
+# of a belief this block used to hold: that "it only reads" made a trailing `*`
+# safe. It did not. `test -d /var/lib/atlas/virtual-machines/*` ends in the
+# wildcard, so `*` matched `x -o -r /etc/shadow` and the line became an arbitrary
+# `-r/-w/-e` oracle on any path; the `*/sleeping` and `*/…/READY` lines were the
+# same trick with the literal tail appended to the attacker's own last operand. A
+# read that an attacker steers is not harmless, and a `test` is a filesystem
+# oracle whether or not it writes. A character class matches neither a space nor a
+# `/`, so each field is now exactly one VM's.
+#
+# The jail root is a SECOND, deeper probe and needs its own line, because a `*`
+# in a sudoers argument does not match `/` — so the VM-directory grant above
+# authorises nothing below it. Without this the coherence check reads every
+# healthy VM as "VM directory has no jail tree" and quarantines the lot, which
+# is the same host-empty answer the listing bug produced, one layer down.
 #
 # The socket check is `test -S`, not `-f`. sudo matches arguments literally, so
 # the flag is part of the grant: a `-f` line does not authorize the `-S` call the
 # code makes, and `-f` is false for a socket in any case. The two together
 # produced a rule that denied precisely the command it existed for.
 Cmnd_Alias BOAT_VIRTUAL_MACHINE_MARKERS = \
-    /usr/bin/test -d /var/lib/atlas/virtual-machines/*, \
-    /usr/bin/test -f /var/lib/atlas/virtual-machines/*/sleeping, \
-    /usr/bin/test -f /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot/READY, \
-    /usr/bin/test -S /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run/firecracker.socket
+    /usr/bin/test -d /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f], \
+    /usr/bin/test -d /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root, \
+    /usr/bin/test -f /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/sleeping, \
+    /usr/bin/test -f /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/snapshot/READY, \
+    /usr/bin/test -S /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/run/firecracker.socket
 
 # --- Adoption: reading what the host already holds -------------------------
 # Every one of these reads and none of them writes. Adoption runs on a host that
 # may already be serving VMs, so a scan that could mutate would be a scan nobody
-# could safely run.
+# could safely run. But a read is not thereby safe, and the `cat` below is why
+# the UUID is spelled out and not left a `*`: `cat .../*/network.env` with
+# `*`=`x /etc/shadow x` renders `cat .../x /etc/shadow x/network.env`, and cat
+# reads /etc/shadow along the way — the wildcard grew a second file operand and
+# the literal `/network.env` was satisfied by appending it to the attacker's own
+# last operand. "Reads only" bounds nothing when the read target is a wildcard.
+# The character class matches neither a space nor a `/`, so the cat names exactly
+# one VM's sidecar.
 #
 # `network.env` is read rather than re-derived: it is the sidecar the systemd
 # hooks themselves read to rebuild a VM's networking after a reboot, so it is the
@@ -160,10 +197,12 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_MARKERS = \
 Cmnd_Alias BOAT_ADOPTION = \
     /usr/bin/test -d /var/lib/atlas/virtual-machines, \
     /usr/bin/ls -1 /var/lib/atlas/virtual-machines, \
-    /usr/bin/cat /var/lib/atlas/virtual-machines/*/network.env, \
+    /usr/bin/cat /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/network.env, \
+    /usr/sbin/vgs --noheadings -o vg_name, \
     /usr/sbin/vgs --noheadings -o vg_name atlas, \
     /usr/sbin/lvs --noheadings --nosuffix --units b --separator \, -o lv_name\,lv_size\,pool_lv\,origin atlas, \
-    /usr/sbin/ip -n * -o link show *
+    /usr/sbin/ip -n * -o link show *, \
+    /usr/sbin/ip -n * -o link show
 
 # --- Capacity: the numbers placement reads on every provision --------------
 # Live facts, not a bootstrap snapshot. Capacity that drifts silently is
@@ -188,7 +227,7 @@ Cmnd_Alias BOAT_HOST_CAPACITY = \
 # by probing every grant with `sudo -l` on a real host, and by nothing else.
 Cmnd_Alias BOAT_FIRECRACKER_LIVENESS = \
     /usr/bin/sh -c cd\ /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/run\ &&\ curl\ --silent\ --show-error\ --max-time\ 2\ --unix-socket\ firecracker.socket\ http\://localhost/, \
-    /usr/bin/ss --no-header --unix --listening --processes src /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/run/firecracker.socket
+    /usr/bin/ss --no-header --unix --listening --processes src /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/run/firecracker.socket
 
 # --- Bounded stop: the TimeoutStopSec drop-in ------------------------------
 # A migration-style fast stop bounds the guest's drain WITHOUT skipping the
@@ -202,27 +241,28 @@ Cmnd_Alias BOAT_FIRECRACKER_LIVENESS = \
 # and a drop-in the daemon can write for an arbitrary unit, followed by the
 # daemon-reload below and a start, is root.
 #
-# CANNOT BE PINNED TIGHTLY, and the residual risk is named rather than hidden,
-# because this is the one line in the file that is still root: the `install`
-# SOURCE is a wildcard. run.InstallFile spools content to a real temp file (uutils
-# install(1) cannot read /dev/stdin), and os.CreateTemp("", "boat-install-")
-# produces /tmp/boat-install-<random> — boat.service sets no TMPDIR, so the prefix
-# is pinnable and is pinned, but the random tail is a variable-length decimal and
-# no glob expresses "one or more digits". A `*` there matches a space, so the
-# wildcard can carry install's own `-t <directory>` flag and copy the file the
-# daemon just wrote into ANY directory: /etc/sudoers.d, a unit drop-in, root's
-# .ssh. That is the whole boundary, through one hole, and it is true of every
-# `install` line in this file — it is argued once, here.
+# The `install` SOURCE is now a single literal path, and closing that was the
+# highest-value change this file was waiting on. It used to be a wildcard:
+# run.InstallFile spooled content through os.CreateTemp("", "boat-install-"), so
+# the source was /tmp/boat-install-<random> and the sudoers line had to match it
+# with `/tmp/boat-install-*`. The random tail is a variable-length decimal and no
+# glob expresses "one or more digits", so the field was a `*` — and a `*` matches
+# a space, so it could carry install's own `-t <directory>` flag and copy the
+# daemon-written file into ANY directory: /etc/sudoers.d, a unit drop-in, root's
+# .ssh. install(1) copies its first source before it errors on a missing tail, so
+# the file landed even when the rest of the argv was junk. `sudo -u boat sudo -n
+# id` afterwards returned uid=0. That was the whole boundary through one hole, and
+# it was true of every `install` line in this file.
 #
-# The fix is a Go change and is deliberately not attempted in sudoers: spool to a
-# SINGLE fixed path instead of a random one — /var/lib/boat/spool/install, inside
-# the StateDirectory systemd already creates 0700 for this service — so that every
-# `install` line in this file becomes fully literal. One filename, no wildcard, no
-# hole. That is a few lines in internal/run/install.go, recorded here rather than
-# papered over, and it is the highest-value change this file is waiting on.
+# The fix was a Go change, deliberately not attempted in sudoers: InstallFile now
+# spools to ONE fixed path, /var/lib/boat/spool/install, inside the StateDirectory
+# systemd creates 0700 for this service (boat.service, StateDirectory=boat). So
+# every `install` line names its source literally — no wildcard, no hole — and a
+# `*` can no longer smuggle a second operand in as the source. See
+# internal/run/install.go.
 Cmnd_Alias BOAT_VIRTUAL_MACHINE_STOP_TIMEOUT = \
     /usr/bin/mkdir -p /run/systemd/system/firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service.d, \
-    /usr/bin/install -m 0644 /tmp/boat-install-* /run/systemd/system/firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service.d/atlas-migration-faststop.conf, \
+    /usr/bin/install -m 0644 /var/lib/boat/spool/install /run/systemd/system/firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service.d/atlas-migration-faststop.conf, \
     /usr/bin/rm -f /run/systemd/system/firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service.d/atlas-migration-faststop.conf, \
     /usr/bin/rmdir /run/systemd/system/firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service.d, \
     /usr/bin/systemctl daemon-reload
@@ -328,18 +368,18 @@ Cmnd_Alias BOAT_FIRECRACKER_API_SNAPSHOT = \
 # outside that range is DENIED, and the sleep fails loudly rather than this line
 # quietly widening. That is the failure we want, but somebody has to read it.
 Cmnd_Alias BOAT_VIRTUAL_MACHINE_SLEEP = \
-    /usr/bin/grep -q snapshot/READY /var/lib/atlas/virtual-machines/*/jailer-launch.sh, \
-    /usr/bin/jq -r ."machine-config".mem_size_mib /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json, \
-    /usr/bin/rm -rf /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot, \
-    /usr/bin/install -d -m 0700 /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot, \
-    /usr/bin/chown [0-9][0-9][0-9][0-9][0-9][0-9]\:[0-9][0-9][0-9][0-9][0-9][0-9] /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot, \
-    /usr/bin/test -s /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot/vmstate.bin, \
-    /usr/bin/test -s /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot/mem.bin, \
-    /usr/bin/stat -c %s /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot/mem.bin, \
-    /usr/bin/touch /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot/READY, \
-    /usr/bin/rm -f /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/snapshot/READY, \
-    /usr/bin/touch /var/lib/atlas/virtual-machines/*/sleeping, \
-    /usr/bin/rm -f /var/lib/atlas/virtual-machines/*/sleeping
+    /usr/bin/grep -q snapshot/READY /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jailer-launch.sh, \
+    /usr/bin/jq -r ."machine-config".mem_size_mib /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/firecracker.json, \
+    /usr/bin/rm -rf /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/snapshot, \
+    /usr/bin/install -d -m 0700 /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/snapshot, \
+    /usr/bin/chown [0-9][0-9][0-9][0-9][0-9][0-9]\:[0-9][0-9][0-9][0-9][0-9][0-9] /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/snapshot, \
+    /usr/bin/test -s /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/snapshot/vmstate.bin, \
+    /usr/bin/test -s /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/snapshot/mem.bin, \
+    /usr/bin/stat -c %s /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/snapshot/mem.bin, \
+    /usr/bin/touch /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/snapshot/READY, \
+    /usr/bin/rm -f /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/snapshot/READY, \
+    /usr/bin/touch /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/sleeping, \
+    /usr/bin/rm -f /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/sleeping
 
 # --- Parking: keeping a sleeping VM's address reachable --------------------
 # A sleep runs the unit's ExecStopPost, which removes the proxy-NDP entry, the
@@ -355,17 +395,55 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_SLEEP = \
 # one: `ip netns exec <ns> <cmd>` runs <cmd> as root with full access to the real
 # filesystem, and no sudoers pattern can constrain it.
 #
+# `neigh del proxy` is granted beside `neigh replace proxy`, and the pairing is
+# the point: a terminate has to withdraw the proxy-NDP entry a park installed, and
+# it is the last moment anything can. A sleeping VM's unit is already inactive and
+# `systemctl disable --now` does not re-run ExecStopPost, so the hook that would
+# have unwound it never runs again — the host would go on answering neighbour
+# solicitations for a /128 it no longer holds, and the day Atlas re-allocates that
+# address the new VM inherits a stale entry pointing at nothing.
+#
+# `del` is granted in the SAME shape as `replace` rather than a tighter one,
+# deliberately. It buys an attacker nothing `replace` did not already: both take
+# one address and one device, both are bounded to the host's neighbour table, and
+# a `replace` that can point another VM's /128 at this host is the same blast
+# radius as a `del` that can remove it. Pinning one and not the other would be
+# theatre. What tightened is BOTH, in code — see below.
+#
 # RESIDUAL RISK: the address and the uplink device are wildcards — they are read
 # from a VM's network.env and from the host's default route, not derived from a
-# UUID, so there is no shape to pin them to. What bounds them is `ip` itself: the
-# subcommand is fixed and positional, so the worst a wildcard buys is extra
-# neighbour or route attributes on a command that is already installing a
-# neighbour entry and a route. It cannot become another ip subcommand, and the
-# route lines end in a literal `dev atlas-park0`.
+# UUID, so there is no shape to pin them to in sudoers. A canonical IPv6 has no
+# fixed length (`::` to eight groups) and fnmatch has no "one or more of a class",
+# so a character class cannot express one. Three things bound these lines.
+#
+# First, `ip` itself: the subcommand is fixed and positional, so the worst a
+# wildcard buys is extra neighbour or route attributes on a command that is
+# already installing or removing a neighbour entry and a route. It cannot become
+# another ip subcommand, it cannot execute anything, and the route lines end in a
+# literal `dev atlas-park0`.
+#
+# Second, internal/park validates the address with netip.ParseAddr and re-renders
+# its canonical form before any of these render, so the value reaching `ip` is
+# lowercase hex and colons and nothing else (park.canonicalAddress). That check
+# now covers the UNDO as well as the install — park.removableAddress guards
+# unpark's `route del` and retire's `neigh del proxy` — because a grant whose
+# safety rests on a code-side check is worth exactly as much as the least-guarded
+# path that reaches it, and the teardown paths read their address off disk.
+#
+# Third, what is NOT claimed: the uplink device stays a bare `*` with nothing
+# after it on the two neigh lines. It is a kernel-supplied interface name from
+# `ip -j -6 route show default`, not attacker input, and the tighter form — having
+# park render the address in netip's fully expanded 39-character shape so this
+# file could spell all eight groups out — was considered and declined. It would
+# pin the address and still leave `dev *` unpinned on these two lines, while
+# making the host's installed state spelled differently from the network.env that
+# records it. The nft rule line has no trailing wildcard and is the one place that
+# argument could still be worth revisiting.
 Cmnd_Alias BOAT_PARK_ROUTING = \
     /usr/sbin/ip link add atlas-park0 type dummy, \
     /usr/sbin/ip link set atlas-park0 up, \
     /usr/sbin/ip -6 neigh replace proxy * dev *, \
+    /usr/sbin/ip -6 neigh del proxy * dev *, \
     /usr/sbin/ip -6 route replace */128 dev atlas-park0, \
     /usr/sbin/ip -6 route del */128 dev atlas-park0
 
@@ -382,18 +460,37 @@ Cmnd_Alias BOAT_PARK_ROUTING = \
 # TCP-only — a packet the wake rule does not match is forwarded out the dummy and
 # dies there with nothing woken.
 #
-# RESIDUAL RISK, and this is the loosest block in the file: nft parses `;` as a
-# command separator, so every `*` here is an nft injection point. A compromised
-# daemon could reach the whole ruleset through the address hole in the rule line,
-# through a counter name, or through a rule handle. What bounds it is that nft has
-# no form that executes a command and no form that touches a file outside `-f`:
-# the blast radius is the host's nftables ruleset — which includes the per-VM
-# public firewall, so this is not nothing — and it stops there. It is not pinned
-# further because the address is a VM's own /128 read out of its network.env and
-# has no fixed length to spell out. The tighter fix is for internal/park to
-# validate the address before rendering it, the way internal/paths.IsUUID already
-# validates a UUID; that is a change to internal/park, recorded here rather than
-# papered over.
+# nft parses `;` as a statement separator and `#` as a comment to end of line, and
+# it re-lexes its whole argument vector to do so — which is why a value that
+# run.Quote made one shell token still injects at the nft layer. Two fields here
+# used to be wide open to that, and both are now closed as far as each shape
+# allows:
+#
+#   - The COUNTER NAME is derived from a UUID (park.CounterName is wake_ + the 32
+#     hex of the UUID with its dashes removed), so it has a fixed shape and is
+#     spelled out: wake_ followed by 32 [0-9a-f]. On the three counter lines the
+#     name is the trailing field, where a `wake_*` matched `wake_x; add rule …`
+#     and was itself the injection point; spelling it out shuts that. On the rule
+#     line it is defence in depth.
+#
+#   - The ADDRESS on the rule line is a VM's own /128, read from its network.env,
+#     and has no fixed length to spell out — a canonical IPv6 runs from `::` to a
+#     full eight groups and fnmatch has no "one or more of a class". It stays a
+#     `*`, and what makes that safe is the first line of defence, now delivered:
+#     internal/park validates the address with netip.ParseAddr and renders only
+#     its canonical `.String()`, which is lowercase hex and colons and nothing
+#     else — no space, no `;`, no `#` (park.canonicalAddress). The proven exploit
+#     (`daddr 'fd00::1 drop; add counter …; #'`) satisfied this line because `*`
+#     spanned the injection and the literal tail matched after the `#`; a value
+#     that cannot contain `;` or `#` in the first place cannot do that.
+#
+# RESIDUAL RISK: this is still the loosest block in the file. If park's validation
+# were bypassed, the `daddr *` would again let a crafted address reach nft, whose
+# blast radius is the host's nftables ruleset — which includes the per-VM public
+# firewall, so this is not nothing. nft has no form that executes a command and
+# none that touches a file outside `-f`, so it stops at the ruleset. The rule
+# handle on the delete line (`handle [0-9]*`) is nft's own output, numeric by
+# construction; it is pinned to lead with a digit and not further.
 Cmnd_Alias BOAT_WAKE_TRAP = \
     /usr/sbin/nft list table inet atlas, \
     /usr/sbin/nft add table inet atlas, \
@@ -401,10 +498,10 @@ Cmnd_Alias BOAT_WAKE_TRAP = \
     /usr/sbin/nft -a list chain inet atlas forward, \
     /usr/sbin/nft add chain inet atlas forward {\ type\ filter\ hook\ forward\ priority\ filter;\ policy\ accept;\ }, \
     /usr/sbin/nft -j list counters table inet atlas, \
-    /usr/sbin/nft list counter inet atlas wake_*, \
-    /usr/sbin/nft add counter inet atlas wake_*, \
-    /usr/sbin/nft delete counter inet atlas wake_*, \
-    /usr/sbin/nft add rule inet atlas forward ip6 daddr * tcp flags syn / fin\,syn\,rst\,ack counter name wake_* drop, \
+    /usr/sbin/nft list counter inet atlas wake_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f], \
+    /usr/sbin/nft add counter inet atlas wake_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f], \
+    /usr/sbin/nft delete counter inet atlas wake_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f], \
+    /usr/sbin/nft add rule inet atlas forward ip6 daddr * tcp flags syn / fin\,syn\,rst\,ack counter name wake_[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f] drop, \
     /usr/sbin/nft delete rule inet atlas forward handle [0-9]*
 
 # --- Volumes: the thin LVs a VM's disks are ---------------------------------
@@ -485,14 +582,14 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_FILESYSTEM = \
 # thing that can be, which is where the node lands. The safety of the node is
 # therefore internal/vm/volume.go's parse of lsblk, not this line.
 Cmnd_Alias BOAT_VIRTUAL_MACHINE_JAIL_NODES = \
-    /usr/bin/rm -f /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/rootfs.ext4, \
-    /usr/bin/rm -f /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/data.ext4, \
-    /usr/bin/mknod /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/rootfs.ext4 b [0-9]* [0-9]*, \
-    /usr/bin/mknod /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/data.ext4 b [0-9]* [0-9]*, \
-    /usr/bin/chown [0-9][0-9][0-9][0-9][0-9][0-9]\:[0-9][0-9][0-9][0-9][0-9][0-9] /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/rootfs.ext4, \
-    /usr/bin/chown [0-9][0-9][0-9][0-9][0-9][0-9]\:[0-9][0-9][0-9][0-9][0-9][0-9] /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/data.ext4, \
-    /usr/bin/chmod 0660 /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/rootfs.ext4, \
-    /usr/bin/chmod 0660 /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/data.ext4
+    /usr/bin/rm -f /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/rootfs.ext4, \
+    /usr/bin/rm -f /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/data.ext4, \
+    /usr/bin/mknod /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/rootfs.ext4 b [0-9]* [0-9]*, \
+    /usr/bin/mknod /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/data.ext4 b [0-9]* [0-9]*, \
+    /usr/bin/chown [0-9][0-9][0-9][0-9][0-9][0-9]\:[0-9][0-9][0-9][0-9][0-9][0-9] /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/rootfs.ext4, \
+    /usr/bin/chown [0-9][0-9][0-9][0-9][0-9][0-9]\:[0-9][0-9][0-9][0-9][0-9][0-9] /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/data.ext4, \
+    /usr/bin/chmod 0660 /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/rootfs.ext4, \
+    /usr/bin/chmod 0660 /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/data.ext4
 
 # --- Resize: the machine config and the jailer launcher --------------------
 # Two files, edited in place and swapped atomically. jq touches only vcpu_count
@@ -515,15 +612,15 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_JAIL_NODES = \
 # rendering. Bounded further by the pinned filter and the pinned config path that
 # must both still follow.
 Cmnd_Alias BOAT_VIRTUAL_MACHINE_RESIZE = \
-    /usr/bin/test -f /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json, \
-    /usr/bin/jq --argjson vcpus [0-9]* --argjson mem [0-9]* ."machine-config".vcpu_count\ \=\ $vcpus\ |\ ."machine-config".mem_size_mib\ \=\ $mem /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json, \
-    /usr/bin/cat /var/lib/atlas/virtual-machines/*/jailer-launch.sh, \
-    /usr/bin/install -m 0644 /tmp/boat-install-* /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json.new, \
-    /usr/bin/install -m 0755 /tmp/boat-install-* /var/lib/atlas/virtual-machines/*/jailer-launch.sh.new, \
-    /usr/bin/chown --reference=/var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json.new, \
-    /usr/bin/chown --reference=/var/lib/atlas/virtual-machines/*/jailer-launch.sh /var/lib/atlas/virtual-machines/*/jailer-launch.sh.new, \
-    /usr/bin/mv /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json.new /var/lib/atlas/virtual-machines/*/jail/firecracker/*/root/firecracker.json, \
-    /usr/bin/mv /var/lib/atlas/virtual-machines/*/jailer-launch.sh.new /var/lib/atlas/virtual-machines/*/jailer-launch.sh
+    /usr/bin/test -f /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/firecracker.json, \
+    /usr/bin/jq --argjson vcpus [0-9]* --argjson mem [0-9]* ."machine-config".vcpu_count\ \=\ $vcpus\ |\ ."machine-config".mem_size_mib\ \=\ $mem /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/firecracker.json, \
+    /usr/bin/cat /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jailer-launch.sh, \
+    /usr/bin/install -m 0644 /var/lib/boat/spool/install /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/firecracker.json.new, \
+    /usr/bin/install -m 0755 /var/lib/boat/spool/install /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jailer-launch.sh.new, \
+    /usr/bin/chown --reference=/var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/firecracker.json /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/firecracker.json.new, \
+    /usr/bin/chown --reference=/var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jailer-launch.sh /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jailer-launch.sh.new, \
+    /usr/bin/mv /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/firecracker.json.new /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/firecracker.json, \
+    /usr/bin/mv /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jailer-launch.sh.new /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jailer-launch.sh
 
 # --- Rebuild: writing a VM's identity into a fresh rootfs ------------------
 # A rebuild lays down a new root filesystem from an image or a snapshot, and then
@@ -558,12 +655,33 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_RESIZE = \
 # start. Inherited rsa and ecdsa keys go because a snapshot source may carry them
 # and keeping them would let the new VM answer with the source VM's identity.
 #
-# RESIDUAL RISK: `mkdir -p <mount>/*` is the data disk's mount point, and its name
-# comes from Atlas rather than from a UUID. mkdir -p creates intermediate
-# directories, so a traversal through that wildcard could create a directory
-# anywhere on the host. Creating an empty directory is the whole of what mkdir can
-# do, and every line that WRITES a file in this block has its destination pinned,
-# so the created directory is not reachable by any other grant here.
+# The FIXED identity files each keep their exact destination: authorized_keys,
+# atlas-network.env, hostname and machine-id are pinned path and mode, and are
+# defended better than the one line below them because Boat knows precisely where
+# each lands.
+#
+# The `install -m 0644 <spool> <mount>/*` line is the exception, and it is the one
+# open destination in this block on purpose: it lays down Identity.ExtraEnvironment
+# — the arbitrary {path, content} guest files Atlas hands Boat to write and Boat
+# writes without reading (the guest-service seam). Their paths are chosen by Atlas,
+# so there is no fixed destination to pin; the `*` is the guest-absolute path,
+# joined onto the mount point. Before this line existed the write was DENIED, and a
+# rebuild fails after it has already dropped the root volume — so every bench VM's
+# rebuild failed on the one command sudoers refused. What IS pinned: the source is
+# the literal spool, the mode is 0644, and the mount-point suffix is six
+# [0-9A-Za-z] mktemp made, so the file can only land under a directory mktemp
+# created this rebuild.
+#
+# RESIDUAL RISK, shared by that install line and the `mkdir -p <mount>/*` for the
+# data-disk mount point below it: a `*` matches `/` and `..`, so if the Go-side
+# check were bypassed the guest path could be `../../etc/cron.d/x` and the write
+# would land root-owned outside the mount. The first line of defence is in code and
+# is symmetric now: vm.writeExtraEnvironment refuses a path that is not absolute or
+# contains `..`, and vm.writeDataDiskMount makes the identical check on the mount
+# point (internal/vm/identity.go). install writes one 0644 file and mkdir creates
+# an empty directory — neither can execute — and every FIXED-destination write in
+# this block is pinned, so this residual is one mislabelled file or one empty
+# directory, not a foothold that compounds.
 Cmnd_Alias BOAT_VIRTUAL_MACHINE_IDENTITY = \
     /usr/bin/mktemp -d /tmp/atlas-mount-XXXXXX, \
     /usr/bin/mount /dev/atlas/atlas-vm-* /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z], \
@@ -571,10 +689,10 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_IDENTITY = \
     /usr/bin/rmdir /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z], \
     /usr/bin/install -d -m 0700 /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/root/.ssh, \
     /usr/bin/install -d -m 0755 /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh, \
-    /usr/bin/install -m 0600 /tmp/boat-install-* /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/root/.ssh/authorized_keys, \
-    /usr/bin/install -m 0644 /tmp/boat-install-* /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/atlas-network.env, \
-    /usr/bin/install -m 0644 /tmp/boat-install-* /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/hostname, \
-    /usr/bin/install -m 0444 /tmp/boat-install-* /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/machine-id, \
+    /usr/bin/install -m 0600 /var/lib/boat/spool/install /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/root/.ssh/authorized_keys, \
+    /usr/bin/install -m 0644 /var/lib/boat/spool/install /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/atlas-network.env, \
+    /usr/bin/install -m 0644 /var/lib/boat/spool/install /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/hostname, \
+    /usr/bin/install -m 0444 /var/lib/boat/spool/install /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/machine-id, \
     /usr/bin/test -f /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh/ssh_host_ed25519_key, \
     /usr/bin/rm -f /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh/ssh_host_rsa_key /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh/ssh_host_rsa_key.pub, \
     /usr/bin/rm -f /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh/ssh_host_ecdsa_key /tmp/atlas-mount-[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]/etc/ssh/ssh_host_ecdsa_key.pub, \

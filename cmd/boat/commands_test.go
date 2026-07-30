@@ -195,6 +195,30 @@ func TestAnUnreachableDaemonSaysSo(t *testing.T) {
 	}
 }
 
+// A verb's typed result is the one thing it decided that its trace does not
+// spell out. An operator sleeping a VM from a shell has to see whether the
+// guest's RAM was captured or the VM merely stopped, because that is the
+// difference between a wake in milliseconds and a cold boot.
+func TestASleepPrintsTheResultTheHostReported(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/vms/vm-one/sleep", func(writer http.ResponseWriter, request *http.Request) {
+		result := map[string]any{"memory_snapshot": false, "reason": "not enough free space"}
+		writeJSON(t, writer, wire.Operation{
+			OperationId: "cli-sleep", Verb: "sleep-vm", Uuid: "vm-one",
+			Status: wire.OperationStatusSuccess, Result: &result,
+		})
+	})
+	startFakeDaemon(t, mux)
+	var output, errorOutput bytes.Buffer
+
+	if code := dispatch([]string{"vm", "sleep", "vm-one"}, &output, &errorOutput); code != exitSuccess {
+		t.Fatalf("got exit %d, want 0: %s", code, errorOutput.String())
+	}
+	if !strings.Contains(output.String(), "not enough free space") {
+		t.Errorf("the reason the next wake will be cold was not printed: %s", output.String())
+	}
+}
+
 // Every verb the API serves must be reachable from the CLI, or the break-glass
 // tool is weaker than the thing it exists to reach past. The verb name is the
 // path segment, and this is what says so.

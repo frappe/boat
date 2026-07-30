@@ -45,6 +45,32 @@ func TestStartRecordsSuccessAndObservesTheHost(t *testing.T) {
 	}
 }
 
+// The {uuid} path parameter is a bare string in the IDL and the generated binder
+// checks no pattern, so the boundary does. A name that is not the 8-4-4-4-12 hex
+// shape is refused before any host command, because downstream it becomes a path
+// segment spliced into sudo'd commands and an nft identifier — the first line of
+// defence the sudoers allow-list is the second half of (sudoers.d/boat).
+func TestAMalformedUUIDIsRefusedAtTheBoundary(t *testing.T) {
+	machines := &fakeVirtualMachines{}
+	handler := newTestServer(newFakeStore(), machines).SocketHandler()
+	const bad = "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"
+
+	// A verb reaches perform's check before it claims an operation or touches the
+	// host: stop goes straight to perform, so the 400 is the boundary's own.
+	stop := postJSON(t, handler, "/vms/"+bad+"/stop", wire.StopRequest{OperationId: "Task-1"})
+	if stop.Code != http.StatusBadRequest {
+		t.Errorf("stop with a malformed uuid: got %d, want 400: %s", stop.Code, stop.Body)
+	}
+	if machines.stops != 0 {
+		t.Errorf("a malformed uuid reached the host: %d stops", machines.stops)
+	}
+
+	// A read is refused the same way, so no endpoint takes a name it would render.
+	if got := get(t, handler, "/vms/"+bad); got.Code != http.StatusBadRequest {
+		t.Errorf("get with a malformed uuid: got %d, want 400: %s", got.Code, got.Body)
+	}
+}
+
 // A retried Atlas Task carries the same name, and must not boot the VM twice.
 func TestStartReplayReturnsTheFirstResultAndRunsNothing(t *testing.T) {
 	operations := newFakeStore()

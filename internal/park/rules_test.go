@@ -191,6 +191,37 @@ func TestTheWakeRuleQuotesTheAddressAndLeavesTheCounterNameLiteral(t *testing.T)
 	}
 }
 
+// canonicalAddress is the wake trap's first line of defence: the sudoers rule
+// line still carries `daddr *`, so what keeps an address from injecting into nft
+// is that park never renders one that could. Parsing and re-rendering is what
+// makes that true — the injection payload the reviewer proved live is refused
+// here, before it can reach a rule.
+func TestCanonicalAddressAcceptsAnIPv6AndRefusesEverythingElse(t *testing.T) {
+	if got, ok := canonicalAddress(testAddress); !ok || got != testAddress {
+		t.Errorf("canonicalAddress(%q) = %q, %v; want it accepted unchanged", testAddress, got, ok)
+	}
+	// Re-rendering is not a formality: an uncompressed, upper-case form comes back
+	// as the one canonical spelling, which is the whole of why the value handed to
+	// nft is only ever hex and colons.
+	if got, ok := canonicalAddress("2001:0DB8:0000:0000:0000:0000:0000:0002"); !ok || got != "2001:db8::2" {
+		t.Errorf("canonicalAddress did not canonicalise: got %q, %v", got, ok)
+	}
+	for _, bad := range []string{
+		// The exact payload the reviewer proved live against `daddr *`.
+		"fd00::1 drop; add counter inet atlas INJECTED_PWNED; #",
+		"2001:db8::1; nft flush ruleset",
+		"100.64.0.1",     // IPv4 is not a parked /128
+		"::ffff:1.2.3.4", // IPv4-in-IPv6 is not one either
+		"fe80::1%eth0",   // a zone is link scope, not a public /128
+		"",
+		"not-an-address",
+	} {
+		if got, ok := canonicalAddress(bad); ok {
+			t.Errorf("canonicalAddress(%q) = %q, true; want it refused", bad, got)
+		}
+	}
+}
+
 func TestRuleHandlesFindsOnlyThisVirtualMachinesRules(t *testing.T) {
 	listing := "table inet atlas {\n" +
 		"  chain forward {\n" +

@@ -47,7 +47,8 @@ type SleepResult struct {
 	MemorySnapshotBytes int64
 }
 
-// Sleep parks a VM: capture its memory, stop its unit, and mark it sleeping.
+// Sleep parks a VM: capture its memory, stop its unit, mark it sleeping and arm
+// the trap that brings it back.
 //
 // The marker is the load-bearing artifact, not the snapshot. It is what the
 // unit's ConditionPathExists=! condition reads, so a sleeping VM does not come back on
@@ -59,6 +60,10 @@ type SleepResult struct {
 // The snapshot is the optimisation on top. Any failure taking it falls back to
 // a plain stop with a reason, because the caller asked for the VM's RAM back
 // and that is what a plain stop delivers.
+//
+// Its first question is whether the VM is already asleep, because a replay of
+// this verb must converge rather than repeat: see reassertSleep for what a
+// second sleep used to cost the first one's snapshot.
 func (manager *Manager) Sleep(
 	ctx context.Context, runner *run.Runner, uuid string, request SleepRequest,
 ) (SleepResult, error) {
@@ -66,6 +71,9 @@ func (manager *Manager) Sleep(
 	files := manager.filesFor(uuid)
 	if err := manager.requireWakeTrap(); err != nil {
 		return SleepResult{}, err
+	}
+	if commands.OK(ctx, "sudo test -f {}", files.sleepingMarker) {
+		return manager.reassertSleep(ctx, runner, uuid)
 	}
 	reason, err := manager.memorySnapshotPreflight(ctx, commands, files)
 	if err != nil {
@@ -77,16 +85,53 @@ func (manager *Manager) Sleep(
 		}
 	}
 	if reason != "" {
-		if err := manager.sleepWithoutMemorySnapshot(ctx, commands, files, reason); err != nil {
-			return SleepResult{Reason: reason}, err
-		}
-		return SleepResult{Reason: reason}, manager.parkForWake(ctx, runner, uuid)
+		return SleepResult{Reason: reason}, manager.sleepWithoutMemorySnapshot(ctx, runner, uuid, reason)
 	}
-	result, err := manager.sleepWithMemorySnapshot(ctx, commands, files)
-	if err != nil {
-		return result, err
+	return manager.sleepWithMemorySnapshot(ctx, runner, uuid)
+}
+
+// reassertSleep is what a replay of this verb does to a VM that is already
+// asleep: re-assert the three things a sleep leaves behind, and report what the
+// host already holds.
+//
+// Sleep has to be idempotent, and not because retries are tidy. §11.5 concludes
+// every interrupted operation as a Failure *on the stated grounds that every
+// verb is idempotent, so a retry re-runs the work* — and the operation a crash
+// most plausibly interrupts here is one that stopped the unit and wrote the
+// marker but had not yet armed the trap. That VM is asleep and unreachable, the
+// state parkForWake calls fatal, and the designed recovery is exactly this
+// replay. So a replay must converge rather than refuse: refusing would hand
+// Atlas a red Task for a VM that is correctly asleep and would leave the one
+// that is not asleep-and-trapped with no path back at all.
+//
+// What it must never do is walk the fresh-sleep path again. That path's first
+// act is to `rm -rf` the snapshot directory it is about to rewrite, guarded on
+// `test -S` against a socket inode that OUTLIVES the Firecracker that bound it —
+// so a replay could pass the guard, destroy a perfectly good memory snapshot,
+// fail to talk to the dead socket, take the fallback (which removes the READY
+// marker for good measure) and report Success. The VM then cold-boots on its
+// next wake with a green Task beside it, which is the failure mode this whole
+// package exists to end.
+//
+// So the snapshot is neither retaken nor dropped: it is reported. The stop and
+// the marker are re-asserted because both are no-ops on a VM that is genuinely
+// asleep and both are the repair when it is not, and the park is re-asserted
+// because it is the one that is missing in the case worth recovering.
+func (manager *Manager) reassertSleep(
+	ctx context.Context, runner *run.Runner, uuid string,
+) (SleepResult, error) {
+	commands := manager.commandsFor(runner)
+	files := manager.filesFor(uuid)
+	if err := manager.stopMarkAndPark(ctx, runner, uuid); err != nil {
+		return SleepResult{}, err
 	}
-	return result, manager.parkForWake(ctx, runner, uuid)
+	if !manager.memorySnapshotMarkerPresent(ctx, commands, files) {
+		return SleepResult{
+			Reason: "already sleeping without a memory snapshot; the next wake is a cold boot",
+		}, nil
+	}
+	size, err := manager.memorySnapshotSize(ctx, commands, files)
+	return SleepResult{MemorySnapshot: true, MemorySnapshotBytes: size}, err
 }
 
 // SleepRequest is how a caller asks for a sleep.
@@ -244,53 +289,86 @@ func (manager *Manager) captureMemorySnapshot(
 	return err
 }
 
-// sleepWithMemorySnapshot stops the unit on top of a complete snapshot and
+// sleepWithMemorySnapshot puts the VM to sleep on top of a complete snapshot and
 // reports the memory file's size, which is the RAM this sleep actually freed.
+//
+// The size is read LAST, after the trap is armed, and that ordering is the
+// difference between a bad measurement and an outage. A stat that fails, or a
+// number that will not parse, would otherwise return with the VM stopped, marked
+// sleeping and unparked — no counter, no rule, no route, no proxy-NDP — which is
+// the state parkForWake exists to prevent, made unreachable by its own marker
+// until an operator finds it. scripts/sleep-vm.py stats after it parks for
+// exactly this reason.
 func (manager *Manager) sleepWithMemorySnapshot(
-	ctx context.Context, commands commands, files virtualMachineFiles,
+	ctx context.Context, runner *run.Runner, uuid string,
 ) (SleepResult, error) {
-	if err := manager.stopAndMarkSleeping(ctx, commands, files); err != nil {
-		return SleepResult{MemorySnapshot: true}, err
+	result := SleepResult{MemorySnapshot: true}
+	if err := manager.stopMarkAndPark(ctx, runner, uuid); err != nil {
+		return result, err
 	}
-	output, err := commands.Run(ctx, "sudo stat -c %s {}", files.memorySnapshotMemory)
-	if err != nil {
-		return SleepResult{MemorySnapshot: true}, err
-	}
-	size, err := strconv.ParseInt(strings.TrimSpace(output), 10, 64)
-	if err != nil {
-		return SleepResult{MemorySnapshot: true}, fmt.Errorf("memory file size: %w", err)
-	}
-	return SleepResult{MemorySnapshot: true, MemorySnapshotBytes: size}, nil
+	size, err := manager.memorySnapshotSize(ctx, manager.commandsFor(runner), manager.filesFor(uuid))
+	result.MemorySnapshotBytes = size
+	return result, err
 }
 
 // sleepWithoutMemorySnapshot is the fallback: no fast wake, but still a sleep.
 // The stale marker goes first — a partial snapshot must never be restored — and
-// the sleeping marker still lands, so the reboot suppression takes effect
-// either way.
+// the sleeping marker and the trap still land, so both the reboot suppression
+// and the way back take effect either way.
 func (manager *Manager) sleepWithoutMemorySnapshot(
-	ctx context.Context, commands commands, files virtualMachineFiles, reason string,
+	ctx context.Context, runner *run.Runner, uuid string, reason string,
 ) error {
+	commands := manager.commandsFor(runner)
+	files := manager.filesFor(uuid)
 	if _, err := commands.Run(ctx, "sudo rm -f {}", files.memorySnapshotMarker); err != nil {
 		return err
 	}
-	if err := manager.stopAndMarkSleeping(ctx, commands, files); err != nil {
+	if err := manager.stopMarkAndPark(ctx, runner, uuid); err != nil {
 		return fmt.Errorf("%w (falling back to a plain stop: %s)", err, reason)
 	}
 	return nil
 }
 
-// stopAndMarkSleeping is the order both paths share, and it is an order rather
-// than two steps: the marker is written after the stop, because a marker
-// written first would make the stop's own restart-on-failure a no-op and leave
-// a VM marked sleeping while it is still running.
-func (manager *Manager) stopAndMarkSleeping(
-	ctx context.Context, commands commands, files virtualMachineFiles,
-) error {
+// stopMarkAndPark is the order every path shares, and it is one function rather
+// than three calls because the order is the correctness:
+//
+//   - the marker is written AFTER the stop, because a marker written first would
+//     make the stop's own restart-on-failure a no-op and leave a VM marked
+//     sleeping while it is still running;
+//   - the trap is armed AFTER the marker, because the marker is what the trap
+//     reads to decide a counted SYN is worth a wake, and because a VM is not
+//     officially asleep until it carries one;
+//   - and nothing may come between the marker and the trap, which is the failure
+//     this shape forecloses: any step in there that can fail returns with the VM
+//     asleep and unreachable.
+func (manager *Manager) stopMarkAndPark(ctx context.Context, runner *run.Runner, uuid string) error {
+	commands := manager.commandsFor(runner)
+	files := manager.filesFor(uuid)
 	if _, err := commands.Run(ctx, "sudo systemctl stop {}", files.unit); err != nil {
 		return err
 	}
-	_, err := commands.Run(ctx, "sudo touch {}", files.sleepingMarker)
-	return err
+	if _, err := commands.Run(ctx, "sudo touch {}", files.sleepingMarker); err != nil {
+		return err
+	}
+	return manager.parkForWake(ctx, runner, uuid)
+}
+
+// memorySnapshotSize is the size of the memory file, which is the RAM the sleep
+// gave back. A file that cannot be stat-ed is reported rather than guessed at:
+// the VM is asleep either way, and a zero would read as a snapshot that freed
+// nothing.
+func (manager *Manager) memorySnapshotSize(
+	ctx context.Context, commands commands, files virtualMachineFiles,
+) (int64, error) {
+	output, err := commands.Run(ctx, "sudo stat -c %s {}", files.memorySnapshotMemory)
+	if err != nil {
+		return 0, err
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(output), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("memory file size: %w", err)
+	}
+	return size, nil
 }
 
 // parkForWake arms the trap that is the only way a slept VM ever comes back on

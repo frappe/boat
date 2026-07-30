@@ -73,6 +73,9 @@ type fakeCommands struct {
 	// parkError lets a test make arming the wake trap fail, which must fail the
 	// sleep: a VM that is stopped and untrapped can never come back on its own.
 	parkError error
+	// retireError lets a test make the park teardown fail, which must fail the
+	// terminate before it removes the sidecar naming the address to withdraw.
+	retireError error
 	// liveness is what the Firecracker probe answers. It is a value rather than a
 	// scripted command because the commands that probe renders belong to
 	// internal/fcattach and are asserted there; spelling them again here would be
@@ -248,6 +251,13 @@ func newTestManager(fake *fakeCommands) *Manager {
 			fake.trace = append(fake.trace, "park "+uuid)
 			return fake.parkError
 		},
+		// On the same trace for the same reason: a terminate that forgets to
+		// withdraw the VM's parked networking is a missing line here, and on a host
+		// it is a permanent DROP on every SYN to an address Atlas will re-allocate.
+		retire: func(_ context.Context, _ *run.Runner, uuid string) error {
+			fake.trace = append(fake.trace, "retire "+uuid)
+			return fake.retireError
+		},
 		// Traced too, so an observation that took the host's word for a running VM
 		// is a missing line rather than an assertion nobody wrote.
 		liveness: func(_ context.Context, _ *run.Runner, uuid string) (fcattach.Process, bool, error) {
@@ -278,7 +288,8 @@ func TestNewManagerIsWiredToTheHost(t *testing.T) {
 	manager := NewManager()
 
 	if manager.commandsFor == nil || manager.filesFor == nil || manager.clock == nil ||
-		manager.park == nil || manager.liveness == nil || manager.wakeTrapResident == nil {
+		manager.park == nil || manager.retire == nil || manager.liveness == nil ||
+		manager.wakeTrapResident == nil {
 		t.Fatal("NewManager left a seam nil")
 	}
 	// False on a Manager nobody is running a trap beside, which is what this

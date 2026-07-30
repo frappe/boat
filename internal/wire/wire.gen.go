@@ -29,9 +29,11 @@ const (
 
 // Defines values for ErrorReason.
 const (
+	ErrorReasonFenceRegression             ErrorReason = "fence-regression"
 	ErrorReasonNoFence                     ErrorReason = "no-fence"
 	ErrorReasonOperationIdentifierConflict ErrorReason = "operation-identifier-conflict"
 	ErrorReasonStaleFence                  ErrorReason = "stale-fence"
+	ErrorReasonStaleObservation            ErrorReason = "stale-observation"
 )
 
 // Defines values for HealthStatus.
@@ -44,6 +46,12 @@ const (
 	OperationStatusFailure OperationStatus = "Failure"
 	OperationStatusRunning OperationStatus = "Running"
 	OperationStatusSuccess OperationStatus = "Success"
+)
+
+// Defines values for UnitAction.
+const (
+	UnitActionRestart UnitAction = "restart"
+	UnitActionStart   UnitAction = "start"
 )
 
 // Defines values for VirtualMachineStatus.
@@ -109,11 +117,19 @@ type Error struct {
 
 	// Reason A stable token for the cases a caller must tell apart by code rather
 	// than by prose. Absent when the sentence is the whole answer.
+	//
+	// `fence-regression` and `stale-observation` are the two 409s a PUT
+	// can return, and they call for opposite behaviour: one must not be
+	// retried, the other must be retried against a fresh export.
 	Reason *ErrorReason `json:"reason,omitempty"`
 }
 
 // ErrorReason A stable token for the cases a caller must tell apart by code rather
 // than by prose. Absent when the sentence is the whole answer.
+//
+// `fence-regression` and `stale-observation` are the two 409s a PUT
+// can return, and they call for opposite behaviour: one must not be
+// retried, the other must be retried against a fresh export.
 type ErrorReason string
 
 // Export defines model for Export.
@@ -208,6 +224,17 @@ type Host struct {
 	// StartedAt When this daemon process started. A restart is visible here.
 	StartedAt time.Time `json:"started_at"`
 
+	// Units The sibling units this Boat supervises, and what systemd says about
+	// each. Required, and an empty array is an answer rather than a
+	// silence: it means this host was asked and runs none of them.
+	//
+	// Only the units this host actually HAS appear. A supervised unit
+	// systemd reports as `not-found` is not a unit that is down, it is a
+	// service this host does not run, and listing it would flag every host
+	// in the fleet as permanently degraded — which is how a health field
+	// stops being read.
+	Units []UnitLiveness `json:"units"`
+
 	// VirtualMachineCount How many VMs this host currently observes.
 	VirtualMachineCount int `json:"virtual_machine_count"`
 }
@@ -258,10 +285,27 @@ type Operation struct {
 
 	// Output The operation's combined trace and output — the same text a Task row's
 	// stdout carries today, so the operator surface is unchanged.
-	Output    *string         `json:"output,omitempty"`
-	StartedAt time.Time       `json:"started_at"`
-	Status    OperationStatus `json:"status"`
-	Uuid      string          `json:"uuid"`
+	Output *string `json:"output,omitempty"`
+
+	// Result The verb's typed result: the same payload the SSH script's one
+	// `ATLAS_RESULT=` line carries, so a Task reads the same either way.
+	// Atlas folds it back onto the Task's stdout as that line
+	// (`boat_client.OPERATION_RESULT_FIELD`).
+	//
+	// `output` is the trace an operator reads; this is the handful of
+	// values a CALLER acts on. `sleep-vm` is the one verb with any today —
+	// `memory_snapshot`, plus `reason` when the snapshot was skipped and
+	// `memory_snapshot_bytes` when one was taken — and without it Atlas
+	// cannot learn whether a slept VM resumes from RAM or cold-boots, which
+	// is decided on the host and stated nowhere else.
+	//
+	// **Absent is not false.** A verb with no result omits the field, and
+	// so does one that failed, so a caller reading a value out of it is
+	// reading something the host actually reported.
+	Result    *map[string]interface{} `json:"result,omitempty"`
+	StartedAt time.Time               `json:"started_at"`
+	Status    OperationStatus         `json:"status"`
+	Uuid      string                  `json:"uuid"`
 
 	// Verb The verb that ran, in the host CLI's grammar (start-vm, stop-vm).
 	Verb string `json:"verb"`
@@ -345,11 +389,30 @@ type StopRequest struct {
 	StopTimeoutSeconds *int `json:"stop_timeout_seconds,omitempty"`
 }
 
+// UnitAction What Boat may ask of a sibling unit. Both converge it upward, and there
+// is no `stop`: see the operation's description for why the verb with
+// teeth is the one that is missing.
+type UnitAction string
+
+// UnitActionRequest defines model for UnitActionRequest.
+type UnitActionRequest struct {
+	// Action What Boat may ask of a sibling unit. Both converge it upward, and there
+	// is no `stop`: see the operation's description for why the verb with
+	// teeth is the one that is missing.
+	Action UnitAction `json:"action"`
+}
+
 // UnitLiveness defines model for UnitLiveness.
 type UnitLiveness struct {
+	// ActiveState systemd's ActiveState for the unit, verbatim. `active` is up.
 	ActiveState string `json:"active_state"`
 	Name        string `json:"name"`
-	SubState    string `json:"sub_state"`
+
+	// SubState systemd's SubState, verbatim, and the field that carries what
+	// ActiveState flattens away — a oneshot that ran and left is
+	// `active`/`exited`, a daemon that is up is `active`/`running`, and a
+	// unit systemd is waiting to retry is `activating`/`auto-restart`.
+	SubState string `json:"sub_state"`
 }
 
 // VirtualMachine defines model for VirtualMachine.
@@ -384,6 +447,12 @@ type VirtualMachine struct {
 // on-disk markers — never from a command's success.
 type VirtualMachineStatus string
 
+// ObservedEpochPrecondition defines model for ObservedEpochPrecondition.
+type ObservedEpochPrecondition = string
+
+// UnitName defines model for UnitName.
+type UnitName = string
+
 // VirtualMachineUuid defines model for VirtualMachineUuid.
 type VirtualMachineUuid = string
 
@@ -398,6 +467,33 @@ type OperationIdentifierConflict = Error
 
 // Unauthorized defines model for Unauthorized.
 type Unauthorized = Error
+
+// PutVirtualMachineParams defines parameters for PutVirtualMachine.
+type PutVirtualMachineParams struct {
+	// IfMatch The compare-and-set precondition of §11.2, and the whole of what makes
+	// the mirror safe to decide from. Its value is an `observed_epoch` read
+	// out of a `GET /export`, optionally wrapped in the quotes an HTTP entity
+	// tag carries (`42` and `"42"` are the same precondition).
+	//
+	// The token is whole-host and the COMPARISON is per-resource: Boat refuses
+	// the write if the record for the VM this request names has been written
+	// since that epoch, not if anything at all on the host has. The difference
+	// decides whether the mechanism is usable — a host running forty VMs bumps
+	// its epoch on every one of their observations, so a whole-host comparison
+	// against a mirror refreshed every five minutes would refuse every write,
+	// and a precondition that always fails is a precondition somebody turns
+	// off. It also refuses an epoch NEWER than any this host has issued, which
+	// is the caller quoting a snapshot of a different store — a Boat whose
+	// bbolt file was lost and restarted from zero.
+	//
+	// Omit it when re-asserting intent already known, which is what Atlas does
+	// before every verb: there is no decision to protect, and a precondition
+	// on a re-assert would make reconnect fail exactly when it matters.
+	IfMatch *ObservedEpochPrecondition `json:"If-Match,omitempty"`
+}
+
+// ActOnUnitJSONRequestBody defines body for ActOnUnit for application/json ContentType.
+type ActOnUnitJSONRequestBody = UnitActionRequest
 
 // PutVirtualMachineJSONRequestBody defines body for PutVirtualMachine for application/json ContentType.
 type PutVirtualMachineJSONRequestBody = DesiredVirtualMachine
@@ -443,15 +539,24 @@ type ServerInterface interface {
 	// One operation's journal record
 	// (GET /ops/{operation_id})
 	GetOperation(w http.ResponseWriter, r *http.Request, operationId string)
+	// One supervised unit's liveness
+	// (GET /units/{name})
+	GetUnit(w http.ResponseWriter, r *http.Request, name UnitName)
+	// Start or restart a supervised unit
+	// (POST /units/{name})
+	ActOnUnit(w http.ResponseWriter, r *http.Request, name UnitName)
 	// List every VM this host observes
 	// (GET /vms)
 	ListVirtualMachines(w http.ResponseWriter, r *http.Request)
+	// Retract this VM's desired state
+	// (DELETE /vms/{uuid})
+	DeleteVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
 	// Observed state of one VM
 	// (GET /vms/{uuid})
 	GetVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
 	// Assert this VM's desired state
 	// (PUT /vms/{uuid})
-	PutVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
+	PutVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid, params PutVirtualMachineParams)
 	// Pause a running guest
 	// (POST /vms/{uuid}/pause)
 	PauseVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
@@ -578,6 +683,68 @@ func (siw *ServerInterfaceWrapper) GetOperation(w http.ResponseWriter, r *http.R
 	handler.ServeHTTP(w, r)
 }
 
+// GetUnit operation middleware
+func (siw *ServerInterfaceWrapper) GetUnit(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "name" -------------
+	var name UnitName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetUnit(w, r, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ActOnUnit operation middleware
+func (siw *ServerInterfaceWrapper) ActOnUnit(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "name" -------------
+	var name UnitName
+
+	err = runtime.BindStyledParameterWithOptions("simple", "name", r.PathValue("name"), &name, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "name", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ActOnUnit(w, r, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListVirtualMachines operation middleware
 func (siw *ServerInterfaceWrapper) ListVirtualMachines(w http.ResponseWriter, r *http.Request) {
 
@@ -589,6 +756,37 @@ func (siw *ServerInterfaceWrapper) ListVirtualMachines(w http.ResponseWriter, r 
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ListVirtualMachines(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteVirtualMachine operation middleware
+func (siw *ServerInterfaceWrapper) DeleteVirtualMachine(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "uuid" -------------
+	var uuid VirtualMachineUuid
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uuid", r.PathValue("uuid"), &uuid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uuid", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteVirtualMachine(w, r, uuid)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -649,8 +847,32 @@ func (siw *ServerInterfaceWrapper) PutVirtualMachine(w http.ResponseWriter, r *h
 
 	r = r.WithContext(ctx)
 
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutVirtualMachineParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "If-Match" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("If-Match")]; found {
+		var IfMatch ObservedEpochPrecondition
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "If-Match", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "If-Match", valueList[0], &IfMatch, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "If-Match", Err: err})
+			return
+		}
+
+		params.IfMatch = &IfMatch
+
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.PutVirtualMachine(w, r, uuid)
+		siw.Handler.PutVirtualMachine(w, r, uuid, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1083,7 +1305,10 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("GET "+options.BaseURL+"/health", wrapper.GetHealth)
 	m.HandleFunc("GET "+options.BaseURL+"/host", wrapper.GetHost)
 	m.HandleFunc("GET "+options.BaseURL+"/ops/{operation_id}", wrapper.GetOperation)
+	m.HandleFunc("GET "+options.BaseURL+"/units/{name}", wrapper.GetUnit)
+	m.HandleFunc("POST "+options.BaseURL+"/units/{name}", wrapper.ActOnUnit)
 	m.HandleFunc("GET "+options.BaseURL+"/vms", wrapper.ListVirtualMachines)
+	m.HandleFunc("DELETE "+options.BaseURL+"/vms/{uuid}", wrapper.DeleteVirtualMachine)
 	m.HandleFunc("GET "+options.BaseURL+"/vms/{uuid}", wrapper.GetVirtualMachine)
 	m.HandleFunc("PUT "+options.BaseURL+"/vms/{uuid}", wrapper.PutVirtualMachine)
 	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/pause", wrapper.PauseVirtualMachine)
@@ -1209,6 +1434,86 @@ func (response GetOperation404JSONResponse) VisitGetOperationResponse(w http.Res
 	return json.NewEncoder(w).Encode(response)
 }
 
+type GetUnitRequestObject struct {
+	Name UnitName `json:"name"`
+}
+
+type GetUnitResponseObject interface {
+	VisitGetUnitResponse(w http.ResponseWriter) error
+}
+
+type GetUnit200JSONResponse UnitLiveness
+
+func (response GetUnit200JSONResponse) VisitGetUnitResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type GetUnit401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response GetUnit401JSONResponse) VisitGetUnitResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type GetUnit404JSONResponse Error
+
+func (response GetUnit404JSONResponse) VisitGetUnitResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ActOnUnitRequestObject struct {
+	Name UnitName `json:"name"`
+	Body *ActOnUnitJSONRequestBody
+}
+
+type ActOnUnitResponseObject interface {
+	VisitActOnUnitResponse(w http.ResponseWriter) error
+}
+
+type ActOnUnit200JSONResponse UnitLiveness
+
+func (response ActOnUnit200JSONResponse) VisitActOnUnitResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ActOnUnit400JSONResponse Error
+
+func (response ActOnUnit400JSONResponse) VisitActOnUnitResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ActOnUnit401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response ActOnUnit401JSONResponse) VisitActOnUnitResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ActOnUnit404JSONResponse Error
+
+func (response ActOnUnit404JSONResponse) VisitActOnUnitResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type ListVirtualMachinesRequestObject struct {
 }
 
@@ -1228,6 +1533,31 @@ func (response ListVirtualMachines200JSONResponse) VisitListVirtualMachinesRespo
 type ListVirtualMachines401JSONResponse struct{ UnauthorizedJSONResponse }
 
 func (response ListVirtualMachines401JSONResponse) VisitListVirtualMachinesResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type DeleteVirtualMachineRequestObject struct {
+	Uuid VirtualMachineUuid `json:"uuid"`
+}
+
+type DeleteVirtualMachineResponseObject interface {
+	VisitDeleteVirtualMachineResponse(w http.ResponseWriter) error
+}
+
+type DeleteVirtualMachine204Response struct {
+}
+
+func (response DeleteVirtualMachine204Response) VisitDeleteVirtualMachineResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteVirtualMachine401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response DeleteVirtualMachine401JSONResponse) VisitDeleteVirtualMachineResponse(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(401)
 
@@ -1270,8 +1600,9 @@ func (response GetVirtualMachine404JSONResponse) VisitGetVirtualMachineResponse(
 }
 
 type PutVirtualMachineRequestObject struct {
-	Uuid VirtualMachineUuid `json:"uuid"`
-	Body *PutVirtualMachineJSONRequestBody
+	Uuid   VirtualMachineUuid `json:"uuid"`
+	Params PutVirtualMachineParams
+	Body   *PutVirtualMachineJSONRequestBody
 }
 
 type PutVirtualMachineResponseObject interface {
@@ -1283,6 +1614,15 @@ type PutVirtualMachine200JSONResponse DesiredVirtualMachine
 func (response PutVirtualMachine200JSONResponse) VisitPutVirtualMachineResponse(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type PutVirtualMachine400JSONResponse Error
+
+func (response PutVirtualMachine400JSONResponse) VisitPutVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
 
 	return json.NewEncoder(w).Encode(response)
 }
@@ -1780,9 +2120,18 @@ type StrictServerInterface interface {
 	// One operation's journal record
 	// (GET /ops/{operation_id})
 	GetOperation(ctx context.Context, request GetOperationRequestObject) (GetOperationResponseObject, error)
+	// One supervised unit's liveness
+	// (GET /units/{name})
+	GetUnit(ctx context.Context, request GetUnitRequestObject) (GetUnitResponseObject, error)
+	// Start or restart a supervised unit
+	// (POST /units/{name})
+	ActOnUnit(ctx context.Context, request ActOnUnitRequestObject) (ActOnUnitResponseObject, error)
 	// List every VM this host observes
 	// (GET /vms)
 	ListVirtualMachines(ctx context.Context, request ListVirtualMachinesRequestObject) (ListVirtualMachinesResponseObject, error)
+	// Retract this VM's desired state
+	// (DELETE /vms/{uuid})
+	DeleteVirtualMachine(ctx context.Context, request DeleteVirtualMachineRequestObject) (DeleteVirtualMachineResponseObject, error)
 	// Observed state of one VM
 	// (GET /vms/{uuid})
 	GetVirtualMachine(ctx context.Context, request GetVirtualMachineRequestObject) (GetVirtualMachineResponseObject, error)
@@ -1948,6 +2297,65 @@ func (sh *strictHandler) GetOperation(w http.ResponseWriter, r *http.Request, op
 	}
 }
 
+// GetUnit operation middleware
+func (sh *strictHandler) GetUnit(w http.ResponseWriter, r *http.Request, name UnitName) {
+	var request GetUnitRequestObject
+
+	request.Name = name
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetUnit(ctx, request.(GetUnitRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetUnit")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetUnitResponseObject); ok {
+		if err := validResponse.VisitGetUnitResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ActOnUnit operation middleware
+func (sh *strictHandler) ActOnUnit(w http.ResponseWriter, r *http.Request, name UnitName) {
+	var request ActOnUnitRequestObject
+
+	request.Name = name
+
+	var body ActOnUnitJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ActOnUnit(ctx, request.(ActOnUnitRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ActOnUnit")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ActOnUnitResponseObject); ok {
+		if err := validResponse.VisitActOnUnitResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // ListVirtualMachines operation middleware
 func (sh *strictHandler) ListVirtualMachines(w http.ResponseWriter, r *http.Request) {
 	var request ListVirtualMachinesRequestObject
@@ -1965,6 +2373,32 @@ func (sh *strictHandler) ListVirtualMachines(w http.ResponseWriter, r *http.Requ
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(ListVirtualMachinesResponseObject); ok {
 		if err := validResponse.VisitListVirtualMachinesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteVirtualMachine operation middleware
+func (sh *strictHandler) DeleteVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid) {
+	var request DeleteVirtualMachineRequestObject
+
+	request.Uuid = uuid
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.DeleteVirtualMachine(ctx, request.(DeleteVirtualMachineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteVirtualMachine")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteVirtualMachineResponseObject); ok {
+		if err := validResponse.VisitDeleteVirtualMachineResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -1999,10 +2433,11 @@ func (sh *strictHandler) GetVirtualMachine(w http.ResponseWriter, r *http.Reques
 }
 
 // PutVirtualMachine operation middleware
-func (sh *strictHandler) PutVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid) {
+func (sh *strictHandler) PutVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid, params PutVirtualMachineParams) {
 	var request PutVirtualMachineRequestObject
 
 	request.Uuid = uuid
+	request.Params = params
 
 	var body PutVirtualMachineJSONRequestBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

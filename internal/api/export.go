@@ -30,5 +30,16 @@ func (server *Server) GetExport(ctx context.Context, request wire.GetExportReque
 	// the same place /health and /host answer from. Three endpoints disagreeing
 	// about which Boat is running is how a stuck upgrade hides.
 	export.Host.BoatVersion = version.Version
+	// Unit liveness is read here rather than taken from the store, for the reason
+	// the host facts are: it is a live fact about the machine, and a cached one is
+	// a claim about a service that may have died since. It fails the export when
+	// it cannot be read — the same posture as the facts above, and the right one,
+	// because an export missing its units reaches Atlas as a host whose pool and
+	// network plane are simply unmentioned.
+	liveness, err := server.units.Liveness(ctx, server.newRunner(io.Discard))
+	if err != nil {
+		return internalFault("This host's unit liveness could not be read.", err), nil
+	}
+	export.Units = liveness
 	return wire.GetExport200JSONResponse(exportToWire(export)), nil
 }

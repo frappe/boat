@@ -64,6 +64,57 @@ func TestPutDesiredReplacesTheEarlierAssertion(t *testing.T) {
 	}
 }
 
+// Retraction: the store's half of "Atlas can take an assertion back". The
+// reconciler acts only on VMs it holds a desired record for, so dropping the
+// record is what stops a sweep from starting a VM this host has just destroyed —
+// or one a migration has repointed to another host.
+func TestDeleteDesiredRetractsTheAssertionAndKeepsTheFence(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.PutDesired(desiredVirtualMachine("vm-a", model.PowerRunning)); err != nil {
+		t.Fatalf("assert: %v", err)
+	}
+	if err := store.SetFenceEpoch("vm-a", 7); err != nil {
+		t.Fatalf("set fence epoch: %v", err)
+	}
+
+	if err := store.DeleteDesired("vm-a"); err != nil {
+		t.Fatalf("retract: %v", err)
+	}
+
+	if _, found, err := store.GetDesired("vm-a"); found || err != nil {
+		t.Errorf("the assertion survived its retraction: found=%v err=%v", found, err)
+	}
+	records, err := store.ListDesired()
+	if err != nil || len(records) != 0 {
+		t.Errorf("the sweep would still see %d records: %v", len(records), err)
+	}
+	// The epoch is a tombstone on purpose. Without it this host holds NO epoch for
+	// the UUID, which is the state any fresh PUT satisfies — including a stale one
+	// from a partitioned Atlas, which is the boot the fence exists to refuse.
+	epoch, held, err := store.FenceEpoch("vm-a")
+	if err != nil || !held || epoch != 7 {
+		t.Errorf("fence epoch = %d held=%v err=%v, want the 7 it already held", epoch, held, err)
+	}
+}
+
+// Retracting what was never asserted is the same answer as retracting what was:
+// the caller's question is "hold nothing for this UUID".
+func TestDeleteDesiredIsIdempotent(t *testing.T) {
+	store := newTestStore(t)
+	if err := store.DeleteDesired("never-asserted"); err != nil {
+		t.Fatalf("retract an absent assertion: %v", err)
+	}
+	if err := store.PutDesired(desiredVirtualMachine("vm-a", model.PowerRunning)); err != nil {
+		t.Fatalf("assert: %v", err)
+	}
+	if err := store.DeleteDesired("vm-a"); err != nil {
+		t.Fatalf("first retract: %v", err)
+	}
+	if err := store.DeleteDesired("vm-a"); err != nil {
+		t.Fatalf("second retract: %v", err)
+	}
+}
+
 func TestGetDesiredAbsentIsNotAnError(t *testing.T) {
 	store := newTestStore(t)
 	record, found, err := store.GetDesired("never-asserted")

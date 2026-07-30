@@ -33,11 +33,17 @@ const (
 // The six enumerations, as they render.
 const (
 	listDirectories = "sudo ls -1 /var/lib/atlas/virtual-machines"
-	// The two presence probes that decide whether an optional enumeration is
-	// asked at all. They are the difference between "not bootstrapped" and
-	// "could not read", which is the distinction the scan got wrong.
+	// The two ways an optional enumeration proves its subject is there before it
+	// is read. They are the difference between "not bootstrapped" and "could not
+	// read", which is the distinction the scan got wrong.
+	//
+	// One is a probe and one is a listing, and which is which is not a style
+	// choice: `test -d` is silent when its answer is no, so a complaint on stderr
+	// can only be a denial; `vgs atlas` explains its no on stderr, so nothing
+	// tells its ordinary bare-host answer apart from a denied sudo. Only the
+	// first kind can be asked as a question.
 	probeDirectory   = "sudo test -d /var/lib/atlas/virtual-machines"
-	probeVolumeGroup = "sudo vgs --noheadings -o vg_name atlas"
+	listVolumeGroups = "sudo vgs --noheadings -o vg_name"
 	listUnits        = "systemctl list-units firecracker-vm@* --all --no-legend --plain"
 	listNamespaces   = "ip netns list"
 	listLinks        = "ip -o link show"
@@ -45,6 +51,11 @@ const (
 	listVolumes      = "sudo lvs --noheadings --nosuffix --units b --separator , " +
 		"-o lv_name,lv_size,pool_lv,origin atlas"
 )
+
+// linksIn is the per-VM namespace listing, and it is a listing for the same
+// reason the volume groups are: `ip link show <missing device>` complains on
+// stderr and exits 1, exactly as a denied sudo does.
+func linksIn(namespace string) string { return "sudo ip -n " + namespace + " -o link show" }
 
 // The on-host layout, spelled out the way an operator sees it in a Task log.
 func directoryOf(uuid string) string { return "/var/lib/atlas/virtual-machines/" + uuid }
@@ -94,8 +105,14 @@ type fakeHost struct {
 	proxies     []string
 	volumes     []string
 	present     map[string]bool
-	outputs     map[string]string
-	failing     map[string]bool
+	// denied is a probe the host would not let us make: the state every already
+	// bootstrapped host is in until its sudoers file is re-installed. It is a
+	// THIRD state and not the absence of `present`, because a fake that answered
+	// a denied probe the way it answers an absent artifact is a fake that cannot
+	// fail the way this package kept failing.
+	denied  map[string]bool
+	outputs map[string]string
+	failing map[string]bool
 	// unstartable is a command that cannot be run at all — a missing binary —
 	// as opposed to one that runs and exits non-zero.
 	unstartable map[string]bool
@@ -122,8 +139,9 @@ func newFakeHost() *fakeHost {
 		// the scan asks for them. The bare-host scenario clears these, which is
 		// the only way an optional enumeration is skipped now — a FAILED read is
 		// a failed scan, not an empty answer.
-		present:      map[string]bool{probeDirectory: true, probeVolumeGroup: true},
-		outputs:      map[string]string{},
+		present:      map[string]bool{probeDirectory: true},
+		denied:       map[string]bool{},
+		outputs:      map[string]string{listVolumeGroups: "  atlas\n"},
 		failing:      map[string]bool{},
 		unstartable:  map[string]bool{},
 		statuses:     map[string]model.VirtualMachineStatus{},
@@ -144,7 +162,9 @@ func (host *fakeHost) withRunning(uuid string) *fakeHost {
 		fmt.Sprintf("5: %s@if4: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500", network.hostVeth))
 	host.proxies = append(host.proxies, network.address+" dev eth0 proxy")
 	host.firecracker[uuid] = true
-	host.present["sudo ip -n "+network.namespace+" -o link show "+network.tap] = true
+	host.outputs[linksIn(network.namespace)] = fmt.Sprintf(
+		"1: lo: <LOOPBACK,UP> mtu 65536\n2: %s: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500\n", network.tap,
+	)
 	host.statuses[uuid] = model.StatusRunning
 	return host
 }
@@ -174,7 +194,7 @@ func (host *fakeHost) withSleeping(uuid string) *fakeHost {
 func (host *fakeHost) scan(t *testing.T) (Result, error) {
 	t.Helper()
 	host.commands = &fakeCommands{
-		outputs: host.outputs, present: host.present, failing: host.failing,
+		outputs: host.outputs, present: host.present, denied: host.denied, failing: host.failing,
 		unstartable: host.unstartable,
 	}
 	host.commands.outputs[listDirectories] = strings.Join(host.directories, "\n")
@@ -217,6 +237,7 @@ func (host *fakeHost) liveness(
 type fakeCommands struct {
 	outputs     map[string]string
 	present     map[string]bool
+	denied      map[string]bool
 	failing     map[string]bool
 	unstartable map[string]bool
 	issued      []string
@@ -248,12 +269,25 @@ func (fake *fakeCommands) RunUnchecked(
 	return fake.outputs[command], nil
 }
 
-// OK defaults to false: an artifact exists in a scenario only because the
-// scenario said so, so a probe nobody scripted reads as absent.
-func (fake *fakeCommands) OK(_ context.Context, template string, parameters ...any) bool {
+// Probe answers in three values, like the real one. `denied` outranks `present`
+// so that a scenario can say "the artifact IS there and we still could not look",
+// which is the shape of the whole bug: a host full of VMs whose probe rule is
+// missing must not scan the way an empty host does.
+//
+// Absent by default: an artifact exists in a scenario only because the scenario
+// said so.
+func (fake *fakeCommands) Probe(
+	_ context.Context, template string, parameters ...any,
+) (run.Answer, error) {
 	command := render(template, parameters...)
 	fake.record(command)
-	return fake.present[command]
+	switch {
+	case fake.denied[command]:
+		return run.Unknown, errCommandFailed
+	case fake.present[command]:
+		return run.Yes, nil
+	}
+	return run.No, nil
 }
 
 // render substitutes each {} with its parameter the way run.Render does, minus

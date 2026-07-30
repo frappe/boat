@@ -29,6 +29,7 @@ type sleepCommandSet struct {
 	memorySize        string
 	removeSleeping    string
 	memorySnapshotSet string
+	sleepingMarkerSet string
 }
 
 func sleepCommands() sleepCommandSet {
@@ -54,6 +55,7 @@ func sleepCommands() sleepCommandSet {
 		memorySize:        "sudo stat -c %s " + files.memorySnapshotMemory,
 		removeSleeping:    "sudo rm -f " + files.sleepingMarker,
 		memorySnapshotSet: "sudo test -f " + files.memorySnapshotMarker,
+		sleepingMarkerSet: "sudo test -f " + files.sleepingMarker,
 	}
 }
 
@@ -63,6 +65,13 @@ func aHostWithRoom(fake *fakeCommands, commands sleepCommandSet) {
 	fake.output(commands.guestMemory, "1024\n")
 	fake.output(commands.freeSpace, "Avail\n8000000000\n")
 	fake.output(commands.memorySize, "1073741824\n")
+}
+
+// anAwakeVirtualMachine says this VM is not already asleep. It is spelled out in
+// every scenario rather than left to the fake's default, because the first thing
+// Sleep asks is exactly this question and the two answers take different paths.
+func anAwakeVirtualMachine(fake *fakeCommands, commands sleepCommandSet) {
+	fake.reply(commands.sleepingMarkerSet, false)
 }
 
 // The precondition the whole verb hangs on. A VM that sleeps with nothing
@@ -100,8 +109,10 @@ func TestSleepRefusesWhenTheWakeTrapIsNotRunning(t *testing.T) {
 // refused every correct sleep. A gate that reaches systemd for this answer is the
 // bug, whatever unit it names.
 func TestSleepDoesNotAskSystemdAboutAWakeTrapUnit(t *testing.T) {
+	commands := sleepCommands()
 	fake := newFakeCommands()
-	aHostWithRoom(fake, sleepCommands())
+	anAwakeVirtualMachine(fake, commands)
+	aHostWithRoom(fake, commands)
 
 	if _, err := newTestManager(fake).Sleep(
 		context.Background(), nil, testUUID, SleepRequest{FirecrackerUID: testFirecrackerUID},
@@ -118,6 +129,7 @@ func TestSleepDoesNotAskSystemdAboutAWakeTrapUnit(t *testing.T) {
 func TestSleepCapturesAMemorySnapshotThenStopsAndMarks(t *testing.T) {
 	commands := sleepCommands()
 	fake := newFakeCommands()
+	anAwakeVirtualMachine(fake, commands)
 	aHostWithRoom(fake, commands)
 
 	result, err := newTestManager(fake).Sleep(
@@ -131,6 +143,7 @@ func TestSleepCapturesAMemorySnapshotThenStopsAndMarks(t *testing.T) {
 		t.Errorf("result = %+v, want a 1 GiB memory snapshot", result)
 	}
 	assertTrace(t, fake,
+		"? "+commands.sleepingMarkerSet,
 		"? "+commands.launcher,
 		"? "+commands.socket,
 		commands.dropSnapshot,
@@ -145,9 +158,43 @@ func TestSleepCapturesAMemorySnapshotThenStopsAndMarks(t *testing.T) {
 		commands.writeMarker,
 		commands.stop,
 		commands.markSleeping,
-		commands.memorySize,
 		commands.park,
+		commands.memorySize,
 	)
+}
+
+// The ordering defect this test exists to keep fixed. The size of the memory
+// file is a MEASUREMENT — it is what the sleep freed — and measuring it before
+// arming the trap put a fallible step between the VM losing its networking and
+// getting the one thing that can bring it back. A stat that failed, or a number
+// that would not parse, returned with the VM stopped, marked sleeping and
+// unparked: no counter, no rule, no route, no proxy-NDP, and a marker that keeps
+// its unit from coming back at the next reboot. scripts/sleep-vm.py parks first
+// for this reason.
+func TestSleepArmsTheWakeTrapBeforeItMeasuresTheMemoryFile(t *testing.T) {
+	commands := sleepCommands()
+	fake := newFakeCommands()
+	anAwakeVirtualMachine(fake, commands)
+	aHostWithRoom(fake, commands)
+	// The measurement fails, which must not cost the VM its way back.
+	fake.reply(commands.memorySize, false)
+
+	result, err := newTestManager(fake).Sleep(
+		context.Background(), nil, testUUID, SleepRequest{FirecrackerUID: testFirecrackerUID},
+	)
+
+	if err == nil {
+		t.Fatal("Sleep hid a measurement it could not make")
+	}
+	if !result.MemorySnapshot {
+		t.Error("the snapshot that WAS taken went unreported because its size could not be read")
+	}
+	if countTrace(fake, commands.park) != 1 {
+		t.Fatalf("the VM was left stopped and untrapped:\n  %s", strings.Join(fake.trace, "\n  "))
+	}
+	if indexOfTrace(t, fake, commands.park) > indexOfTrace(t, fake, commands.memorySize) {
+		t.Error("the wake trap was armed after the measurement, so a failed stat strands the VM")
+	}
 }
 
 // The sleeping marker is what suppresses the unit's auto-start after a host
@@ -157,6 +204,7 @@ func TestSleepCapturesAMemorySnapshotThenStopsAndMarks(t *testing.T) {
 func TestSleepStillMarksSleepingWhenTheLauncherPredatesSnapshots(t *testing.T) {
 	commands := sleepCommands()
 	fake := newFakeCommands()
+	anAwakeVirtualMachine(fake, commands)
 	fake.reply(commands.launcher, false)
 
 	result, err := newTestManager(fake).Sleep(
@@ -170,6 +218,7 @@ func TestSleepStillMarksSleepingWhenTheLauncherPredatesSnapshots(t *testing.T) {
 		t.Errorf("result = %+v, want a plain sleep naming the fix", result)
 	}
 	assertTrace(t, fake,
+		"? "+commands.sleepingMarkerSet,
 		"? "+commands.launcher,
 		commands.removeMarker,
 		commands.stop,
@@ -181,6 +230,7 @@ func TestSleepStillMarksSleepingWhenTheLauncherPredatesSnapshots(t *testing.T) {
 func TestSleepFallsBackWhenTheHostIsShortOfSpace(t *testing.T) {
 	commands := sleepCommands()
 	fake := newFakeCommands()
+	anAwakeVirtualMachine(fake, commands)
 	aHostWithRoom(fake, commands)
 	// A 1 GiB guest needs its RAM plus the margin; 64 MB is not that.
 	fake.output(commands.freeSpace, "Avail\n64000000\n")
@@ -196,6 +246,7 @@ func TestSleepFallsBackWhenTheHostIsShortOfSpace(t *testing.T) {
 		t.Errorf("result = %+v, want a plain sleep with the space reason", result)
 	}
 	assertTrace(t, fake,
+		"? "+commands.sleepingMarkerSet,
 		"? "+commands.launcher,
 		"? "+commands.socket,
 		commands.dropSnapshot,
@@ -213,6 +264,7 @@ func TestSleepFallsBackWhenTheHostIsShortOfSpace(t *testing.T) {
 func TestSleepFallsBackWhenTheMemoryFileIsEmpty(t *testing.T) {
 	commands := sleepCommands()
 	fake := newFakeCommands()
+	anAwakeVirtualMachine(fake, commands)
 	aHostWithRoom(fake, commands)
 	fake.reply(commands.memoryPresent, false)
 
@@ -230,6 +282,7 @@ func TestSleepFallsBackWhenTheMemoryFileIsEmpty(t *testing.T) {
 		t.Error("wrote the READY marker over an incomplete snapshot")
 	}
 	assertTrace(t, fake,
+		"? "+commands.sleepingMarkerSet,
 		"? "+commands.launcher,
 		"? "+commands.socket,
 		commands.dropSnapshot,
@@ -246,6 +299,107 @@ func TestSleepFallsBackWhenTheMemoryFileIsEmpty(t *testing.T) {
 		commands.markSleeping,
 		commands.park,
 	)
+}
+
+// A replay must not destroy the snapshot it is replaying over. The fresh-sleep
+// path drops the snapshot directory before it rewrites it, guarded on a `test
+// -S` against a socket INODE that outlives the Firecracker that bound it — so a
+// second sleep could pass that guard, delete a perfectly good memory image, fail
+// to talk to the dead socket, and report Success. The VM cold-boots on its next
+// wake with a green Task beside it.
+func TestSleepingAnAlreadySleepingVirtualMachineKeepsItsMemorySnapshot(t *testing.T) {
+	commands := sleepCommands()
+	fake := newFakeCommands()
+	fake.reply(commands.sleepingMarkerSet, true)
+	fake.reply(commands.memorySnapshotSet, true)
+	aHostWithRoom(fake, commands)
+
+	result, err := newTestManager(fake).Sleep(
+		context.Background(), nil, testUUID, SleepRequest{FirecrackerUID: testFirecrackerUID},
+	)
+
+	if err != nil {
+		t.Fatalf("Sleep replayed on a sleeping VM: %v", err)
+	}
+	if !result.MemorySnapshot || result.MemorySnapshotBytes != 1073741824 {
+		t.Errorf("result = %+v, want the snapshot the host already holds", result)
+	}
+	assertNotIssued(t, fake, commands.dropSnapshot)
+	assertNotIssued(t, fake, commands.removeMarker)
+	// Nothing is re-taken either: the guest is not there to be paused.
+	assertNotIssued(t, fake, commands.pause)
+	assertNotIssued(t, fake, commands.create)
+}
+
+// The case §11.5's crash recovery is built on. A daemon that died between
+// writing the marker and arming the trap leaves a VM that is asleep and
+// unreachable — the state parkForWake calls fatal — and the designed recovery is
+// that Atlas retries the operation, which replays this verb. So the replay
+// re-asserts all three: an inactive unit is stopped again for nothing, the marker
+// is touched again for nothing, and the trap that was missing is armed.
+func TestSleepingAnAlreadySleepingVirtualMachineReArmsTheWakeTrap(t *testing.T) {
+	commands := sleepCommands()
+	fake := newFakeCommands()
+	fake.reply(commands.sleepingMarkerSet, true)
+	fake.reply(commands.memorySnapshotSet, true)
+	aHostWithRoom(fake, commands)
+
+	if _, err := newTestManager(fake).Sleep(
+		context.Background(), nil, testUUID, SleepRequest{FirecrackerUID: testFirecrackerUID},
+	); err != nil {
+		t.Fatalf("Sleep replayed on a sleeping VM: %v", err)
+	}
+	assertTrace(t, fake,
+		"? "+commands.sleepingMarkerSet,
+		commands.stop,
+		commands.markSleeping,
+		commands.park,
+		"? "+commands.memorySnapshotSet,
+		commands.memorySize,
+	)
+}
+
+// A VM that slept without a snapshot is replayed without acquiring one: the
+// guest whose RAM would be captured is not running. The reason says so, because
+// the reason is the only record of why the next wake will be a cold boot.
+func TestSleepingAnAlreadySleepingVirtualMachineReportsAColdWake(t *testing.T) {
+	commands := sleepCommands()
+	fake := newFakeCommands()
+	fake.reply(commands.sleepingMarkerSet, true)
+	fake.reply(commands.memorySnapshotSet, false)
+
+	result, err := newTestManager(fake).Sleep(
+		context.Background(), nil, testUUID, SleepRequest{FirecrackerUID: testFirecrackerUID},
+	)
+
+	if err != nil {
+		t.Fatalf("Sleep replayed on a sleeping VM: %v", err)
+	}
+	if result.MemorySnapshot || !strings.Contains(result.Reason, "cold boot") {
+		t.Errorf("result = %+v, want a sleep reporting that the next wake is cold", result)
+	}
+	assertNotIssued(t, fake, commands.memorySize)
+}
+
+// A replay whose park fails is still a failure. The VM is asleep and untrapped
+// either way, and reporting Success would close the one operation that could
+// still fix it.
+func TestSleepingAnAlreadySleepingVirtualMachineReportsATrapItCouldNotArm(t *testing.T) {
+	commands := sleepCommands()
+	fake := newFakeCommands()
+	fake.reply(commands.sleepingMarkerSet, true)
+	fake.parkError = errors.New("nft is not answering")
+
+	_, err := newTestManager(fake).Sleep(
+		context.Background(), nil, testUUID, SleepRequest{FirecrackerUID: testFirecrackerUID},
+	)
+
+	if err == nil {
+		t.Fatal("a replayed sleep that could not arm the wake trap reported success")
+	}
+	if !strings.Contains(err.Error(), "parked for wake") {
+		t.Errorf("got %q, want an error naming the unparked state", err)
+	}
 }
 
 // The marker comes off BEFORE the start: the unit's ConditionPathExists=! condition sees
@@ -301,6 +455,7 @@ func TestWakeReportsAStartItCouldNotMake(t *testing.T) {
 func TestSleepFailsWhenTheWakeTrapCannotBeArmed(t *testing.T) {
 	fake := newFakeCommands()
 	commands := sleepCommands()
+	anAwakeVirtualMachine(fake, commands)
 	aHostWithRoom(fake, commands)
 	fake.parkError = errors.New("nft is not answering")
 
@@ -311,5 +466,13 @@ func TestSleepFailsWhenTheWakeTrapCannotBeArmed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "parked for wake") {
 		t.Errorf("got %q, want an error naming the unparked state", err)
+	}
+}
+
+// assertNotIssued fails when a command ran that this scenario says must not.
+func assertNotIssued(t *testing.T, fake *fakeCommands, command string) {
+	t.Helper()
+	if countTrace(fake, command) != 0 {
+		t.Errorf("ran %q, want it not to:\n  %s", command, strings.Join(fake.trace, "\n  "))
 	}
 }

@@ -64,7 +64,10 @@ import (
 type commands interface {
 	Run(ctx context.Context, template string, parameters ...any) (string, error)
 	RunUnchecked(ctx context.Context, template string, parameters ...any) (string, error)
-	OK(ctx context.Context, template string, parameters ...any) bool
+	// Probe and not OK, throughout. Every question this package asks the host is
+	// one whose answer is REPORTED — as an adopted VM, as a quarantine, or as an
+	// inventory — and a bool has no room for "I could not look". See run.Probe.
+	Probe(ctx context.Context, template string, parameters ...any) (run.Answer, error)
 }
 
 var _ commands = (*run.Runner)(nil)

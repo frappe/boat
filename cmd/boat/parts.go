@@ -15,6 +15,7 @@ import (
 	"github.com/frappe/boat/internal/reconcile"
 	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/store"
+	"github.com/frappe/boat/internal/units"
 	"github.com/frappe/boat/internal/vm"
 	"github.com/frappe/boat/internal/watch"
 )
@@ -39,6 +40,7 @@ type daemonParts struct {
 	machines   *vm.Manager
 	reconciler *reconcile.Reconciler
 	trap       *park.Trap
+	units      *units.Supervisor
 	scanner    hostScanner
 	api        *api.Server
 	// runner is the daemon's own runner, and it traces to stderr. systemd puts
@@ -77,6 +79,7 @@ func assemble(database *store.Store) *daemonParts {
 		scanner:  adopt.NewScanner(),
 		runner:   run.NewRunner(os.Stderr),
 	}
+	parts.units = units.NewSupervisor()
 	parts.reconciler = reconcile.New(database, parts.machines, decisions)
 	parts.trap = park.NewTrap(parts.runner, parts.wake)
 	// The boot sweep re-parks through the reconciler, so it takes each VM's turn
@@ -113,6 +116,7 @@ func (parts *daemonParts) dependencies() api.Dependencies {
 		Decisions:       parts.journal,
 		Reconciler:      parts.reconciler,
 		Watch:           watch.NewHub(),
+		Units:           parts.units,
 		StartedAt:       time.Now().UTC(),
 	}
 }

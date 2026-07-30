@@ -245,6 +245,7 @@ func reportOperation(operation wire.Operation, output io.Writer, errorOutput io.
 	if operation.Output != nil {
 		fmt.Fprint(output, *operation.Output)
 	}
+	reportResult(operation, output)
 	if operation.Status != wire.OperationStatusFailure {
 		return exitSuccess
 	}
@@ -252,6 +253,21 @@ func reportOperation(operation wire.Operation, output io.Writer, errorOutput io.
 		fmt.Fprintln(errorOutput, *operation.Error)
 	}
 	return exitFailure
+}
+
+// reportResult prints the verb's typed result under the trace, because it is the
+// one thing a verb decided that the trace does not spell out: an operator running
+// `boat vm sleep` from a shell would otherwise not learn whether the guest's RAM
+// was captured or the VM merely stopped. Verbs with no result print nothing.
+func reportResult(operation wire.Operation, output io.Writer) {
+	if operation.Result == nil {
+		return
+	}
+	// Re-encoding what arrived as JSON cannot fail, and a result that somehow
+	// would not encode is not worth failing an operation that already succeeded.
+	if encoded, err := json.Marshal(*operation.Result); err == nil {
+		fmt.Fprintf(output, "result %s\n", encoded)
+	}
 }
 
 // announce prints the name this run is journalled under before the run starts,

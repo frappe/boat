@@ -179,18 +179,18 @@ func TestIsUUID(t *testing.T) {
 // that drifts reads back as a host that suddenly holds nothing.
 func TestTakeInventoryRunsTheSixEnumerations(t *testing.T) {
 	fake := &fakeCommands{
-		outputs: map[string]string{}, failing: map[string]bool{},
-		present: map[string]bool{probeDirectory: true, probeVolumeGroup: true},
+		outputs: map[string]string{listVolumeGroups: "  atlas\n"}, failing: map[string]bool{},
+		present: map[string]bool{probeDirectory: true}, denied: map[string]bool{},
 	}
 
 	if _, err := takeInventory(t.Context(), fake); err != nil {
 		t.Fatalf("takeInventory: %v", err)
 	}
 	// The two optional subjects are proven present before they are read, so the
-	// probe and its read are one enumeration and both belong in this list.
+	// proof and its read are one enumeration and both belong in this list.
 	expected := []string{
 		probeDirectory, listDirectories, listUnits, listNamespaces, listLinks, listProxies,
-		probeVolumeGroup, listVolumes,
+		listVolumeGroups, listVolumes,
 	}
 	if !slices.Equal(fake.issued, expected) {
 		t.Errorf("enumerations:\ngot:\n  %s\nwant:\n  %s",
@@ -202,8 +202,8 @@ func TestTakeInventoryRunsTheSixEnumerations(t *testing.T) {
 // discarded whole, so asking the host more questions buys nothing.
 func TestTakeInventoryStopsAtTheFirstFailure(t *testing.T) {
 	fake := &fakeCommands{
-		outputs: map[string]string{},
-		present: map[string]bool{probeDirectory: true, probeVolumeGroup: true},
+		outputs: map[string]string{listVolumeGroups: "  atlas\n"},
+		present: map[string]bool{probeDirectory: true}, denied: map[string]bool{},
 		failing: map[string]bool{listUnits: true},
 	}
 
@@ -227,7 +227,7 @@ func TestAHostWithNoAtlasDirectoryScansCleanAndEmpty(t *testing.T) {
 	host := newFakeHost()
 	host.directories = nil
 	host.present[probeDirectory] = false
-	host.present[probeVolumeGroup] = false
+	host.outputs[listVolumeGroups] = ""
 	// Proven absent, and then never read. `failing` here is the assertion: if
 	// the scan asked anyway, the read would fail and the scan would fail with
 	// it. Absence is established by the probe, never inferred from a non-zero
@@ -243,5 +243,76 @@ func TestAHostWithNoAtlasDirectoryScansCleanAndEmpty(t *testing.T) {
 	}
 	if len(result.VirtualMachines) != 0 || len(result.Quarantined) != 0 {
 		t.Errorf("a bare host reported something: %+v", result)
+	}
+}
+
+// The bug that shipped four fixes and survived all of them, stated as a test.
+//
+// A host FULL of VMs whose probe rule is missing from /etc/sudoers.d/boat — the
+// state every already-bootstrapped host is in until that file is re-installed —
+// must not scan the way the bare host above does. The probe answers exit 1, the
+// same code as a true no, and the only thing separating them is the `sudo: a
+// password is required` on stderr. Read as a no, this host adopts ZERO of its
+// VMs and reports that to Atlas as fact.
+//
+// The scan fails instead, which is the whole doctrine of this package applied to
+// its own first command: a partial scan is a lie, and "this host holds nothing"
+// is the most dangerous lie it can tell.
+func TestAProbeThatWasDeniedFailsTheScanRatherThanEmptyingTheHost(t *testing.T) {
+	host := newFakeHost().withRunning(firstUUID).withRunning(secondUUID)
+	host.denied[probeDirectory] = true
+
+	result, err := host.scan(t)
+
+	if err == nil {
+		t.Fatalf("a denied probe scanned clean and reported %d VMs", len(result.VirtualMachines))
+	}
+	if len(result.VirtualMachines) != 0 || len(result.Quarantined) != 0 {
+		t.Errorf("a failed scan still reported something: %+v", result)
+	}
+}
+
+// The same distinction one probe further in. A denied jail probe used to read as
+// a jail tree that is not there, which is a half-removed VM, which quarantines —
+// so one missing allow-list line would have hidden every VM on the host behind a
+// quarantine record blaming the host.
+func TestADeniedJailProbeFailsTheScanRatherThanQuarantiningTheVirtualMachine(t *testing.T) {
+	host := newFakeHost().withRunning(firstUUID)
+	host.denied["sudo test -d "+jailRootOf(firstUUID)] = true
+
+	result, err := host.scan(t)
+
+	if err == nil {
+		t.Fatalf("a denied jail probe scanned clean: %+v", result)
+	}
+}
+
+// And the one read that happens inside a VM's namespace. A tap that cannot be
+// listed is not a tap that is gone: an active unit with no tap is a
+// contradiction, and quarantining a healthy VM over a fault of ours hides it
+// from the controller that could act on it.
+func TestATapListingThatFailsFailsTheScanRatherThanQuarantiningTheVirtualMachine(t *testing.T) {
+	host := newFakeHost().withRunning(firstUUID)
+	host.failing[linksIn(networkingOf[firstUUID].namespace)] = true
+
+	result, err := host.scan(t)
+
+	if err == nil {
+		t.Fatalf("an unreadable namespace scanned clean: %+v", result)
+	}
+}
+
+// The volume group is proven by a listing rather than by `vgs atlas`, because
+// that command explains its negative on stderr and exits 5 — indistinguishable
+// from a denial by the rule that works for `test`. So a bare host is a listing
+// that does not name `atlas`, and a listing that FAILS is a failed scan: an
+// empty volume inventory would make every VM on the host a directory with no
+// disk, which is a contradiction and quarantines.
+func TestAVolumeGroupListingThatFailsFailsTheScan(t *testing.T) {
+	host := newFakeHost().withRunning(firstUUID)
+	host.failing[listVolumeGroups] = true
+
+	if _, err := host.scan(t); err == nil {
+		t.Fatal("an unreadable volume group listing scanned clean")
 	}
 }

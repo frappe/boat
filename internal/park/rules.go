@@ -7,10 +7,40 @@ package park
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"github.com/frappe/boat/internal/run"
 )
+
+// canonicalAddress parses address and returns its canonical text, or false when
+// it is not an ordinary IPv6 address.
+//
+// This is the wake trap's first line of defence, the one the sudoers file
+// (BOAT_WAKE_TRAP) has been waiting on. The address is a VM's /128 read out of
+// its network.env and is spliced into `nft add rule` and `ip -6 route`. nft
+// re-lexes its whole argument vector and reads `;` as a statement separator and
+// `#` as a comment-to-end-of-line, so an address carrying either injects into
+// the ruleset even after run.Quote has made it one shell token — the shell is
+// not the parser that matters here, nft is.
+//
+// Parsing beats a regex, and the difference is the point rather than a
+// preference: a pattern enumerates the bytes we thought to forbid, while
+// netip.ParseAddr admits only what is actually an address and .String() re-emits
+// it in one canonical form. The value handed to nft is then, by construction,
+// nothing but lowercase hex and colons — no space, no `;`, no `#` — because that
+// is the whole of what a canonical IPv6 is. A malformed address cannot render.
+//
+// IPv4, IPv4-in-IPv6 and zoned addresses are refused: a parked VM's address is a
+// public /128, none of those three is one, and admitting them would widen what
+// "an address" means for no caller that needs it.
+func canonicalAddress(address string) (string, bool) {
+	parsed, err := netip.ParseAddr(address)
+	if err != nil || !parsed.Is6() || parsed.Is4In6() || parsed.Zone() != "" {
+		return "", false
+	}
+	return parsed.String(), true
+}
 
 // counterPrefix marks the named counters that are ours. It ends in `_` because
 // nft identifiers may not contain `-`, which also rules out spelling the UUID

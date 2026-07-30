@@ -32,12 +32,26 @@ func postBody(handler http.Handler, path string, body string) *httptest.Response
 
 func putJSON(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
+	return putJSONMatching(t, handler, path, body, "")
+}
+
+// putJSONMatching sends the CAS precondition of §11.2 as a real header, because
+// that is where it lives: a test that handed the epoch to a handler directly
+// would prove nothing about whether the generated router binds it.
+func putJSONMatching(
+	t *testing.T, handler http.Handler, path string, body any, ifMatch string,
+) *httptest.ResponseRecorder {
+	t.Helper()
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		t.Fatalf("could not encode the request body: %v", err)
 	}
+	request := httptest.NewRequest(http.MethodPut, path, strings.NewReader(string(encoded)))
+	if ifMatch != "" {
+		request.Header.Set("If-Match", ifMatch)
+	}
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, path, strings.NewReader(string(encoded))))
+	handler.ServeHTTP(recorder, request)
 	return recorder
 }
 

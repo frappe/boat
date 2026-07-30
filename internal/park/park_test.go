@@ -18,6 +18,23 @@ func TestParkWithNoAddressTouchesNothing(t *testing.T) {
 	assertTrace(t, fake)
 }
 
+// An address that is not a canonical IPv6 is refused before the first host
+// command: the sudoers rule line carries `daddr *`, so park validating here is
+// what actually stops the nft injection the reviewer proved against it.
+func TestParkRefusesAnAddressThatIsNotAnIPv6(t *testing.T) {
+	fake := newFakeCommands().withScaffold()
+
+	err := newTestParker(fake).park(
+		context.Background(), testUUID, "fd00::1 drop; add counter inet atlas INJECTED_PWNED; #",
+	)
+	if err == nil {
+		t.Fatal("park accepted an address carrying an nft injection")
+	}
+	// Nothing rendered: the refusal is before ensureDevice, so a malformed address
+	// never becomes a command at all.
+	assertTrace(t, fake)
+}
+
 func TestParkInstallsReachabilityThenTheTrap(t *testing.T) {
 	fake := newFakeCommands().withScaffold()
 
@@ -215,4 +232,88 @@ func TestUnparkReportsACommandThatCouldNotRunAtAll(t *testing.T) {
 		t.Fatalf("unpark = %v, want the failure reported", err)
 	}
 	assertNotIssued(t, fake, "delete counter")
+}
+
+// A terminate has no ExecStopPost coming — the unit is already inactive, and
+// `systemctl disable --now` does not re-run one — so this is the last moment
+// this host can stop answering NDP for the /128. Left behind, the upstream
+// router goes on delivering that address here, and the day Atlas re-allocates it
+// to a VM on another host, two hosts answer for one address.
+func TestRetireTakesTheProxyNeighbourEntryThatUnparkLeaves(t *testing.T) {
+	fake := newFakeCommands().withScaffold()
+
+	if err := newTestParker(fake).retire(context.Background(), testUUID, testAddress); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	assertTrace(t, fake,
+		"- "+listHandles,
+		"- "+deleteCounter,
+		"- "+routeDelete,
+		"- "+defaultRoute,
+		"- sudo ip -6 neigh del proxy "+testAddress+" dev eth0",
+	)
+}
+
+// A VM whose sidecar an earlier attempt already took still has a rule and a
+// counter on this host: both are named after the UUID rather than the address, so
+// both still go. Only the two that need an address to name are skipped.
+func TestRetireWithNoAddressStillRemovesTheTrap(t *testing.T) {
+	fake := newFakeCommands().withScaffold()
+
+	if err := newTestParker(fake).retire(context.Background(), testUUID, ""); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	if !fake.issued(deleteCounter) {
+		t.Error("the counter was left behind")
+	}
+	assertNotIssued(t, fake, "neigh")
+	assertNotIssued(t, fake, "route del")
+}
+
+// The teardown reads its address off disk rather than being handed one, and it
+// splices it into `route del` and `neigh del proxy` — two grants that end in a
+// wildcard. An address that could never have been parked is treated as an absent
+// one: nothing was installed for it, so nothing is removed, and the rule and
+// counter that ARE named after the UUID still go. A terminate is not failed over
+// a garbled sidecar, because that would be a VM nobody can delete.
+func TestRetireWillNotRenderAnAddressThatCouldNeverHaveBeenParked(t *testing.T) {
+	fake := newFakeCommands().withScaffold()
+
+	err := newTestParker(fake).retire(
+		context.Background(), testUUID, "2001:db8::1; nft flush ruleset",
+	)
+	if err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	if !fake.issued(deleteCounter) {
+		t.Error("the counter was left behind")
+	}
+	assertNotIssued(t, fake, "neigh")
+	assertNotIssued(t, fake, "route del")
+}
+
+// A host with no IPv6 default route has no uplink it could have answered NDP on,
+// so there is no entry to delete — the park that would have installed one skipped
+// it for the same reason.
+func TestRetireOnAHostWithNoUplinkDeletesNoNeighbourEntry(t *testing.T) {
+	fake := newFakeCommands().withScaffold().output(defaultRoute, "")
+
+	if err := newTestParker(fake).retire(context.Background(), testUUID, testAddress); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	assertNotIssued(t, fake, "neigh")
+}
+
+// A retire that could not run its removals reports it, so the terminate above it
+// stops while the sidecar naming the address is still on disk.
+func TestRetireReportsACommandThatCouldNotRunAtAll(t *testing.T) {
+	fake := newFakeCommands().withScaffold()
+	fake.fails(listHandles)
+
+	err := newTestParker(fake).retire(context.Background(), testUUID, testAddress)
+
+	if !errors.Is(err, errCommandFailed) {
+		t.Fatalf("retire = %v, want the failure reported", err)
+	}
+	assertNotIssued(t, fake, "neigh")
 }

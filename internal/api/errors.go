@@ -8,9 +8,10 @@ import (
 	"github.com/frappe/boat/internal/wire"
 )
 
-// errorResponse is the one shape every refusal takes: a status code and a
-// single plain sentence. It implements each generated response interface, so a
-// handler refuses a request the same way whichever operation was asked for.
+// errorResponse is the one shape every refusal takes: a status code, a single
+// plain sentence, and — where the caller has to branch — a stable token. It
+// implements each generated response interface, so a handler refuses a request
+// the same way whichever operation was asked for.
 //
 // The sentence is written for the caller. A raw Go error would hand Atlas a
 // path, an argv or a bbolt offset it can do nothing with, so the detail stays
@@ -18,12 +19,22 @@ import (
 type errorResponse struct {
 	statusCode int
 	message    string
+	// reason is the machine-readable half, and it is set only where the prose
+	// cannot carry the weight: two refusals that share a status code and call for
+	// opposite behaviour from the caller. It is empty otherwise, and then the
+	// field is absent on the wire — a token nobody branches on is a token that
+	// drifts away from the sentence beside it without anyone noticing.
+	reason wire.ErrorReason
 }
 
 func (response *errorResponse) write(writer http.ResponseWriter) error {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(response.statusCode)
-	return json.NewEncoder(writer).Encode(wire.Error{Error: response.message})
+	body := wire.Error{Error: response.message}
+	if response.reason != "" {
+		body.Reason = &response.reason
+	}
+	return json.NewEncoder(writer).Encode(body)
 }
 
 func (response *errorResponse) VisitGetHostResponse(writer http.ResponseWriter) error {
@@ -82,7 +93,19 @@ func (response *errorResponse) VisitPutVirtualMachineResponse(writer http.Respon
 	return response.write(writer)
 }
 
+func (response *errorResponse) VisitDeleteVirtualMachineResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
 func (response *errorResponse) VisitGetExportResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
+func (response *errorResponse) VisitGetUnitResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
+func (response *errorResponse) VisitActOnUnitResponse(writer http.ResponseWriter) error {
 	return response.write(writer)
 }
 
@@ -103,6 +126,17 @@ func badRequest(message string) *errorResponse {
 // be refused rather than answered with someone else's result.
 func conflict(message string) *errorResponse {
 	return &errorResponse{statusCode: http.StatusConflict, message: message}
+}
+
+// conflictBecause is conflict where the caller cannot act on the sentence alone.
+//
+// The PUT is where this became necessary: a fence regression and a stale
+// observation are both 409, and one of them must never be retried while the
+// other must be retried immediately against a fresh export. A caller told only
+// "409" either retries the one that must not be — re-asserting a claim this host
+// has seen superseded — or gives up on the one that would have succeeded.
+func conflictBecause(reason wire.ErrorReason, message string) *errorResponse {
+	return &errorResponse{statusCode: http.StatusConflict, message: message, reason: reason}
 }
 
 // internalFault states the fault in one sentence and keeps the cause on the

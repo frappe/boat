@@ -26,6 +26,7 @@ import (
 	"github.com/frappe/boat/internal/hostfacts"
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/run"
+	"github.com/frappe/boat/internal/units"
 	"github.com/frappe/boat/internal/version"
 	"github.com/frappe/boat/internal/vm"
 	"github.com/frappe/boat/internal/watch"
@@ -50,11 +51,37 @@ type OperationStore interface {
 type StateStore interface {
 	PutDesired(record model.DesiredVirtualMachine) error
 	GetDesired(uuid string) (model.DesiredVirtualMachine, bool, error)
+	// DeleteDesired retracts an assertion. It is deliberately not paired with a
+	// fence delete: retraction ends this host's authority to act on a VM and must
+	// not also hand back permission to boot one — see api.retract.
+	DeleteDesired(uuid string) error
 	SetFenceEpoch(uuid string, epoch int64) error
 	FenceEpoch(uuid string) (int64, bool, error)
 	ObservedEpoch() (int64, error)
+	// CheckVirtualMachineUnmoved is §11.2's compare-and-set. It is on the state
+	// store rather than beside the handlers because the epoch this host has
+	// reached and the epoch one VM's record was written at have to be read in one
+	// transaction to mean anything — the same reason Snapshot is here.
+	CheckVirtualMachineUnmoved(uuid string, offered int64) error
 	Snapshot() (model.Export, error)
 }
+
+// Units is the slice of the sibling-unit supervisor the handlers need.
+//
+// It has no method that can take a unit down, and that is the interface saying
+// what internal/units says at greater length: supervision converges the host's
+// own services upward, and a stop has no driver behind it and a host-wide blast
+// radius (spec/33-boat.md §3.7).
+type Units interface {
+	Liveness(ctx context.Context, runner *run.Runner) ([]model.UnitLiveness, error)
+	LivenessOf(ctx context.Context, runner *run.Runner, name string) (model.UnitLiveness, bool, error)
+	Act(ctx context.Context, runner *run.Runner, name string, action units.Action) error
+}
+
+// The one implementation outside tests, asserted for the reason the VM manager's
+// assertion is: a supervisor that drifts from the shape the handlers were
+// written against should fail to compile here rather than at a call site.
+var _ Units = (*units.Supervisor)(nil)
 
 // Decisions is the write-ahead journal as the handlers use it: the one method
 // that has to be called BEFORE the side effect it authorizes, so that a crash
@@ -120,7 +147,12 @@ type Dependencies struct {
 	// watch carries freshness and the export carries truth, so a Server built
 	// without one serves a stream that says nothing rather than dereferencing nil
 	// in the middle of a verb.
-	Watch     *watch.Hub
+	Watch *watch.Hub
+	// Units supervises this host's own services. A nil supervisor is not legal:
+	// GET /host is required to carry unit liveness, and a Server that answered it
+	// with silence would report a host whose pool, network plane and wake trap are
+	// all unknown as though it had none of them.
+	Units     Units
 	StartedAt time.Time
 }
 
@@ -132,6 +164,7 @@ type Server struct {
 	decisions       Decisions
 	reconciler      Reconciler
 	watch           *watch.Hub
+	units           Units
 	startedAt       time.Time
 	// newRunner builds the runner a verb traces through. It is a field rather
 	// than a direct call to run.NewRunner because the runner's trace writer and
@@ -176,6 +209,7 @@ func NewServer(dependencies Dependencies) *Server {
 		decisions:       decisions,
 		reconciler:      serializer,
 		watch:           hub,
+		units:           dependencies.Units,
 		startedAt:       dependencies.StartedAt,
 		newRunner:       run.NewRunner,
 		hostFacts:       hostfacts.Read,
@@ -202,6 +236,16 @@ func (server *Server) GetHealth(ctx context.Context, request wire.GetHealthReque
 // GetHost reports the observed facts of this host. boat_version is here rather
 // than on a bookkeeping channel of its own so that version drift is ordinary
 // observed state.
+//
+// The sibling units are part of it. A host is not only its VMs: a machine whose
+// thin pool never rebound after a reboot has every VM on it about to fail to
+// start, and until this carried unit liveness that fact reached the control
+// plane through nothing at all.
+//
+// A unit read that fails, fails the answer. It is one `systemctl show`, so a
+// failure means systemd is not talking to this daemon — and reporting the VM
+// count and the version as though the rest were fine is how a broken host
+// reads healthy.
 func (server *Server) GetHost(ctx context.Context, request wire.GetHostRequestObject) (wire.GetHostResponseObject, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -211,11 +255,18 @@ func (server *Server) GetHost(ctx context.Context, request wire.GetHostRequestOb
 	if err != nil {
 		return internalFault("The virtual machine records could not be read.", err), nil
 	}
+	// The trace is discarded: a read has no operation record to belong to, and
+	// this one runs on every poll of every host in the fleet.
+	liveness, err := server.units.Liveness(ctx, server.newRunner(io.Discard))
+	if err != nil {
+		return internalFault("This host's unit liveness could not be read.", err), nil
+	}
 	return wire.GetHost200JSONResponse{
 		Hostname:            hostname,
 		BoatVersion:         version.Version,
 		StartedAt:           server.startedAt,
 		VirtualMachineCount: len(records),
+		Units:               unitsToWire(liveness),
 	}, nil
 }
 
@@ -231,6 +282,9 @@ func (server *Server) ListVirtualMachines(ctx context.Context, request wire.List
 }
 
 func (server *Server) GetVirtualMachine(ctx context.Context, request wire.GetVirtualMachineRequestObject) (wire.GetVirtualMachineResponseObject, error) {
+	if failure := server.refuseMalformedUUID(request.Uuid); failure != nil {
+		return failure, nil
+	}
 	record, found, err := server.operations.GetVirtualMachine(request.Uuid)
 	if err != nil {
 		return internalFault("The virtual machine record could not be read.", err), nil
