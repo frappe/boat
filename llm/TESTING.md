@@ -223,6 +223,27 @@ dev/test fleet exercises the Task-row bookkeeping without a host.
 
 ---
 
+## 6a. Testing the storage layer (when you port `vm-disk-up` / `lvm`)
+
+The network lab needs only a synthetic `network.env`. Storage needs a real thin
+pool, and the boat hosts have none (`sudo vgs` is empty). Build a throwaway
+**loop-backed thin pool** so the differential does not touch real storage:
+
+```sh
+ssh … 'truncate -s 2G /root/thintest.img
+        LOOP=$(losetup --find --show /root/thintest.img)
+        pvcreate $LOOP && vgcreate <atlas-vg-name> $LOOP
+        lvcreate -L 1G -T <atlas-vg-name>/<atlas-pool-name>
+        # then create a thin snapshot LV named as ThinPool.vm_disk(uuid) expects'
+```
+
+Match the VG/pool/LV **names** `lvm.py:ThinPool` derives (read them from the
+source — do not guess). Then run the Python `vm-disk-up.py <uuid>` and the Go,
+and diff `dmsetup ls`, `lvs -o+lv_active`, and `ls -l <jail>/rootfs.ext4` (the
+mknod'd node's major:minor). Tear down: `lvremove`, `vgremove`, `losetup -d`,
+`rm the img`. **Storage is the §3.5 "LVM CoW ordering" risk — never cut a disk
+verb over on golden tests alone; the loop-pool differential is mandatory.**
+
 ## 7. Gotchas learned the hard way
 
 - **nft quotes interface names on list** (`oifname "eth0"`). An idempotency guard
