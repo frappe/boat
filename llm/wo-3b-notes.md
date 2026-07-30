@@ -146,11 +146,18 @@ public-ingress firewall, in one bring-up:
 - **Capstone**: a full public+private+firewall bring-up flushed-and-compared on
   host-1 diffed **byte-identical**; teardown removed all of it; ownership cleared.
 
-**The one remaining `vm-network-up` sub-module: WireGuard tunnels (step 9).**
-`apply_persisted_tunnels` / `wireguard.py` (276 LOC — wg interfaces, keys via
-stdin, peers, routes) is NOT ported. A VM with persisted tunnels would lose them
-on a boat-run bring-up, so it stays on the Python hook until this lands. Boat
-hosts have no tunnel VMs, so nothing regresses today.
+**WireGuard tunnels (step 9) — SHIPPED and proven.** Commit `ad0b0b4`
+(`wireguard.go`). `apply_persisted_tunnels`/`apply_tunnel` ported (the private key
+is a file path, never inlined). Live differential on host-1 (wireguard-tools
+installed there): the wg interface (port/peer/allowed-ips/host address) and the
+isolation rules (forward accept+drop, input host-drop) are **byte-identical** to
+the Python.
+
+**⇒ The entire `vm-network-up`/`down` is now ported: public plane + private
+isolation + firewall + WireGuard, every module proven byte-identical on a live
+host.** The only thing standing between this and live is the cutover (below).
+NOTE: `apt install wireguard-tools` was run on host-1 (a real boat host needs it
+for tunnels anyway); leave it.
 
 ## The cutover — exact steps + its real dependencies (do NOT force fleet-wide)
 The go-live is re-pointing the `firecracker-vm@.service` hooks:
