@@ -149,6 +149,11 @@ make generate   # regenerate internal/wire from api/openapi.yaml
 it is dropped onto a bare Ubuntu host that has no Go toolchain and no libc we
 control.
 
+Beyond the gate, every host-touching module is held to a second bar: it must
+produce **byte-identical host effects** to the Python it replaces, proven on a
+real host with the differential lab. [`llm/TESTING.md`](llm/TESTING.md) is how —
+the golden/recorder pattern and the live differential, per component.
+
 ## On a host
 
 One binary backs every Boat unit on the machine — `boat daemon` here, and
