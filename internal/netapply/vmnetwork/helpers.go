@@ -139,3 +139,14 @@ func stripPrefix(cidr string) string {
 	address, _, _ := strings.Cut(cidr, "/")
 	return address
 }
+
+// anyLine reports whether any line of a listing satisfies predicate — the shape
+// every substring idempotency guard here shares.
+func anyLine(listing string, predicate func(string) bool) bool {
+	for line := range strings.Lines(listing) {
+		if predicate(line) {
+			return true
+		}
+	}
+	return false
+}
