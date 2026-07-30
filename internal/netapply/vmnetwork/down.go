@@ -121,6 +121,11 @@ func (bringDown *bringDown) run(ctx context.Context) error {
 		if err := bringDown.removeForwardRules(ctx, virtualMachine); err != nil {
 			return err
 		}
+		// Revert the public-ingress firewall, so a future VM reusing this /128 is not
+		// silently blocked by a stale drop. A no-op when the VM had no firewall.
+		if err := removeFirewall(ctx, bringDown.commands, virtualMachine); err != nil {
+			return err
+		}
 	}
 	// The private-plane isolation rules, deleted independently of the public /128:
 	// a dark VM has no public address at all, so a public-gated sweep would miss its

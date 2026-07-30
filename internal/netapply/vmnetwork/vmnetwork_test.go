@@ -15,6 +15,7 @@ import (
 // apply are asserted in internal/park and internal/netapply/reservedip; here they
 // are recorded as markers so this stays a test of the bring-up's own sequence.
 const environmentPath = "/var/lib/atlas/virtual-machines/dead0000-0000-4000-8000-000000000001/network.env"
+const firewallPath = "/var/lib/atlas/virtual-machines/dead0000-0000-4000-8000-000000000001/firewall.env"
 
 const testEnvironment = "TAP_DEVICE=atlas-deadtap0\n" +
 	"VIRTUAL_MACHINE_IPV6=2001:db8::2\n" +
@@ -97,10 +98,11 @@ func TestUpRendersThePublicPlaneLikeThePython(t *testing.T) {
 
 	var unparked, attached bool
 	bringUp := &bringUp{
-		commands:           fake,
-		unpark:             func(context.Context) error { unparked = true; return nil },
-		attachReservedIP:   func(context.Context, string, string, string) error { attached = true; return nil },
-		networkEnvironment: environmentPath,
+		commands:            fake,
+		unpark:              func(context.Context) error { unparked = true; return nil },
+		attachReservedIP:    func(context.Context, string, string, string) error { attached = true; return nil },
+		networkEnvironment:  environmentPath,
+		firewallEnvironment: firewallPath,
 	}
 	if err := bringUp.run(context.Background()); err != nil {
 		t.Fatalf("Up: %v", err)
@@ -152,6 +154,8 @@ func TestUpRendersThePublicPlaneLikeThePython(t *testing.T) {
 		"sudo nft list chain inet atlas forward",
 		"sudo nft add rule inet atlas forward ip6 daddr 2001:db8::2 oifname atlas-hdeadbe counter accept",
 		"sudo nft add rule inet atlas forward ip6 saddr 2001:db8::2 iifname atlas-hdeadbe counter accept",
+		// Step 10: the firewall probe. No firewall.env, so it is a no-op.
+		"? sudo test -f " + firewallPath,
 	})
 }
 
@@ -199,6 +203,8 @@ func TestDownRendersThePublicPlaneLikeThePython(t *testing.T) {
 		"- sudo nft -a list chain inet atlas forward",
 		"- sudo nft delete rule inet atlas forward handle 7",
 		"- sudo nft delete rule inet atlas forward handle 8",
+		// The firewall revert probe. No public_filter chain, so it is a no-op.
+		"? sudo nft list chain inet atlas public_filter",
 	})
 }
 
@@ -222,10 +228,11 @@ func TestUpIsIdempotentWhenTheScaffoldAndRulesExist(t *testing.T) {
 		output("sudo nft list chain inet atlas postrouting", "ip saddr 100.64.0.0/16 oifname \"eth0\" masquerade\n")
 
 	bringUp := &bringUp{
-		commands:           fake,
-		unpark:             func(context.Context) error { return nil },
-		attachReservedIP:   func(context.Context, string, string, string) error { return nil },
-		networkEnvironment: environmentPath,
+		commands:            fake,
+		unpark:              func(context.Context) error { return nil },
+		attachReservedIP:    func(context.Context, string, string, string) error { return nil },
+		networkEnvironment:  environmentPath,
+		firewallEnvironment: firewallPath,
 	}
 	if err := bringUp.run(context.Background()); err != nil {
 		t.Fatalf("Up: %v", err)
@@ -280,11 +287,12 @@ func TestUpWithThePrivatePlaneRoutesIsolatesAndRecordsOwnership(t *testing.T) {
 
 	var owned string
 	bringUp := &bringUp{
-		commands:           fake,
-		unpark:             func(context.Context) error { return nil },
-		attachReservedIP:   func(context.Context, string, string, string) error { return nil },
-		addLocalOwned:      func(address string) error { owned = address; return nil },
-		networkEnvironment: environmentPath,
+		commands:            fake,
+		unpark:              func(context.Context) error { return nil },
+		attachReservedIP:    func(context.Context, string, string, string) error { return nil },
+		addLocalOwned:       func(address string) error { owned = address; return nil },
+		networkEnvironment:  environmentPath,
+		firewallEnvironment: firewallPath,
 	}
 	if err := bringUp.run(context.Background()); err != nil {
 		t.Fatalf("Up: %v", err)
@@ -302,6 +310,7 @@ func TestUpWithThePrivatePlaneRoutesIsolatesAndRecordsOwnership(t *testing.T) {
 		"sudo nft insert rule inet atlas forward iifname atlas-hdeadbe ip6 saddr fdaa:1a2b:3c4d:0:1:2:3:4 ip6 daddr fdaa:1a2b:3c4d::/48 accept",
 		"sudo nft insert rule inet atlas forward iifname atlas-hdeadbe ip6 saddr fdaa:1a2b:3c4d:0:1:2:3:4 ip6 daddr fdaa:0:0::/48 accept",
 		"sudo nft insert rule inet atlas forward iifname wg-mesh oifname atlas-hdeadbe ip6 saddr fdaa:1a2b:3c4d::/48 ip6 daddr fdaa:1a2b:3c4d:0:1:2:3:4 accept",
+		"? sudo test -f " + firewallPath,
 	})
 }
 
@@ -345,10 +354,11 @@ func TestUpRefusesAMalformedAddress(t *testing.T) {
 	broken := strings.Replace(testEnvironment, "VIRTUAL_MACHINE_IPV6=2001:db8::2", "VIRTUAL_MACHINE_IPV6=2001:db8::2; drop", 1)
 	fake := newFakeCommands().output("sudo cat "+environmentPath, broken)
 	bringUp := &bringUp{
-		commands:           fake,
-		unpark:             func(context.Context) error { return nil },
-		attachReservedIP:   func(context.Context, string, string, string) error { return nil },
-		networkEnvironment: environmentPath,
+		commands:            fake,
+		unpark:              func(context.Context) error { return nil },
+		attachReservedIP:    func(context.Context, string, string, string) error { return nil },
+		networkEnvironment:  environmentPath,
+		firewallEnvironment: firewallPath,
 	}
 	if err := bringUp.run(context.Background()); err == nil {
 		t.Fatal("Up accepted a VIRTUAL_MACHINE_IPV6 that would inject into an nft rule")

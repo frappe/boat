@@ -75,8 +75,9 @@ func Up(ctx context.Context, runner *run.Runner, uuid string) error {
 			_, err := reservedip.Attach(ctx, runner, guestIPv4, hostVeth, reservedIPv4)
 			return err
 		},
-		addLocalOwned:      func(address string) error { return localownership.Add(localownership.DefaultPath, address) },
-		networkEnvironment: paths.ForVirtualMachine(uuid).NetworkEnvironment(),
+		addLocalOwned:       func(address string) error { return localownership.Add(localownership.DefaultPath, address) },
+		networkEnvironment:  paths.ForVirtualMachine(uuid).NetworkEnvironment(),
+		firewallEnvironment: paths.ForVirtualMachine(uuid).FirewallEnvironment(),
 	}
 	return bringUp.run(ctx)
 }
@@ -88,8 +89,9 @@ type bringUp struct {
 	// addLocalOwned records the VM's private /128 in the ANCP ownership cache. A
 	// field because it writes a root-owned file directly rather than through the
 	// command seam, so a test substitutes it the way it does unpark.
-	addLocalOwned      func(address string) error
-	networkEnvironment string
+	addLocalOwned       func(address string) error
+	networkEnvironment  string
+	firewallEnvironment string
 }
 
 func (bringUp *bringUp) run(ctx context.Context) error {
@@ -139,9 +141,15 @@ func (bringUp *bringUp) run(ctx context.Context) error {
 	// on an ordinary VM. The env already carries RESERVED_IPV4, so this is the apply
 	// path (reservedip.Attach does not itself write the env).
 	if facts.reservedIPv4 != "" {
-		return bringUp.attachReservedIP(ctx, facts.ipv4GuestAddress, facts.hostVeth, facts.reservedIPv4)
+		if err := bringUp.attachReservedIP(ctx, facts.ipv4GuestAddress, facts.hostVeth, facts.reservedIPv4); err != nil {
+			return err
+		}
 	}
-	return nil
+	// Step 9 — persisted WireGuard tunnels — is NOT ported yet; a VM with tunnels
+	// keeps the Python hook until internal wireguard lands. Step 10: re-apply the
+	// public-ingress firewall, last, after the VM's /128 route exists. A no-op when
+	// the VM has none.
+	return applyPersistedFirewall(ctx, bringUp.commands, bringUp.firewallEnvironment)
 }
 
 // facts is the slice of network.env a bring-up needs, validated at the boundary
