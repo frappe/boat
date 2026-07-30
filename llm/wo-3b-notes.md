@@ -159,6 +159,21 @@ host.** The only thing standing between this and live is the cutover (below).
 NOTE: `apt install wireguard-tools` was run on host-1 (a real boat host needs it
 for tunnels anyway); leave it.
 
+## END-TO-END: a real VM booted on boat's plumbing (2026-07-30, meo)
+Not just byte-identical host state — a **real Alpine guest booted to userspace**
+with its disk node mknod'd by `boat vm-disk-up` and its netns/tap built by `boat
+vm-network-up`. On meo (the boat host with firecracker + images): created a throwaway
+alpine thin-snapshot, ran both boat hooks, launched firecracker directly in the
+boat-built netns. Console showed `root=/dev/vda` (firecracker opened the boat disk
+node), a full kernel boot, then OpenRC → `Starting sshd ... [ ok ]`; the tap went
+`LOWER_UP` (guest virtio_net attached to the boat tap). Torn down; meo's live VM
+(06571461) left running and untouched. Recipe in `TESTING.md §5a`.
+
+This closes the gap the differential could not: boat's disk + network bring-up
+work for a real guest, not only in nft/ip/lvm output. (The boat hosts host-1/2
+still can't run VMs themselves — no firecracker binary; that is the WO-1b
+bootstrap gap. meo is the firecracker-equipped boat-split host.)
+
 ## Beyond WO-3b — the disk bring-up hook (same session)
 **`vm-disk-up` ported & live-proven** (`internal/vmdisk`, commit `4f5ff9b`; `boat
 vm-disk-up` CLI). Activates the VM's activation-skip thin snapshot LV and re-mknods

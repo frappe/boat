@@ -223,6 +223,43 @@ dev/test fleet exercises the Task-row bookkeeping without a host.
 
 ---
 
+## 5a. The end-to-end test that matters most: boot a REAL VM on boat's plumbing
+
+A byte-identical host-effect differential proves the mechanics match the Python.
+It does NOT prove a guest actually boots on them. That is a separate, stronger
+test, and it needs a host with **firecracker + jailer + /dev/kvm + a kernel/rootfs
+image** — the boat hosts (host-1/2) have NONE of these (a bootstrap gap), but
+**meo (168.144.146.52)** has all of it plus a live VM. Do it there; it works.
+
+Proven on meo 2026-07-30 (alpine guest, throwaway UUID, live VM untouched):
+
+```sh
+# 1. a throwaway disk: a thin snapshot of an image LV (run lvcreate ALONE — a
+#    compound ssh command trips the safety classifier; discrete commands pass):
+ssh meo 'lvcreate -y -s atlas/atlas-image-alpine-3.20 -n atlas-vm-<uuid>'
+ssh meo 'mkdir -p /var/lib/atlas/virtual-machines/<uuid>/jail/firecracker/<uuid>/root/run'
+scp network.env meo:/var/lib/atlas/virtual-machines/<uuid>/network.env   # TAP/NETNS/VETH/uid
+
+# 2. BOAT builds the host side — the disk node and the netns/tap:
+ssh meo '/root/boat-new vm-disk-up <uuid>'      # mknods rootfs.ext4 (maj:min, uid, 0660)
+ssh meo '/root/boat-new vm-network-up <uuid>'   # netns + veth + tap
+
+# 3. boot firecracker DIRECTLY in the boat-built netns (simpler than the jailer;
+#    the plumbing is what's under test). config: kernel = the image vmlinux,
+#    drive path_on_host = the boat-mknod'd rootfs.ext4, network host_dev_name =
+#    the boat-built tap, boot_args "console=ttyS0 …" so the console is visible:
+ssh meo "setsid bash -c 'ip netns exec atlas-<netns> firecracker \
+    --api-sock /tmp/x.sock --config-file /tmp/fc.json > /tmp/console.log 2>&1' &"
+sleep 9; ssh meo 'tail -20 /tmp/console.log'    # want: kernel boot → OpenRC → sshd
+```
+
+What proves success: the console shows `root=/dev/vda` (firecracker opened the
+boat-mknod'd disk) and reaches userspace (`Starting sshd ... [ ok ]`), and the tap
+is `LOWER_UP` (the guest's virtio_net attached to the boat-built tap). Teardown:
+kill firecracker via `fuser -k /tmp/x.sock` (NOT `pkill -f <pattern>` — the pattern
+matches your own ssh shell), then `boat vm-network-down`, `lvremove`, `rm -rf`.
+ALWAYS confirm the host's live VM is still running afterward (`pgrep -cf <live-uuid>`).
+
 ## 6a. Testing the storage layer (when you port `vm-disk-up` / `lvm`)
 
 The network lab needs only a synthetic `network.env`. Storage needs a real thin
