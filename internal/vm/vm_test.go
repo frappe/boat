@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/frappe/boat/internal/fcattach"
+	"github.com/frappe/boat/internal/netapply/reservedip"
 	"github.com/frappe/boat/internal/run"
 )
 
@@ -84,6 +85,13 @@ type fakeCommands struct {
 	// wakeTrapStopped makes this host one whose wake reflex is not running, which
 	// is the one state a sleep must refuse.
 	wakeTrapStopped bool
+	// reservedDelivery and reservedError are what the injected reserved-IP apply
+	// answers. Like liveness, the nft/ip sequence it renders is asserted in
+	// internal/netapply/reservedip, so restating it here would be two copies of one
+	// contract; this test asserts only that the verb read the sidecar, wrote the
+	// durable flag, and dispatched with the guest and veth it read.
+	reservedDelivery reservedip.Delivery
+	reservedError    error
 }
 
 // fakeLiveness is one answer from the liveness probe: a live Firecracker in a
@@ -265,6 +273,17 @@ func newTestManager(fake *fakeCommands) *Manager {
 			return fake.liveness.process, fake.liveness.live, fake.liveness.err
 		},
 		wakeTrapResident: func() bool { return !fake.wakeTrapStopped },
+		// On the same trace as everything else, carrying the guest, veth and reserved
+		// IP the verb resolved, so a verb that dispatched a stale guest address shows
+		// up as a wrong line rather than as a NAT built around the wrong VM.
+		attachReservedIP: func(_ context.Context, _ *run.Runner, guestIPv4, hostVeth, reservedIPv4 string) (reservedip.Delivery, error) {
+			fake.trace = append(fake.trace, "attach-reserved-ip "+guestIPv4+" "+hostVeth+" "+reservedIPv4)
+			return fake.reservedDelivery, fake.reservedError
+		},
+		detachReservedIP: func(_ context.Context, _ *run.Runner, guestIPv4 string) error {
+			fake.trace = append(fake.trace, "detach-reserved-ip "+guestIPv4)
+			return fake.reservedError
+		},
 	}
 }
 

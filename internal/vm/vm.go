@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/frappe/boat/internal/fcattach"
+	"github.com/frappe/boat/internal/netapply/reservedip"
 	"github.com/frappe/boat/internal/park"
 	"github.com/frappe/boat/internal/paths"
 	"github.com/frappe/boat/internal/run"
@@ -135,6 +136,12 @@ type Manager struct {
 	// sleeping VM's return depends on. See requireWakeTrap for why a sleep is
 	// gated on it, and internal/park.Resident for why the fact lives there.
 	wakeTrapResident func() bool
+	// attachReservedIP / detachReservedIP install and remove a Reserved IP's
+	// host-side 1:1 NAT. Fields for the same reason park is: they run real nft and
+	// ip commands and discover the delivery model from host metadata, so a test
+	// that could not substitute them would have to touch the host.
+	attachReservedIP func(ctx context.Context, runner *run.Runner, guestIPv4, hostVeth, reservedIPv4 string) (reservedip.Delivery, error)
+	detachReservedIP func(ctx context.Context, runner *run.Runner, guestIPv4 string) error
 }
 
 // NewManager returns a Manager wired to the real host.
@@ -147,6 +154,8 @@ func NewManager() *Manager {
 		retire:           park.Retire,
 		liveness:         fcattach.Find,
 		wakeTrapResident: park.Resident,
+		attachReservedIP: reservedip.Attach,
+		detachReservedIP: reservedip.Detach,
 	}
 }
 
