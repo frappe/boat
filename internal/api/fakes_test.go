@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/frappe/boat/internal/model"
+	"github.com/frappe/boat/internal/netapply/reservedip"
 	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/store"
 	"github.com/frappe/boat/internal/units"
@@ -316,17 +317,19 @@ type fakeVirtualMachines struct {
 	// One counter per WO-2 verb, and the request each was handed. The requests
 	// are what the desired-state tests are about: a verb that ran is not the same
 	// claim as a verb that ran with the numbers Atlas asserted.
-	pauses            int
-	resumes           int
-	wakes             int
-	terminates        int
-	sleepRequests     []vm.SleepRequest
-	resizeRequests    []vm.ResizeRequest
-	rebuildRequests   []vm.RebuildRequest
-	verbError         error
-	sleepResult       vm.SleepResult
-	firecrackerUID    int
-	firecrackerUIDErr error
+	pauses             int
+	resumes            int
+	wakes              int
+	terminates         int
+	sleepRequests      []vm.SleepRequest
+	resizeRequests     []vm.ResizeRequest
+	rebuildRequests    []vm.RebuildRequest
+	reservedIPRequests []vm.ReservedIPRequest
+	reservedDelivery   reservedip.Delivery
+	verbError          error
+	sleepResult        vm.SleepResult
+	firecrackerUID     int
+	firecrackerUIDErr  error
 	// beforeRebuild runs as the rebuild reaches the host, which is the only place
 	// a test can see what was recorded BEFORE the volume would have been dropped.
 	// Ordering is the whole of the write-ahead rule, and it is invisible to any
@@ -412,6 +415,15 @@ func (fake *fakeVirtualMachines) Rebuild(
 	fake.rebuildRequests = append(fake.rebuildRequests, request)
 	fake.writeTrace()
 	return fake.verbError
+}
+
+func (fake *fakeVirtualMachines) ReservedIP(
+	ctx context.Context, runner *run.Runner, uuid string, request vm.ReservedIPRequest,
+) (reservedip.Delivery, error) {
+	defer fake.enter()()
+	fake.reservedIPRequests = append(fake.reservedIPRequests, request)
+	fake.writeTrace()
+	return fake.reservedDelivery, fake.verbError
 }
 
 func (fake *fakeVirtualMachines) Terminate(ctx context.Context, runner *run.Runner, uuid string) error {

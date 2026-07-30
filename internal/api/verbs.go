@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/netip"
 
 	"github.com/frappe/boat/internal/model"
+	"github.com/frappe/boat/internal/netapply/reservedip"
 	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/vm"
 	"github.com/frappe/boat/internal/wire"
@@ -25,6 +27,10 @@ const (
 	verbRebuildVirtualMachine   = "rebuild-vm"
 	verbTerminateVirtualMachine = "terminate-vm"
 	verbResizeVirtualMachine    = "resize-vm"
+	// The reserved-IP verb keeps the Python script's own name (vm-reserved-ip.py),
+	// not the <verb>-vm shape of the nine lifecycle verbs, so an operation record
+	// and Atlas's boat_client verb table read the same string.
+	verbReservedIPVirtualMachine = "vm-reserved-ip"
 )
 
 func (server *Server) PauseVirtualMachine(ctx context.Context, request wire.PauseVirtualMachineRequestObject) (wire.PauseVirtualMachineResponseObject, error) {
@@ -287,6 +293,77 @@ func rebuildSource(operationID string, request vm.RebuildRequest) model.Decision
 			"data_snapshot_device": request.DataSnapshotDevice,
 		},
 	}
+}
+
+// ReservedIpVirtualMachine attaches or detaches a Reserved IP's host-side 1:1 NAT.
+//
+// The reserved IP is the one input a caller states — it is the public identity
+// Atlas allocated, neither host state nor desired power — so it is validated here,
+// at the boundary, as an actual IPv4 before it is carried any further: a value
+// that is not an address has no business reaching an nft rule, and refusing it as a
+// 400 keeps it out of the operation journal too. The guest and veth the NAT is
+// built around are NOT taken from the caller; the verb reads them off the host.
+//
+// It is not fenced: attaching NAT to an already-running proxy VM boots nothing, so
+// the boot gate does not apply, exactly as it does not to pause or resume.
+func (server *Server) ReservedIpVirtualMachine(ctx context.Context, request wire.ReservedIpVirtualMachineRequestObject) (wire.ReservedIpVirtualMachineResponseObject, error) {
+	if request.Body == nil || request.Body.OperationId == "" {
+		return missingOperationIdentifier(), nil
+	}
+	reserved, failure := reservedIPRequest(*request.Body)
+	if failure != nil {
+		return failure, nil
+	}
+	operation, failure := server.perform(ctx, request.Body.OperationId, verbReservedIPVirtualMachine, request.Uuid,
+		func(runner *run.Runner) (model.OperationResult, error) {
+			delivery, err := server.virtualMachines.ReservedIP(ctx, runner, request.Uuid, reserved)
+			if err != nil {
+				return nil, err
+			}
+			return reservedIPResult(reserved, delivery), nil
+		})
+	if failure != nil {
+		return failure, nil
+	}
+	return wire.ReservedIpVirtualMachine200JSONResponse{
+		OperationAcceptedJSONResponse: wire.OperationAcceptedJSONResponse(operationToWire(operation)),
+	}, nil
+}
+
+// reservedIPRequest turns the wire body into the verb's request, refusing an
+// action that is neither attach nor detach and an attach whose reserved IP is
+// missing or not an address. The address is canonicalised here so the value that
+// reaches network.env and the ruleset is the one net/netip vouches for.
+func reservedIPRequest(body wire.ReservedIpRequest) (vm.ReservedIPRequest, *errorResponse) {
+	switch body.Action {
+	case wire.ReservedIpRequestActionDetach:
+		return vm.ReservedIPRequest{Detach: true}, nil
+	case wire.ReservedIpRequestActionAttach:
+		if body.ReservedIpv4 == nil || *body.ReservedIpv4 == "" {
+			return vm.ReservedIPRequest{}, badRequest("a reserved-ip attach needs reserved_ipv4.")
+		}
+		address, err := netip.ParseAddr(*body.ReservedIpv4)
+		if err != nil || !address.Is4() {
+			return vm.ReservedIPRequest{}, badRequest("reserved_ipv4 " + *body.ReservedIpv4 + " is not an IPv4 address.")
+		}
+		return vm.ReservedIPRequest{ReservedIPv4: address.String()}, nil
+	default:
+		return vm.ReservedIPRequest{}, badRequest("action must be attach or detach, got " + string(body.Action) + ".")
+	}
+}
+
+// reservedIPResult states which delivery model the host used, so Atlas's Task
+// shows whether the reserved IP came in over a DigitalOcean anchor or was routed
+// straight to the host. A detach has nothing to report — it removed a NAT and the
+// verb succeeded, and an absent result is not a false one.
+func reservedIPResult(request vm.ReservedIPRequest, delivery reservedip.Delivery) model.OperationResult {
+	if request.Detach {
+		return nil
+	}
+	if delivery.Anchored {
+		return model.OperationResult{"delivery": "anchor", "anchor_address": delivery.Anchor.Address}
+	}
+	return model.OperationResult{"delivery": "routed"}
 }
 
 // operation is the shared front of every verb whose whole request is the

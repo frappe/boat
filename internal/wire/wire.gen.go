@@ -48,6 +48,12 @@ const (
 	OperationStatusSuccess OperationStatus = "Success"
 )
 
+// Defines values for ReservedIpRequestAction.
+const (
+	ReservedIpRequestActionAttach ReservedIpRequestAction = "attach"
+	ReservedIpRequestActionDetach ReservedIpRequestAction = "detach"
+)
+
 // Defines values for UnitAction.
 const (
 	UnitActionRestart UnitAction = "restart"
@@ -370,6 +376,25 @@ type RebuildRequest struct {
 	SnapshotDevice *string `json:"snapshot_device,omitempty"`
 }
 
+// ReservedIpRequest defines model for ReservedIpRequest.
+type ReservedIpRequest struct {
+	// Action attach installs the 1:1 NAT and writes the durable flag; detach
+	// removes both, keyed on the guest's own address.
+	Action ReservedIpRequestAction `json:"action"`
+
+	// OperationId The Atlas Task name. Re-posting one returns its recorded result.
+	OperationId string `json:"operation_id"`
+
+	// ReservedIpv4 The public IPv4 to 1:1-NAT to this VM's guest. Required for attach;
+	// ignored for detach, which keys on the guest's private address, so a
+	// detach need not re-state the address being taken away.
+	ReservedIpv4 *string `json:"reserved_ipv4,omitempty"`
+}
+
+// ReservedIpRequestAction attach installs the 1:1 NAT and writes the durable flag; detach
+// removes both, keyed on the guest's own address.
+type ReservedIpRequestAction string
+
 // StartRequest defines model for StartRequest.
 type StartRequest struct {
 	// OperationId The Atlas Task name. Re-posting one returns its recorded result.
@@ -504,6 +529,9 @@ type PauseVirtualMachineJSONRequestBody = OperationRequest
 // RebuildVirtualMachineJSONRequestBody defines body for RebuildVirtualMachine for application/json ContentType.
 type RebuildVirtualMachineJSONRequestBody = RebuildRequest
 
+// ReservedIpVirtualMachineJSONRequestBody defines body for ReservedIpVirtualMachine for application/json ContentType.
+type ReservedIpVirtualMachineJSONRequestBody = ReservedIpRequest
+
 // ResizeVirtualMachineJSONRequestBody defines body for ResizeVirtualMachine for application/json ContentType.
 type ResizeVirtualMachineJSONRequestBody = OperationRequest
 
@@ -563,6 +591,9 @@ type ServerInterface interface {
 	// Rebuild a VM's root disk from an image or a snapshot
 	// (POST /vms/{uuid}/rebuild)
 	RebuildVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
+	// Attach or detach a Reserved IP's host-side 1:1 NAT
+	// (POST /vms/{uuid}/reserved-ip)
+	ReservedIpVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
 	// Resize a stopped VM
 	// (POST /vms/{uuid}/resize)
 	ResizeVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
@@ -944,6 +975,37 @@ func (siw *ServerInterfaceWrapper) RebuildVirtualMachine(w http.ResponseWriter, 
 	handler.ServeHTTP(w, r)
 }
 
+// ReservedIpVirtualMachine operation middleware
+func (siw *ServerInterfaceWrapper) ReservedIpVirtualMachine(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "uuid" -------------
+	var uuid VirtualMachineUuid
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uuid", r.PathValue("uuid"), &uuid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uuid", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ReservedIpVirtualMachine(w, r, uuid)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ResizeVirtualMachine operation middleware
 func (siw *ServerInterfaceWrapper) ResizeVirtualMachine(w http.ResponseWriter, r *http.Request) {
 
@@ -1313,6 +1375,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("PUT "+options.BaseURL+"/vms/{uuid}", wrapper.PutVirtualMachine)
 	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/pause", wrapper.PauseVirtualMachine)
 	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/rebuild", wrapper.RebuildVirtualMachine)
+	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/reserved-ip", wrapper.ReservedIpVirtualMachine)
 	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/resize", wrapper.ResizeVirtualMachine)
 	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/resume", wrapper.ResumeVirtualMachine)
 	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/sleep", wrapper.SleepVirtualMachine)
@@ -1739,6 +1802,62 @@ func (response RebuildVirtualMachine409JSONResponse) VisitRebuildVirtualMachineR
 	return json.NewEncoder(w).Encode(response)
 }
 
+type ReservedIpVirtualMachineRequestObject struct {
+	Uuid VirtualMachineUuid `json:"uuid"`
+	Body *ReservedIpVirtualMachineJSONRequestBody
+}
+
+type ReservedIpVirtualMachineResponseObject interface {
+	VisitReservedIpVirtualMachineResponse(w http.ResponseWriter) error
+}
+
+type ReservedIpVirtualMachine200JSONResponse struct{ OperationAcceptedJSONResponse }
+
+func (response ReservedIpVirtualMachine200JSONResponse) VisitReservedIpVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ReservedIpVirtualMachine400JSONResponse Error
+
+func (response ReservedIpVirtualMachine400JSONResponse) VisitReservedIpVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ReservedIpVirtualMachine401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response ReservedIpVirtualMachine401JSONResponse) VisitReservedIpVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ReservedIpVirtualMachine404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response ReservedIpVirtualMachine404JSONResponse) VisitReservedIpVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ReservedIpVirtualMachine409JSONResponse struct {
+	OperationIdentifierConflictJSONResponse
+}
+
+func (response ReservedIpVirtualMachine409JSONResponse) VisitReservedIpVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type ResizeVirtualMachineRequestObject struct {
 	Uuid VirtualMachineUuid `json:"uuid"`
 	Body *ResizeVirtualMachineJSONRequestBody
@@ -2144,6 +2263,9 @@ type StrictServerInterface interface {
 	// Rebuild a VM's root disk from an image or a snapshot
 	// (POST /vms/{uuid}/rebuild)
 	RebuildVirtualMachine(ctx context.Context, request RebuildVirtualMachineRequestObject) (RebuildVirtualMachineResponseObject, error)
+	// Attach or detach a Reserved IP's host-side 1:1 NAT
+	// (POST /vms/{uuid}/reserved-ip)
+	ReservedIpVirtualMachine(ctx context.Context, request ReservedIpVirtualMachineRequestObject) (ReservedIpVirtualMachineResponseObject, error)
 	// Resize a stopped VM
 	// (POST /vms/{uuid}/resize)
 	ResizeVirtualMachine(ctx context.Context, request ResizeVirtualMachineRequestObject) (ResizeVirtualMachineResponseObject, error)
@@ -2525,6 +2647,39 @@ func (sh *strictHandler) RebuildVirtualMachine(w http.ResponseWriter, r *http.Re
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(RebuildVirtualMachineResponseObject); ok {
 		if err := validResponse.VisitRebuildVirtualMachineResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ReservedIpVirtualMachine operation middleware
+func (sh *strictHandler) ReservedIpVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid) {
+	var request ReservedIpVirtualMachineRequestObject
+
+	request.Uuid = uuid
+
+	var body ReservedIpVirtualMachineJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ReservedIpVirtualMachine(ctx, request.(ReservedIpVirtualMachineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ReservedIpVirtualMachine")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ReservedIpVirtualMachineResponseObject); ok {
+		if err := validResponse.VisitReservedIpVirtualMachineResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

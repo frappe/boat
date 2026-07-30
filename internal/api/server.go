@@ -25,6 +25,7 @@ import (
 
 	"github.com/frappe/boat/internal/hostfacts"
 	"github.com/frappe/boat/internal/model"
+	"github.com/frappe/boat/internal/netapply/reservedip"
 	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/units"
 	"github.com/frappe/boat/internal/version"
@@ -111,6 +112,7 @@ type VirtualMachines interface {
 	Wake(ctx context.Context, runner *run.Runner, uuid string) error
 	Resize(ctx context.Context, runner *run.Runner, uuid string, request vm.ResizeRequest) error
 	Rebuild(ctx context.Context, runner *run.Runner, uuid string, request vm.RebuildRequest) error
+	ReservedIP(ctx context.Context, runner *run.Runner, uuid string, request vm.ReservedIPRequest) (reservedip.Delivery, error)
 	Terminate(ctx context.Context, runner *run.Runner, uuid string) error
 	FirecrackerUID(ctx context.Context, runner *run.Runner, uuid string) (int, error)
 	Observe(ctx context.Context, runner *run.Runner, uuid string) (model.VirtualMachine, error)

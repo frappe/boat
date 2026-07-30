@@ -18,6 +18,7 @@ import (
 
 	"github.com/frappe/boat/internal/api"
 	"github.com/frappe/boat/internal/model"
+	"github.com/frappe/boat/internal/netapply/reservedip"
 	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/vm"
 	"github.com/frappe/boat/internal/wire"
@@ -84,6 +85,12 @@ func (fake *fakeHost) Rebuild(
 	ctx context.Context, runner *run.Runner, uuid string, request vm.RebuildRequest,
 ) error {
 	return nil
+}
+
+func (fake *fakeHost) ReservedIP(
+	ctx context.Context, runner *run.Runner, uuid string, request vm.ReservedIPRequest,
+) (reservedip.Delivery, error) {
+	return reservedip.Delivery{}, nil
 }
 
 // Terminate is the real thing's shape: the unit and the volumes are gone

@@ -623,6 +623,48 @@ paths:
         "409":
           $ref: "#/components/responses/OperationIdentifierConflict"
 
+  /vms/{uuid}/reserved-ip:
+    parameters:
+      - $ref: "#/components/parameters/VirtualMachineUuid"
+    post:
+      summary: Attach or detach a Reserved IP's host-side 1:1 NAT
+      description: |
+        DNATs an inbound public IPv4 to this VM's guest and SNATs the guest's
+        egress back out as it, applied live with no reboot and recorded in the
+        VM's `network.env` so a cold boot re-creates the same NAT from disk.
+        Detach removes both, keyed on the guest's own address. Idempotent.
+
+        The delivery model — a DigitalOcean anchor or a routed flexible IP — is
+        discovered on the host, not sent: which one applies is a host-local fact
+        (spec/33-boat.md §6.1), and the guest's private address and veth are read
+        from the sidecar rather than taken from the caller, so the NAT can never
+        be built around the wrong VM.
+      operationId: ReservedIpVirtualMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReservedIpRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationAccepted"
+        "400":
+          description: |
+            The action is not attach|detach, or it is attach and the reserved
+            IPv4 is missing or not an address — rendering a value that is not an
+            address into an nft rule is what the boundary check refuses.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/OperationIdentifierConflict"
+
   /ops/{operation_id}:
     parameters:
       - name: operation_id
@@ -1130,6 +1172,26 @@ components:
             - stale-fence
             - fence-regression
             - stale-observation
+
+    ReservedIpRequest:
+      type: object
+      required: [operation_id, action]
+      properties:
+        operation_id:
+          type: string
+          description: The Atlas Task name. Re-posting one returns its recorded result.
+        action:
+          type: string
+          enum: [attach, detach]
+          description: |
+            attach installs the 1:1 NAT and writes the durable flag; detach
+            removes both, keyed on the guest's own address.
+        reserved_ipv4:
+          type: string
+          description: |
+            The public IPv4 to 1:1-NAT to this VM's guest. Required for attach;
+            ignored for detach, which keys on the guest's private address, so a
+            detach need not re-state the address being taken away.
 
     OperationRequest:
       type: object

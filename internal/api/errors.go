@@ -89,6 +89,10 @@ func (response *errorResponse) VisitResizeVirtualMachineResponse(writer http.Res
 	return response.write(writer)
 }
 
+func (response *errorResponse) VisitReservedIpVirtualMachineResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
 func (response *errorResponse) VisitPutVirtualMachineResponse(writer http.ResponseWriter) error {
 	return response.write(writer)
 }
