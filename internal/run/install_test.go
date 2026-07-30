@@ -111,3 +111,47 @@ func statError(path string) error {
 	_, err := os.Stat(path)
 	return err
 }
+
+// A symlink at the spool path must be refused, not followed. The sudoers lines
+// pin the source PATH; they cannot pin its inode, and install(1) follows a link
+// — so a daemon that could point its own spool at a root-only file would have
+// that file's contents copied out under the sudoers line's mode. One of those
+// modes is 0444. Demonstrated on a live host with a canary before this guard.
+func TestSpoolRefusesToFollowASymlinkAtItsOwnPath(t *testing.T) {
+	directory := t.TempDir()
+	secret := filepath.Join(directory, "root-only")
+	if err := os.WriteFile(secret, []byte("CANARY"), 0o600); err != nil {
+		t.Fatalf("could not write the canary: %v", err)
+	}
+	spool := filepath.Join(directory, "spool", "install")
+	if err := os.MkdirAll(filepath.Dir(spool), 0o700); err != nil {
+		t.Fatalf("could not create the spool directory: %v", err)
+	}
+	if err := os.Symlink(secret, spool); err != nil {
+		t.Fatalf("could not plant the symlink: %v", err)
+	}
+	runner := NewRunner(nil)
+	runner.spoolPath = spool
+
+	err := runner.spool("replacement")
+
+	// Either outcome is safe, and both are asserted: the link is refused, or it
+	// was unlinked and a fresh file created. What must never happen is the
+	// canary's bytes surviving where install(1) would then read them.
+	if content, readErr := os.ReadFile(secret); readErr != nil || string(content) != "CANARY" {
+		t.Errorf("the canary was written through the link: %q (%v)", content, readErr)
+	}
+	if err == nil {
+		written, readErr := os.ReadFile(spool)
+		if readErr != nil {
+			t.Fatalf("the spool is unreadable after a successful write: %v", readErr)
+		}
+		if string(written) != "replacement" {
+			t.Errorf("the spool holds %q, want the content just written", written)
+		}
+		info, statErr := os.Lstat(spool)
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 {
+			t.Errorf("the spool is still a symlink after the write (%v)", statErr)
+		}
+	}
+}
