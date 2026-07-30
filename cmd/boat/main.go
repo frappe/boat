@@ -36,6 +36,7 @@ usage:
   boat host facts
   boat vm-network-up <uuid>
   boat vm-network-down <uuid>
+  boat vm-disk-up <uuid>
   boat version
 
 The six verbs on one line take a UUID and nothing else: their arguments are the
@@ -67,6 +68,8 @@ func dispatch(arguments []string, output io.Writer, errorOutput io.Writer) int {
 		return vmNetworkUp(arguments[1:], errorOutput)
 	case "vm-network-down":
 		return vmNetworkDown(arguments[1:], errorOutput)
+	case "vm-disk-up":
+		return vmDiskUp(arguments[1:], errorOutput)
 	case "version":
 		// The binary's own identity, which is a local fact — the daemon's is on
 		// /health, and the two differing is exactly what an operator wants to see.

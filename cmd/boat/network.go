@@ -6,6 +6,7 @@ import (
 
 	"github.com/frappe/boat/internal/netapply/vmnetwork"
 	"github.com/frappe/boat/internal/run"
+	"github.com/frappe/boat/internal/vmdisk"
 )
 
 // vmNetworkUp and vmNetworkDown are the firecracker-vm@ unit's ExecStartPre and
@@ -24,6 +25,14 @@ func vmNetworkUp(arguments []string, errorOutput io.Writer) int {
 
 func vmNetworkDown(arguments []string, errorOutput io.Writer) int {
 	return runNetworkHook(arguments, errorOutput, vmnetwork.Down)
+}
+
+// vmDiskUp is the unit's disk ExecStartPre — re-activate the VM's thin snapshot LV
+// and re-expose its block node in the jail. A host hook like the network ones, run
+// in-process (not through the daemon), because it must complete before the jailer's
+// ExecStart opens rootfs.ext4.
+func vmDiskUp(arguments []string, errorOutput io.Writer) int {
+	return runNetworkHook(arguments, errorOutput, vmdisk.Up)
 }
 
 func runNetworkHook(
