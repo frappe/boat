@@ -38,6 +38,9 @@ usage:
   boat vm-network-down <uuid>
   boat vm-disk-up <uuid>
   boat bootstrap
+  boat image-import <name> <rootfs-file> <disk-gb>
+  boat vm-create-disk <uuid> <image-name>
+  boat metrics
   boat version
 
 The six verbs on one line take a UUID and nothing else: their arguments are the
@@ -78,6 +81,8 @@ func dispatch(arguments []string, output io.Writer, errorOutput io.Writer) int {
 		return imageImport(arguments[1:], errorOutput)
 	case "vm-create-disk":
 		return vmCreateDisk(arguments[1:], errorOutput)
+	case "metrics":
+		return metricsCommand(arguments[1:], output, errorOutput)
 	case "version":
 		// The binary's own identity, which is a local fact — the daemon's is on
 		// /health, and the two differing is exactly what an operator wants to see.
