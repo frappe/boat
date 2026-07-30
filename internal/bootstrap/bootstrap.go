@@ -51,9 +51,12 @@ var packages = []string{
 	"qemu-utils", "nbd-client", "socat", "zstd",
 }
 
-// kernelModules are loaded now and persisted for reboots: the thin-pool target, the
-// migration clone/nbd targets, and the WireGuard mesh carrier.
-var kernelModules = []string{"dm_thin_pool", "nbd", "dm_clone", "wireguard"}
+// additiveModules are loaded best-effort and persisted: the WireGuard mesh carrier
+// and the migration clone/nbd targets. nbd/dm_clone live in linux-modules-extra
+// (not the base cloud kernel), so they load only after that package installs, and
+// a host that never migrates does not need them to boot a VM. dm_thin_pool (the
+// pool target) is required and loaded separately, fail-loud.
+var additiveModules = []string{"wireguard", "nbd", "dm_clone"}
 
 // Run brings the host to VM-ready. Progress goes to the runner's trace (stderr),
 // so `boat bootstrap` reads like the Python's `+ command` log.
@@ -161,14 +164,24 @@ func installSysctls(ctx context.Context, runner *run.Runner) error {
 	return err
 }
 
-// loadModules loads each kernel module now and persists it for reboots.
+// loadModules loads the pool target (required) and the mesh/migration targets
+// (best-effort, after their package), and persists them for reboots.
 func loadModules(ctx context.Context, runner *run.Runner) error {
-	for _, module := range kernelModules {
-		if _, err := runner.Run(ctx, "sudo modprobe {}", module); err != nil {
-			return err
-		}
+	// nbd/dm_clone ship in linux-modules-extra, version-pinned to the running kernel
+	// — never the floating -generic metapackage, which can drag in a different one.
+	kernel, err := runner.Run(ctx, "uname -r")
+	if err != nil {
+		return err
 	}
-	content := strings.Join(kernelModules, "\n") + "\n"
+	runner.RunUnchecked(ctx, "sudo apt-get -o DPkg::Lock::Timeout=300 install -y linux-modules-extra-{}", strings.TrimSpace(kernel))
+
+	if _, err := runner.Run(ctx, "sudo modprobe dm_thin_pool"); err != nil {
+		return err
+	}
+	for _, module := range additiveModules {
+		runner.RunUnchecked(ctx, "sudo modprobe {}", module)
+	}
+	content := "dm_thin_pool\n" + strings.Join(additiveModules, "\n") + "\n"
 	return runner.InstallFile(ctx, content, "/etc/modules-load.d/60-atlas.conf", "0644")
 }
 
