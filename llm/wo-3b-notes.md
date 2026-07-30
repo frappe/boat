@@ -85,25 +85,40 @@ run_task` (mirrors every other verb); added `BoatClient.reserved_ip_virtual_mach
   invariant transactionally. Left as the documented follow-up the "first caller"
   was meant to exercise.
 
-## Deferred / remaining WO-3b work (for review) — deliberately NOT rushed
-- **The big one: per-VM network-up/down apply** — port of `vm-network-up.py`
-  (306 LOC) + `vm-network-down.py` (140 LOC). netns/veth/tap, NAT44 masquerade,
-  host IMDS-drop, proxy-NDP, /128 + /32 routes, sysctls, per-VM nft isolation,
-  and it also calls `private_network.py` / `wireguard.py` / `firewall.py` (the
-  ANCP-adjacent private plane) + `localownership.add/remove` + the reserved-ip
-  apply this pass already ported. **Deliberately not started this pass:** it is
-  the `firecracker-vm@` ExecStartPre hook — the most restart-sensitive path — a
-  rendering slip here is "a VM off the network", §3.5 mandates the live-host
-  differential harness before it cuts over, and I had no proxy/test VM to
-  differential-test against tonight. This wants a careful dedicated pass on a
-  live host, not an overnight port. Note the public-vs-private (ANCP) boundary
-  is a real decision inside this module — which of apply_private_network /
-  apply_persisted_tunnels / apply_persisted_firewall are Boat's vs stay
-  networkd's must be settled first (spec §6.1 says the wg peer table is ANCP's).
-- **Customer-gateway host forwarding** (Atlas-computed, Boat-applied) — smaller,
-  self-contained; a good next bounded slice after the network-up decision above.
-- **Live-host differential harness** (§3.5) still owed. Reserved-ip + everything
-  this pass is unit/golden-verified only.
+**per-VM network-up/down apply — SHIPPED and PROVEN on a live host.** Commits
+`c62782c` (park.Unpark export), `1623d9f` (`internal/netapply/vmnetwork`),
+`6f96308` (`boat vm-network-up/down` CLI hooks). Port of `vm-network-up.py`
+(306 LOC) + `vm-network-down.py` (140 LOC): netns/veth/tap, NAT44 masquerade,
+IMDS-drop, proxy-NDP, /128 + /32 routes, sysctls, per-VM nft isolation. Unpark
+delegates to park, reserved-ip re-apply to `reservedip.Attach`.
+
+**The §3.5 differential harness — built and passed (this is what I'd wrongly
+called "owed" before).** Method: staged the Python reference scripts on host-1
+(no VMs, safe lab), ran `vm-network-up.py`/`down.py` for a synthetic test VM,
+captured the exact command trace + host effects; then ran `boat vm-network-up/
+down` for the same VM and diffed. Result: **byte-identical host effects** —
+same netns, same nft forward rules, same `2001:db8::2 via fe80::3` route, same
+proxy-NDP, same v4 /32 route, tap present in the namespace; teardown removed all
+of it. Golden command traces are locked in `vmnetwork_test.go`. host-1 left clean.
+
+**Still deferred inside the network module (config-gated, absent on a public VM):**
+- The **private plane** — `apply_private_network` + WireGuard host mesh
+  (`apply_persisted_tunnels`) + `apply_persisted_firewall` + the local-ownership
+  write/withdraw. Gated on PRIVATE_ADDRESS / persisted config. The public-vs-ANCP
+  boundary decision (spec §6.1: the wg peer table is ANCP's) governs which of
+  these become Boat's — settle that before porting them. `localownership` (already
+  shipped) is the writer this block needs.
+- **The cutover is NOT done.** `firecracker-vm@.service` still runs the Python
+  `vm-network-up.py`/`down.py` hooks; nothing re-points ExecStartPre/ExecStopPost
+  to `boat vm-network-up/down`. The Go path is proven equivalent but not yet live
+  on any real VM's unit. Re-pointing the unit (+ the Atlas install.sh change) is
+  the "go live" step, to be done deliberately per §3.5's per-module gate.
+
+## Remaining WO-3b work (for review)
+- **Customer-gateway host forwarding** — a resident-daemon port (`gateway.service`
+  → `boat gateway`), WO-5-adjacent, not a bounded apply.
+- **Reserved-IP live exercise** — shipped + unit/golden-verified, and now the same
+  host-1 lab could live-verify it (attach a reserved IP to a test VM); not yet done.
 
 ## Known gaps / things to double-check
 - **Nothing shipped this pass has been exercised on a live host.** The boat hosts
