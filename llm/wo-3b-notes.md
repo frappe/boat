@@ -120,6 +120,18 @@ of it. Golden command traces are locked in `vmnetwork_test.go`. host-1 left clea
 - **Reserved-IP live exercise** — shipped + unit/golden-verified, and now the same
   host-1 lab could live-verify it (attach a reserved IP to a test VM); not yet done.
 
+## Bug found via the differential (for review / upstream fix)
+- **`vm-network-up.py` adds a duplicate forward-accept rule on every restart.**
+  nft echoes an interface name back QUOTED (`oifname "atlas-hdeadbe"` — proven on
+  host-1), so the Python's unquoted idempotency guard `f"...oifname {host_veth}"`
+  never matches its own rule on a re-list, and it re-adds both v6 accepts each
+  boot — splitting the traffic counter its own comment warns about. The Go port
+  (`vmnetwork.forwardRules`) strips the quotes before matching, so a restart is a
+  no-op: **verified live** — two `boat vm-network-up` runs left exactly 2 rules,
+  not 4 (commit `ddc89d5`). The Python should get the same fix; until then a
+  Python-managed host accumulates dead duplicate accepts (functionally harmless,
+  but the counter is wrong, which misleads the sleepy-VM idle sweep).
+
 ## Known gaps / things to double-check
 - **Nothing shipped this pass has been exercised on a live host.** The boat hosts
   (host-1 e77b6e0, host-2 b1e7279) run builds behind main and have no VMs; the
