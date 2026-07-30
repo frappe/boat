@@ -316,11 +316,13 @@ func TestTheTrapPollsThroughARunnerThatCannotTrace(t *testing.T) {
 // read is the public /128 and not one of the four others sharing the file.
 func TestTheAddressIsReadFromTheVirtualMachinesOwnSidecar(t *testing.T) {
 	fake := newFakeCommands()
+	fake.present[sidecarProbe(testUUID)] = true
 	fake.outputs[environmentOf(testUUID)] = environmentText(testAddress)
 	parker := &parker{commands: fake, filesFor: testFiles}
 
-	if got := parker.address(context.Background(), testUUID); got != testAddress {
-		t.Errorf("address = %q, want %q", got, testAddress)
+	got, found, err := parker.address(context.Background(), testUUID)
+	if err != nil || !found || got != testAddress {
+		t.Errorf("address = %q found=%v err=%v, want %q", got, found, err, testAddress)
 	}
 }
 
@@ -330,8 +332,22 @@ func TestTheAddressIsReadFromTheVirtualMachinesOwnSidecar(t *testing.T) {
 func TestAMissingSidecarYieldsNoAddress(t *testing.T) {
 	parker := &parker{commands: newFakeCommands(), filesFor: testFiles}
 
-	if got := parker.address(context.Background(), testUUID); got != "" {
-		t.Errorf("address = %q, want none", got)
+	got, found, err := parker.address(context.Background(), testUUID)
+	if err != nil || found || got != "" {
+		t.Errorf("address = %q found=%v err=%v, want a proven absence", got, found, err)
+	}
+}
+
+// An UNREADABLE sidecar is not a missing one, and reading it as one was an
+// outage: the address came back empty, parking an empty address is a no-op, and
+// Sleep reported success with the guest stopped and nothing trapping its /128.
+func TestAnUnreadableSidecarIsAnErrorAndNotAnAbsentAddress(t *testing.T) {
+	fake := newFakeCommands()
+	fake.failing[sidecarProbe(testUUID)] = true
+	parker := &parker{commands: fake, filesFor: testFiles}
+
+	if _, _, err := parker.address(context.Background(), testUUID); err == nil {
+		t.Error("a sidecar that could not be read was reported as a VM with no address")
 	}
 }
 

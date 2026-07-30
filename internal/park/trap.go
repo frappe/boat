@@ -2,6 +2,7 @@ package park
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
@@ -238,7 +239,11 @@ func (trap *Trap) reparkInTurn(ctx context.Context, uuid string) error {
 			// rebuilt the real path; re-parking now would take it back down.
 			return nil
 		}
-		return trap.sweeper.park(ctx, uuid, trap.sweeper.address(ctx, uuid))
+		address, _, err := trap.sweeper.address(ctx, uuid)
+		if err != nil {
+			return err
+		}
+		return trap.sweeper.park(ctx, uuid, address)
 	}
 	if trap.serialize == nil {
 		return repark(ctx)
@@ -291,15 +296,38 @@ func (trap *Trap) sleeping(ctx context.Context) []string {
 	return sleeping
 }
 
-// address reads a VM's /128 out of its network.env.
+// address reads a VM's /128 out of its network.env, telling an absent sidecar
+// from an unreadable one.
 //
-// Unchecked: a VM whose sidecar is gone — a terminate that got as far as the
-// files but not the marker — yields "", and parking an empty address is a no-op
-// rather than a trap installed for an address this host no longer holds.
-func (parker *parker) address(ctx context.Context, uuid string) string {
-	text, err := parker.commands.RunUnchecked(ctx, "sudo cat {}", parker.filesFor(uuid).networkEnvironment)
+// A VM whose sidecar is gone — a terminate that got as far as the files but not
+// the marker — has no /128 to trap for, and parking an empty address is rightly
+// a no-op rather than a trap pointing nowhere. That is what `found` reports.
+//
+// An unreadable sidecar is NOT that, and reading it as that was a real outage.
+// This used to be RunUnchecked, which returns a nil error for a non-zero exit,
+// so a denied sudo produced "" and two individually defensible decisions
+// composed into a third nobody chose: "could not read the address" became "this
+// VM has no address" became "no trap is needed" became SUCCESS. `parkForWake`
+// states the guarantee that breaks in full — "a VM that is asleep and untrapped
+// is a VM that answers nothing and that no traffic can revive, and reporting
+// that as a successful sleep would hide an outage behind a green Task" — and it
+// was reached by the one route that paragraph did not consider, because nothing
+// failed. Demonstrated on a live host by removing one `cat` grant: a green
+// sleep, a stopped guest, no route, no counter, and not one line in any log.
+func (parker *parker) address(ctx context.Context, uuid string) (address string, found bool, err error) {
+	files := parker.filesFor(uuid)
+	present, err := parker.commands.Probe(ctx, "sudo test -f {}", files.networkEnvironment)
 	if err != nil {
-		return ""
+		return "", false, fmt.Errorf("looking for the sidecar of %s: %w", uuid, err)
 	}
-	return sidecar.Value(text, addressKey)
+	if present != run.Yes {
+		return "", false, nil
+	}
+	text, err := parker.commands.Run(ctx, "sudo cat {}", files.networkEnvironment)
+	if err != nil {
+		return "", false, fmt.Errorf("reading the sidecar of %s: %w", uuid, err)
+	}
+	// A sidecar that is there and names no address is an answer, not a failure:
+	// a VM provisioned without public networking has none to park.
+	return sidecar.Value(text, addressKey), true, nil
 }

@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/frappe/boat/internal/run"
 	"log/slog"
 	"strings"
 	"testing"
@@ -71,6 +72,12 @@ const defaultRouteOutput = `[{"dst":"default","gateway":"fe80::1","dev":"eth0","
 
 func markerOf(uuid string) string {
 	return "sudo test -f /var/lib/atlas/virtual-machines/" + uuid + "/sleeping"
+}
+
+// sidecarProbe is the presence question asked before the sidecar is read, so a
+// test can script "there" and "could not look" separately.
+func sidecarProbe(uuid string) string {
+	return "sudo test -f " + testFiles(uuid).networkEnvironment
 }
 
 func environmentOf(uuid string) string {
@@ -134,6 +141,7 @@ func (fake *fakeCommands) withScaffold() *fakeCommands {
 func (fake *fakeCommands) withSleeping(uuid string, address string) *fakeCommands {
 	fake.withDirectory(uuid)
 	fake.present[markerOf(uuid)] = true
+	fake.present[sidecarProbe(uuid)] = true
 	fake.outputs[environmentOf(uuid)] = environmentText(address)
 	return fake
 }
@@ -190,6 +198,23 @@ func (fake *fakeCommands) OK(_ context.Context, template string, parameters ...a
 	command := render(template, parameters...)
 	fake.record("? ", command)
 	return fake.present[command]
+}
+
+// Probe answers in three values, so a test can say "denied" as well as "no".
+// The bool the old gate returned could not, which is how a denied `cat` became
+// "this VM has no address" became "no trap needed" became a green sleep.
+func (fake *fakeCommands) Probe(
+	_ context.Context, template string, parameters ...any,
+) (run.Answer, error) {
+	command := render(template, parameters...)
+	fake.record("? ", command)
+	if fake.failing[command] {
+		return run.Unknown, fmt.Errorf("could not run %s", command)
+	}
+	if fake.present[command] {
+		return run.Yes, nil
+	}
+	return run.No, nil
 }
 
 func (fake *fakeCommands) issued(fragment string) bool {

@@ -92,6 +92,7 @@ type commands interface {
 	Run(ctx context.Context, template string, parameters ...any) (string, error)
 	RunUnchecked(ctx context.Context, template string, parameters ...any) (string, error)
 	OK(ctx context.Context, template string, parameters ...any) bool
+	Probe(ctx context.Context, template string, parameters ...any) (run.Answer, error)
 }
 
 var _ commands = (*run.Runner)(nil)
@@ -161,7 +162,11 @@ func ParkVirtualMachine(ctx context.Context, runner *run.Runner, uuid string) er
 	if err := parker.ensureDevice(ctx); err != nil {
 		return err
 	}
-	return parker.park(ctx, uuid, parker.address(ctx, uuid))
+	address, _, err := parker.address(ctx, uuid)
+	if err != nil {
+		return err
+	}
+	return parker.park(ctx, uuid, address)
 }
 
 func (parker *parker) ensureDevice(ctx context.Context) error {

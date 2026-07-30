@@ -37,7 +37,16 @@ import (
 // the set Boat itself installed.
 func Retire(ctx context.Context, runner *run.Runner, uuid string) error {
 	parker := newParker(runner)
-	return parker.retire(ctx, uuid, parker.address(ctx, uuid))
+	// A terminate reaches here after the tree may already be partly gone, so an
+	// ABSENT sidecar is ordinary and its address is simply unknown — the
+	// UUID-named rule and counter are still withdrawn. An UNREADABLE one is not
+	// ordinary, and failing here is what keeps `rm -rf` from taking the only
+	// record of an address this host would go on answering NDP for.
+	address, _, err := parker.address(ctx, uuid)
+	if err != nil {
+		return err
+	}
+	return parker.retire(ctx, uuid, address)
 }
 
 func (parker *parker) retire(ctx context.Context, uuid string, address string) error {
