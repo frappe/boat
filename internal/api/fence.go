@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"github.com/frappe/boat/internal/wire"
 
 	"github.com/frappe/boat/internal/fence"
 )
@@ -22,6 +23,15 @@ func (server *Server) refuseUnfenced(uuid string) *errorResponse {
 	switch {
 	case errors.Is(err, fence.ErrNoFence):
 		return conflict("This host holds no fence epoch for " + uuid + " and will not boot it until Atlas asserts one.")
+	case errors.Is(err, fence.ErrNoAuthority):
+		// A separate sentence from the no-fence one on purpose. No fence sends an
+		// operator to re-register a host that lost its store; no authority tells
+		// them this host has been told to stop holding intent for a VM another host
+		// may now own, and that re-asserting it here is the thing not to do
+		// reflexively.
+		return conflictBecause(wire.ErrorReasonNoFence,
+			"This host holds no desired state for "+uuid+
+				", so it will not boot it; assert the desired state first.")
 	case errors.Is(err, fence.ErrStaleEpoch):
 		return conflict("The fence epoch this host holds for " + uuid + " has been superseded, so it will not boot it.")
 	case err != nil:
@@ -47,10 +57,25 @@ func (server *Server) refuseUnfenced(uuid string) *errorResponse {
 //
 // Closing it needs two things. One now exists: desired state can be RETRACTED,
 // so a host that no longer owns a VM can be told to stop holding intent for it
-// (DELETE /vms/{uuid}, and terminate does it for itself). The retraction
-// deliberately leaves the epoch behind — see retract — so a source host that has
-// been evacuated still refuses a boot under an epoch it has already seen
-// superseded, once there is one.
+// (DELETE /vms/{uuid}, and terminate does it for itself).
+//
+// Retraction arrived with this gate letting a retracted VM boot, which is the
+// opposite of the point, and it is worth writing down because the reasoning
+// looked sound. The retraction keeps the epoch — a retraction removes an
+// authority and must not grant one, since clearing the fence leaves the host
+// holding NO epoch, which any fresh PUT satisfies including a stale one from a
+// partitioned Atlas. That argument is right. What it missed is that the desired
+// record is the only carrier of a REQUESTED epoch, so deleting it made this
+// function compare the held epoch with itself and return nil — permanently, and
+// for the one host that most needs refusing: an evacuated migration source,
+// whose tree survives a keep-address repoint, so the Exists gate passes too.
+// Before retraction existed Atlas's tool was PUT desired_power=Stopped, which
+// start and wake did refuse. So the feature removed a working guard.
+//
+// Hence: NO DESIRED RECORD IS A REFUSAL. It is the same rule the reconciler has
+// always applied — reconcile/converge.go treats an absent record as no authority
+// to act — and the verbs simply did not share it. A VM this host holds no intent
+// for is not a VM this host may boot, whatever epoch it still remembers.
 //
 // The other does not: Atlas must BUMP the epoch at a migration's repoint, and
 // nothing in Atlas writes boot_epoch except the initial 1. Until it does, every
@@ -70,9 +95,11 @@ func (server *Server) allowedToBoot(uuid string) error {
 	if err != nil {
 		return fmt.Errorf("could not read the desired state for %s: %w", uuid, err)
 	}
-	requestedEpoch := heldEpoch
-	if found {
-		requestedEpoch = record.BootEpoch
+	if !found {
+		return fmt.Errorf(
+			"%w: this host holds no desired state for %s, so it holds no authority to boot it",
+			fence.ErrNoAuthority, uuid,
+		)
 	}
-	return fence.Allow(heldEpoch, held, requestedEpoch)
+	return fence.Allow(heldEpoch, held, record.BootEpoch)
 }

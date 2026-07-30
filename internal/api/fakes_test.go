@@ -66,7 +66,18 @@ func newFakeStore() *fakeStore {
 // fence records an epoch the way a PUT would. A start is refused without one, so
 // every test that expects a VM to boot has to say Atlas asserted it — which is
 // the fence doing its job, not test ceremony.
+// fence records the epoch AND the desired record, because a PUT writes both
+// from one document and a fence with no desired state is therefore not a state
+// Atlas can produce. It is reachable only by a retraction, which the gate now
+// refuses — so a test that wants that state says so with fenceWithoutDesire.
 func (fake *fakeStore) fence(uuid string, epoch int64) {
+	fake.fenceWithoutDesire(uuid, epoch)
+	fake.desire(model.DesiredVirtualMachine{
+		UUID: uuid, BootEpoch: epoch, DesiredPower: model.PowerRunning,
+	})
+}
+
+func (fake *fakeStore) fenceWithoutDesire(uuid string, epoch int64) {
 	fake.mutex.Lock()
 	defer fake.mutex.Unlock()
 	fake.fences[uuid] = epoch

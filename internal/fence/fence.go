@@ -21,6 +21,16 @@ var ErrNoFence = errors.New("this host holds no fence epoch for the virtual mach
 // issued.
 var ErrStaleEpoch = errors.New("the requested fence epoch is older than the one this host holds")
 
+// ErrNoAuthority means Boat holds an epoch for the VM but no desired state, so
+// there is nothing this host has been asked to do with it.
+//
+// Distinct from ErrNoFence, and the distinction is operational: no fence is a
+// host that has lost its store and needs re-registering, while no authority is a
+// host that has been told — by a retraction, or by a terminate — to stop holding
+// intent for a VM someone else may now own. Conflating them would send an
+// operator to re-assert intent on the one host that must not have it.
+var ErrNoAuthority = errors.New("this host holds no desired state for the virtual machine")
+
 // Allow reports whether this host may boot the VM under requestedEpoch, given
 // the epoch its store holds and whether it holds one at all. A nil error is
 // permission; any error is a refusal, and a refused caller must not start

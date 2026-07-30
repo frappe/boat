@@ -31,6 +31,13 @@ type streamedEvent struct {
 func TestWatchStreamsAnObservedChangeToAConnectedClient(t *testing.T) {
 	state := newFakeStore()
 	state.fence(testUuid, 1)
+	// A fence alone no longer permits a boot: a host holding no desired state
+	// holds no authority to act on the VM (internal/api/fence.go). This test is
+	// about the stream rather than the gate, so it asserts the intent the way
+	// Atlas does before every verb.
+	state.desire(model.DesiredVirtualMachine{
+		UUID: testUuid, BootEpoch: 1, DesiredPower: model.PowerRunning,
+	})
 	machines := &fakeVirtualMachines{observed: model.VirtualMachine{ObservedStatus: model.StatusRunning}}
 	daemon := httptest.NewServer(newTestServer(state, machines).SocketHandler())
 	defer daemon.Close()

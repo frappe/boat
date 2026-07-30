@@ -259,22 +259,32 @@ func TestWakeIsFencedLikeAStart(t *testing.T) {
 	}
 }
 
-// A VM this host holds no desired state for is not refused: there is no
-// assertion to outrank, and refusing would leave the operator with a VM nothing
-// could wake.
-func TestWakeIsAllowedWhenAtlasHasAssertedNothing(t *testing.T) {
+// A VM this host holds no desired state for is REFUSED, and this test used to
+// assert the opposite.
+//
+// The old reasoning was that there is no assertion to outrank and refusing would
+// leave an operator with a VM nothing could wake. That was defensible while the
+// only way to reach "fence held, no desired record" was a crash between assert's
+// two writes — which Atlas heals on its own, because every verb PUTs first.
+//
+// Retraction made the same state mean something else: this host has been told to
+// stop holding intent for a VM another host may now own. A keep-address repoint
+// leaves the tree in place, so Exists passes, and the old behaviour started the
+// guest — two live copies of one VM on one disk, which is the failure the fence
+// exists for. Refusing costs an operator one PUT; allowing costs a split brain.
+func TestWakeIsRefusedWhenThisHostHoldsNoDesiredState(t *testing.T) {
 	operations := newFakeStore()
-	operations.fence(testUuid, 1)
+	operations.fenceWithoutDesire(testUuid, 1)
 	machines := &fakeVirtualMachines{}
 	handler := newTestServer(operations, machines).SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/wake", wire.OperationRequest{OperationId: "Task-12"})
 
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("got %d, want 200: %s", recorder.Code, recorder.Body)
+	if recorder.Code == http.StatusOK {
+		t.Fatalf("a retracted VM was woken: %d %s", recorder.Code, recorder.Body)
 	}
-	if machines.wakes != 1 {
-		t.Errorf("the VM was woken %d times, want 1", machines.wakes)
+	if machines.wakes != 0 {
+		t.Errorf("the VM was woken %d times, want 0", machines.wakes)
 	}
 }
 
