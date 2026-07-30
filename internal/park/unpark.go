@@ -71,13 +71,29 @@ func (parker *parker) retire(ctx context.Context, uuid string, address string) e
 	return err
 }
 
+// Unpark removes a VM's parked state — the trap rule, its named counter and the
+// off-link route — reading its address from its own network.env the way Retire
+// and ParkVirtualMachine do.
+//
+// This is the bring-up caller unpark was written for: vm-network-up runs it
+// BEFORE rebuilding the real namespace, so the client's retransmitted SYN meets
+// a live guest rather than the drop rule. proxy-NDP is deliberately left in place
+// (unlike Retire) — a bring-up is about to re-assert it for a VM coming back.
+func Unpark(ctx context.Context, runner *run.Runner, uuid string) error {
+	parker := newParker(runner)
+	address, _, err := parker.address(ctx, uuid)
+	if err != nil {
+		return err
+	}
+	return parker.unpark(ctx, uuid, address)
+}
+
 // unpark removes a VM's parked state: the trap rule, its named counter and the
 // off-link route.
 //
 // It belongs at the top of a network bring-up, BEFORE the real namespace is
 // rebuilt, so that the client's retransmitted SYN meets a live guest rather than
-// the drop rule — that caller is the Go vm-network-up of WO-3 and does not exist
-// yet, which is why the only caller today is the teardown above. Best-effort and
+// the drop rule — the exported Unpark above is that caller. Best-effort and
 // idempotent: an ordinary start unparks a VM that was never parked, and that is
 // a no-op.
 //
