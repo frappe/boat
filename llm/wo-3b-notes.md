@@ -132,7 +132,44 @@ of it. Golden command traces are locked in `vmnetwork_test.go`. host-1 left clea
   Python-managed host accumulates dead duplicate accepts (functionally harmless,
   but the counter is wrong, which misleads the sleepy-VM idle sweep).
 
-## The cutover, and a boat-host gap it exposed (for review)
+## WO-3b network apply — COMPLETE and proven (2026-07-30, second session push)
+The full `vm-network-up`/`down` is now ported and **differentiated byte-for-byte
+on host-1** against the Python — public plane, private tenant isolation, AND the
+public-ingress firewall, in one bring-up:
+- **Public plane** (`vmnetwork.go`/`down.go`, `network.go` CLI) — commits
+  `c62782c`/`1623d9f`/`6f96308`; differential passed; a latent Python
+  restart-duplicate bug found & fixed (`ddc89d5`).
+- **Private plane** (`private.go`) — commit `d82af3a`; tenant-isolation nft rules
+  byte-identical live (security-critical), ownership cache tracked.
+- **Firewall** (`firewall.go`) — commit `1e34aa3`; `public_filter` chain
+  byte-identical live.
+- **Capstone**: a full public+private+firewall bring-up flushed-and-compared on
+  host-1 diffed **byte-identical**; teardown removed all of it; ownership cleared.
+
+**The one remaining `vm-network-up` sub-module: WireGuard tunnels (step 9).**
+`apply_persisted_tunnels` / `wireguard.py` (276 LOC — wg interfaces, keys via
+stdin, peers, routes) is NOT ported. A VM with persisted tunnels would lose them
+on a boat-run bring-up, so it stays on the Python hook until this lands. Boat
+hosts have no tunnel VMs, so nothing regresses today.
+
+## The cutover — exact steps + its real dependencies (do NOT force fleet-wide)
+The go-live is re-pointing the `firecracker-vm@.service` hooks:
+```
+ExecStartPre=… vm-network-up.py %i   → ExecStartPre=/usr/local/bin/boat vm-network-up %i
+ExecStopPost=… vm-network-down.py %i → ExecStopPost=/usr/local/bin/boat vm-network-down %i
+```
+NOT done, because it is genuinely gated (I chose not to ship a regression):
+1. **WireGuard** — a tunnel VM regresses until step 9 ports. Cut over only hosts
+   with no tunnel VMs, or port wireguard first.
+2. **Boat hosts need MORE than the network hooks.** They have no `firecracker-vm@`
+   unit at all, and the sibling hooks `vm-disk-up`/`vm-restore` are still Python
+   and not ported — so a full boat-host unit needs those too (WO-1b + storage).
+   The 2-line swap works today only on a Python host that ALSO has boat installed.
+3. It is a shared, fleet-wide template with no per-host gate.
+Recommendation: port wireguard + the disk/restore hooks, then have WO-1b install a
+boat-hook unit on boat hosts; leave Python hosts on the Python unit until migrated.
+
+## (earlier) The cutover, and a boat-host gap it exposed (for review)
 - **The cutover is a clean 2-line swap** in `scripts/systemd/firecracker-vm@.service`:
   `ExecStartPre=/var/lib/atlas/venv/bin/python /var/lib/atlas/bin/vm-network-up.py %i`
   → `ExecStartPre=/usr/local/bin/boat vm-network-up %i` (and the ExecStopPost
