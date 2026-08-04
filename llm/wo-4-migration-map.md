@@ -203,3 +203,25 @@ of the source.
    is wired.
 4. **Delete the `fence.go:allowedToBoot` tautology comment** only once a test
    proves a stale epoch is refused end-to-end (the comment says exactly this).
+
+## Migration dogfood on hosts (2026-08-04, deployment layer)
+Deployed the migration binary + sudoers to atlas-host-1 and verified the `boat`
+user (uid 999) can run the phase transport commands via `sudo -n -l`:
+- GRANTED (confirmed): `dmsetup info … -clone`, `lvremove -f atlas/atlas-snap-<UUID>-migrate`
+  (full-UUID hex pattern), `blockdev --getsize64 /dev/nbd*`, `qemu-nbd … --pid-file=
+  /var/lib/atlas/run/migrate-nbd-<port>.pid --fork …` (pid-file pattern matches
+  commands.go:93 exactly).
+- **REAL FINDING — `nbd-client -N "" * <5-digit> /dev/nbd* -persist` is DENIED by
+  `sudo -l` even with a true empty arg.** The sudoers `""` empty-argument match does
+  not verify. Either sudo's `-l` mis-reports empty-arg grants (possible — confirm at
+  EXECUTION time with a real daemon-driven clone-target/base-ship), OR the grant is
+  broken and clone-target/receive-base will fail when the daemon (User=boat) runs
+  nbd-client. FIX CANDIDATES: (a) drop the empty `-N ""` if a modern nbd-client
+  connects to the default export without it; (b) rework the sudoers arg pattern for
+  the empty name. MUST resolve before a live migration on a boat host.
+
+Still NOT dogfooded (the real end-to-end): a daemon-driven 9-phase saga across two
+hosts with a real VM — needs `boat daemon` on both, a desired record + fence epoch,
+a booted VM, and the phases driven via `/vms/{uuid}/migrate/{phase}` with the guest
+surviving on the target. Large; the transport (nbd+dm-clone) + sudoers above are the
+prerequisites now verified/flagged.
