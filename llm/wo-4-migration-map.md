@@ -211,12 +211,12 @@ user (uid 999) can run the phase transport commands via `sudo -n -l`:
   (full-UUID hex pattern), `blockdev --getsize64 /dev/nbd*`, `qemu-nbd … --pid-file=
   /var/lib/atlas/run/migrate-nbd-<port>.pid --fork …` (pid-file pattern matches
   commands.go:93 exactly).
-- **REAL FINDING — `nbd-client -N "" * <5-digit> /dev/nbd* -persist` is DENIED by
-  `sudo -l` even with a true empty arg.** The sudoers `""` empty-argument match does
-  not verify. Either sudo's `-l` mis-reports empty-arg grants (possible — confirm at
-  EXECUTION time with a real daemon-driven clone-target/base-ship), OR the grant is
-  broken and clone-target/receive-base will fail when the daemon (User=boat) runs
-  nbd-client. FIX CANDIDATES: (a) drop the empty `-N ""` if a modern nbd-client
+- **CONFIRMED BUG — `nbd-client -N "" …` is DENIED at EXECUTION** (not just `-l`).
+  Verified on atlas-host-1 with a real loopback qemu-nbd server: `sudo -u boat sudo
+  -n nbd-client -N "" 127.0.0.1 13879 /dev/nbd0 -persist` → sudo denies it. The
+  sudoers `-N ""` pattern does not match a true empty argv element, so clone-target/
+  receive-base WILL FAIL when the daemon (User=boat) runs nbd-client.
+  FIX CANDIDATES: (a) drop the empty `-N ""` if a modern nbd-client
   connects to the default export without it; (b) rework the sudoers arg pattern for
   the empty name. MUST resolve before a live migration on a boat host.
 
