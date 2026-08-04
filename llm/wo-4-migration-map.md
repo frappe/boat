@@ -172,3 +172,34 @@ fn)` — the right home for per-VM phase actors.
     a boat host this must become boat's own `vm-network-down`.
 15. Plain-TCP data path on public IPv4 is unencrypted (stage-1). Keep the seam so
     a future WireGuard/SSH carrier drops in without touching phase logic.
+
+## Fence progress (2026-08-04)
+**DONE:** the single epoch bump. `atlas migration.py:_finalize_cutover` now does
+`vm.boot_epoch = (vm.boot_epoch or FIRST_BOOT_EPOCH) + 1` at repoint — the one
+point spec/33 §11.1 says an epoch advances. Idempotent (the server-flip guard
+above it runs once). This makes the target carry a higher epoch than the losing
+source, so `fence.Allow` can return `ErrStaleEpoch` for a stale/partitioned start
+of the source.
+
+**REMAINING (needs a live 2-host migration to dogfood — do NOT ship unproven):**
+1. **Route the cutover boot through boat's fenced path.** Today CutoverStarting
+   boots the target via `provision-vm` (a direct host script), so the target Boat
+   holds NO desired record / fence for the migrated VM — the epoch bump has nowhere
+   to land on the target until some later lifecycle PUT. The cutover boot must
+   instead be a fenced `PUT desired {Running, boot_epoch: N+1, server: target}` →
+   the target's reconciler starts it, carrying the clone-rootfs device. (Blueprint
+   gotcha #3.)
+2. **Raise the source's fence before repoint (§11.1 "fenced the source").** The
+   source is already `desired_power=Stopped` from Pending + retracted at Cleanup
+   (→ ErrNoAuthority), which covers the normal case. The residual hole is a
+   PARTITIONED Atlas re-PUTting {Running, epoch N} to the source after the target
+   owns it at N+1: raise the source's fence to N+1 (a Stopped PUT at the new epoch)
+   so that re-PUT is refused by SetFenceEpoch regression. Tolerate an unreachable
+   source ("source confirmed Unknown").
+3. **Add `server` to boat's `model.DesiredVirtualMachine` + wire** (defense-in-
+   depth `server == self` boot gate). Needs a reliable self-identity source on the
+   Boat daemon (host_id, not os.Hostname()) — get it from a config/registration
+   value, NOT a guess, or a host refuses its own VMs. Deferred until that source
+   is wired.
+4. **Delete the `fence.go:allowedToBoot` tautology comment** only once a test
+   proves a stale epoch is refused end-to-end (the comment says exactly this).
