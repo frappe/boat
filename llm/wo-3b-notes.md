@@ -230,3 +230,49 @@ boat-hook unit on boat hosts; leave Python hosts on the Python unit until migrat
   either is renamed.
 - `make check` (boat) is green at every commit; commits `3c88c6f`..`bb3a943` on
   `main`. Nothing pushed. Atlas commit on `feat/boat-split` (worktree), unpushed.
+
+## Dogfood on real hosts (Goal 3, 2026-08-04)
+
+Full VM lifecycle proven end-to-end via boat, zero manual host commands, on
+
+atlas-host-2 (168.144.209.248) and atlas-host-3 (64.227.155.9), plus a bare
+
+from-scratch bootstrap on atlas-host-1 (168.144.179.179):
+
+  boat bootstrap -> VM-ready (fc v1.16.0, jailer, thin pool0, nft scaffold, atlas-park0)
+
+  boat image-import / vm-create-disk / vm-disk-up / vm-network-up -> all exit 0
+
+  firecracker guest booted to Ubuntu 22.04.5 LTS login banner on boat-built netns+tap+disk
+
+  boat metrics -> live gauges (pool %, vms, firecracker running)
+
+  boat vm-network-down + lvremove -> clean, 0 residuals
+
+host-2 bootstrap was a clean single detached run (EXIT 0), idempotent over a
+
+pre-existing pool. host-3 earlier showed a spurious EXIT=1 caused by a
+
+double-launch dpkg-lock race, NOT a bootstrap bug (host ended VM-ready).
+
+
+
+### Known/by-design: nft "Could not process rule" on first vm-network-up
+
+unpark() (internal/park/unpark.go:114) issues `nft delete counter ... wake_<hex>`
+
+UNCONDITIONALLY as an idempotent removal. On a first-ever bring-up no counter
+
+exists, so nft prints "Error: Could not process rule: No such file or directory"
+
+to stderr, which run.invoke folds into the trace. This is BY DESIGN and pinned by
+
+TestUnparkOfAVirtualMachineThatWasNeverParkedDeletesNoRule ("both are idempotent
+
+removals ... unparked by exactly this sequence"). Functionally harmless — the verb
+
+returns 0. Tradeoff for a reviewer: the honest trace vs. training operators to
+
+ignore nft errors. A guard (`if OK(list counter) { delete }`, mirroring armTrap at
+
+park.go:272) would silence it but reverse a tested decision + add a probe. Left as-is.
