@@ -45,6 +45,18 @@ func (response *errorResponse) VisitListVirtualMachinesResponse(writer http.Resp
 	return response.write(writer)
 }
 
+func (response *errorResponse) VisitQuiesceResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
+func (response *errorResponse) VisitResumeResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
+func (response *errorResponse) VisitUpdateResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
 func (response *errorResponse) VisitGetVirtualMachineResponse(writer http.ResponseWriter) error {
 	return response.write(writer)
 }

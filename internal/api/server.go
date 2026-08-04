@@ -18,6 +18,7 @@ package api
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"io"
 	"os"
@@ -163,6 +164,17 @@ type Dependencies struct {
 	// all unknown as though it had none of them.
 	Units     Units
 	StartedAt time.Time
+	// UpdateKey is the ed25519 public key this host trusts to sign self-updates
+	// (§5). A nil or wrong-length key disables POST /v1/update: a host Atlas has
+	// not enrolled in self-update accepts none rather than trusting some baked-in
+	// default signer. The daemon loads it from --update-key-file — see cmd/boat —
+	// so the trusted key is operator-provisioned and rotatable, never hardcoded.
+	UpdateKey ed25519.PublicKey
+	// StateDirectory is where a pushed release is staged before the detached
+	// updater swaps it — the daemon's systemd StateDirectory, /var/lib/boat. Empty
+	// substitutes that default; it is a field so a handler test stages under a
+	// temporary directory instead of the real host path.
+	StateDirectory string
 }
 
 // Server answers every documented operation.
@@ -175,6 +187,22 @@ type Server struct {
 	watch           *watch.Hub
 	units           Units
 	startedAt       time.Time
+	// admission is the self-update quiesce gate every mutating verb consults before
+	// it claims (perform, performMigrationPhase). It is always non-nil and defaults
+	// open; the quiescer raises and lowers it. See quiesce.go.
+	admission *admissionGate
+	// quiescer is the daemon side of §5 step 3, driven by POST /v1/quiesce and
+	// /v1/resume. It shares the admission gate above.
+	quiescer *Quiescer
+	// updateKey is the trusted self-update signer (Dependencies.UpdateKey). Empty
+	// disables POST /v1/update.
+	updateKey ed25519.PublicKey
+	// stateDirectory is where POST /v1/update stages a verified release.
+	stateDirectory string
+	// launchUpdater spawns the detached out-of-cgroup updater. It is a field so a
+	// handler test asserts 202 + a launch without a real systemd-run under it;
+	// production is spawnDetachedUpdater.
+	launchUpdater func(id, stagingDir string) error
 	// newRunner builds the runner a verb traces through. It is a field rather
 	// than a direct call to run.NewRunner because the runner's trace writer and
 	// the operation record have to be the same buffer, and because a test needs
@@ -218,6 +246,15 @@ func NewServer(dependencies Dependencies) *Server {
 	if decisions == nil {
 		decisions = refusedDecision{}
 	}
+	// The admission gate starts open — a fresh daemon claims operations normally —
+	// and is shared with the quiescer that raises it for a self-update. The state
+	// directory falls back to the unit's StateDirectory so a Server built without
+	// one still stages releases at the path the sudoers systemd-run line pins.
+	gate := newAdmissionGate()
+	stateDirectory := dependencies.StateDirectory
+	if stateDirectory == "" {
+		stateDirectory = defaultStateDirectory
+	}
 	server := &Server{
 		operations:      dependencies.Operations,
 		state:           dependencies.State,
@@ -227,9 +264,17 @@ func NewServer(dependencies Dependencies) *Server {
 		watch:           hub,
 		units:           dependencies.Units,
 		startedAt:       dependencies.StartedAt,
+		admission:       gate,
+		updateKey:       dependencies.UpdateKey,
+		stateDirectory:  stateDirectory,
+		launchUpdater:   spawnDetachedUpdater,
 		newRunner:       run.NewRunner,
 		hostFacts:       hostfacts.Read,
 	}
+	// The quiescer shares the gate and records its checkpoint through the operation
+	// store, stamped with this build's version so the journal says which binary was
+	// being replaced.
+	server.quiescer = newQuiescer(gate, dependencies.Operations, version.Version)
 	// The migration seams are bound after the struct exists: runMigrationPhase is a
 	// method value over this server (it reaches the VM manager for the identity
 	// callback), and pollHydration is the plain read the Hydrating GET drives.

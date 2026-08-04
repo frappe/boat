@@ -88,6 +88,10 @@ func dispatch(arguments []string, output io.Writer, errorOutput io.Writer) int {
 		return vmCreateDisk(arguments[1:], errorOutput)
 	case "metrics":
 		return metricsCommand(arguments[1:], output, errorOutput)
+	case "update-apply":
+		// The detached half of a self-update, spawned by POST /v1/update into its
+		// own cgroup so the daemon restart cannot SIGTERM it mid-swap (see update.go).
+		return updateApply(arguments[1:], errorOutput)
 	case "version":
 		// The binary's own identity, which is a local fact — the daemon's is on
 		// /health, and the two differing is exactly what an operator wants to see.

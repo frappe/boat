@@ -32,6 +32,7 @@ const (
 	ErrorReasonFenceRegression             ErrorReason = "fence-regression"
 	ErrorReasonNoFence                     ErrorReason = "no-fence"
 	ErrorReasonOperationIdentifierConflict ErrorReason = "operation-identifier-conflict"
+	ErrorReasonServiceQuiescing            ErrorReason = "service-quiescing"
 	ErrorReasonStaleFence                  ErrorReason = "stale-fence"
 	ErrorReasonStaleObservation            ErrorReason = "stale-observation"
 )
@@ -58,6 +59,12 @@ const (
 	OperationStatusFailure OperationStatus = "Failure"
 	OperationStatusRunning OperationStatus = "Running"
 	OperationStatusSuccess OperationStatus = "Success"
+)
+
+// Defines values for QuiesceStateState.
+const (
+	QuiesceStateStateQuiesced QuiesceStateState = "quiesced"
+	QuiesceStateStateServing  QuiesceStateState = "serving"
 )
 
 // Defines values for ReservedIpRequestAction.
@@ -139,6 +146,12 @@ type Error struct {
 	// `fence-regression` and `stale-observation` are the two 409s a PUT
 	// can return, and they call for opposite behaviour: one must not be
 	// retried, the other must be retried against a fresh export.
+	//
+	// `service-quiescing` is the 409 a mutating verb returns while the
+	// daemon is paused for a self-update (POST /quiesce). It MUST be
+	// retried, unchanged, once the new binary serves — no claim was made
+	// and no journal record was written, so the retry is the first real
+	// attempt, not a replay.
 	Reason *ErrorReason `json:"reason,omitempty"`
 }
 
@@ -148,6 +161,12 @@ type Error struct {
 // `fence-regression` and `stale-observation` are the two 409s a PUT
 // can return, and they call for opposite behaviour: one must not be
 // retried, the other must be retried against a fresh export.
+//
+// `service-quiescing` is the 409 a mutating verb returns while the
+// daemon is paused for a self-update (POST /quiesce). It MUST be
+// retried, unchanged, once the new binary serves — no claim was made
+// and no journal record was written, so the retry is the first real
+// attempt, not a replay.
 type ErrorReason string
 
 // Export defines model for Export.
@@ -458,6 +477,15 @@ type Quarantine struct {
 	SeenAt *time.Time `json:"seen_at,omitempty"`
 }
 
+// QuiesceState defines model for QuiesceState.
+type QuiesceState struct {
+	// State quiesced after /quiesce, serving after /resume.
+	State QuiesceStateState `json:"state"`
+}
+
+// QuiesceStateState quiesced after /quiesce, serving after /resume.
+type QuiesceStateState string
+
 // RebuildRequest defines model for RebuildRequest.
 type RebuildRequest struct {
 	// DataSnapshotDevice The data disk's own snapshot, restored the way the root disk is.
@@ -556,6 +584,38 @@ type UnitLiveness struct {
 	SubState string `json:"sub_state"`
 }
 
+// UpdateAccepted defines model for UpdateAccepted.
+type UpdateAccepted struct {
+	// UpdateId The staging identifier this update runs under. The detached updater's
+	// transient scope unit is boat-update-<update_id> and its staged release
+	// lives at <StateDirectory>/update/<update_id>.
+	UpdateId string `json:"update_id"`
+
+	// Version The version being applied, echoed back so the caller can watch /export for it.
+	Version string `json:"version"`
+}
+
+// UpdateRequest defines model for UpdateRequest.
+type UpdateRequest struct {
+	// Binary The release binary itself, base64-encoded.
+	Binary []byte `json:"binary"`
+
+	// Sha256 Lowercase hex SHA-256 of the binary, bound into the signed manifest.
+	// The signature authenticates this claim; the checksum authenticates the
+	// bytes; an update proceeds on neither alone.
+	Sha256 string `json:"sha256"`
+
+	// Signature The ed25519 signature over the canonical (version, checksum) manifest,
+	// base64-encoded. The daemon verifies it against its configured trusted
+	// key before anything touches the disk.
+	Signature []byte `json:"signature"`
+
+	// Version The git-describe version this release claims to be, bound into the
+	// signed manifest. `different from running` is the whole update test —
+	// versions are not ordered, so a downgrade is as valid as an upgrade.
+	Version string `json:"version"`
+}
+
 // VirtualMachine defines model for VirtualMachine.
 type VirtualMachine struct {
 	// FirecrackerPid The process that answered on this VM's API socket. A diagnostic that
@@ -646,6 +706,9 @@ type GetMigrationHydrationParams struct {
 // ActOnUnitJSONRequestBody defines body for ActOnUnit for application/json ContentType.
 type ActOnUnitJSONRequestBody = UnitActionRequest
 
+// UpdateJSONRequestBody defines body for Update for application/json ContentType.
+type UpdateJSONRequestBody = UpdateRequest
+
 // PutVirtualMachineJSONRequestBody defines body for PutVirtualMachine for application/json ContentType.
 type PutVirtualMachineJSONRequestBody = DesiredVirtualMachine
 
@@ -696,12 +759,21 @@ type ServerInterface interface {
 	// One operation's journal record
 	// (GET /ops/{operation_id})
 	GetOperation(w http.ResponseWriter, r *http.Request, operationId string)
+	// Pause admission of new operations for a self-update
+	// (POST /quiesce)
+	Quiesce(w http.ResponseWriter, r *http.Request)
+	// Resume admission of new operations after an aborted update
+	// (POST /resume)
+	Resume(w http.ResponseWriter, r *http.Request)
 	// One supervised unit's liveness
 	// (GET /units/{name})
 	GetUnit(w http.ResponseWriter, r *http.Request, name UnitName)
 	// Start or restart a supervised unit
 	// (POST /units/{name})
 	ActOnUnit(w http.ResponseWriter, r *http.Request, name UnitName)
+	// Stage a signed release and launch a detached self-update
+	// (POST /update)
+	Update(w http.ResponseWriter, r *http.Request)
 	// List every VM this host observes
 	// (GET /vms)
 	ListVirtualMachines(w http.ResponseWriter, r *http.Request)
@@ -849,6 +921,46 @@ func (siw *ServerInterfaceWrapper) GetOperation(w http.ResponseWriter, r *http.R
 	handler.ServeHTTP(w, r)
 }
 
+// Quiesce operation middleware
+func (siw *ServerInterfaceWrapper) Quiesce(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.Quiesce(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// Resume operation middleware
+func (siw *ServerInterfaceWrapper) Resume(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.Resume(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetUnit operation middleware
 func (siw *ServerInterfaceWrapper) GetUnit(w http.ResponseWriter, r *http.Request) {
 
@@ -902,6 +1014,26 @@ func (siw *ServerInterfaceWrapper) ActOnUnit(w http.ResponseWriter, r *http.Requ
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ActOnUnit(w, r, name)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// Update operation middleware
+func (siw *ServerInterfaceWrapper) Update(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.Update(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1584,8 +1716,11 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("GET "+options.BaseURL+"/health", wrapper.GetHealth)
 	m.HandleFunc("GET "+options.BaseURL+"/host", wrapper.GetHost)
 	m.HandleFunc("GET "+options.BaseURL+"/ops/{operation_id}", wrapper.GetOperation)
+	m.HandleFunc("POST "+options.BaseURL+"/quiesce", wrapper.Quiesce)
+	m.HandleFunc("POST "+options.BaseURL+"/resume", wrapper.Resume)
 	m.HandleFunc("GET "+options.BaseURL+"/units/{name}", wrapper.GetUnit)
 	m.HandleFunc("POST "+options.BaseURL+"/units/{name}", wrapper.ActOnUnit)
+	m.HandleFunc("POST "+options.BaseURL+"/update", wrapper.Update)
 	m.HandleFunc("GET "+options.BaseURL+"/vms", wrapper.ListVirtualMachines)
 	m.HandleFunc("DELETE "+options.BaseURL+"/vms/{uuid}", wrapper.DeleteVirtualMachine)
 	m.HandleFunc("GET "+options.BaseURL+"/vms/{uuid}", wrapper.GetVirtualMachine)
@@ -1716,6 +1851,65 @@ func (response GetOperation404JSONResponse) VisitGetOperationResponse(w http.Res
 	return json.NewEncoder(w).Encode(response)
 }
 
+type QuiesceRequestObject struct {
+}
+
+type QuiesceResponseObject interface {
+	VisitQuiesceResponse(w http.ResponseWriter) error
+}
+
+type Quiesce200JSONResponse QuiesceState
+
+func (response Quiesce200JSONResponse) VisitQuiesceResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type Quiesce401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response Quiesce401JSONResponse) VisitQuiesceResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type Quiesce500JSONResponse Error
+
+func (response Quiesce500JSONResponse) VisitQuiesceResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type ResumeRequestObject struct {
+}
+
+type ResumeResponseObject interface {
+	VisitResumeResponse(w http.ResponseWriter) error
+}
+
+type Resume200JSONResponse QuiesceState
+
+func (response Resume200JSONResponse) VisitResumeResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type Resume401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response Resume401JSONResponse) VisitResumeResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type GetUnitRequestObject struct {
 	Name UnitName `json:"name"`
 }
@@ -1792,6 +1986,50 @@ type ActOnUnit404JSONResponse Error
 func (response ActOnUnit404JSONResponse) VisitActOnUnitResponse(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type UpdateRequestObject struct {
+	Body *UpdateJSONRequestBody
+}
+
+type UpdateResponseObject interface {
+	VisitUpdateResponse(w http.ResponseWriter) error
+}
+
+type Update202JSONResponse UpdateAccepted
+
+func (response Update202JSONResponse) VisitUpdateResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type Update400JSONResponse Error
+
+func (response Update400JSONResponse) VisitUpdateResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type Update401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response Update401JSONResponse) VisitUpdateResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type Update503JSONResponse Error
+
+func (response Update503JSONResponse) VisitUpdateResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(503)
 
 	return json.NewEncoder(w).Encode(response)
 }
@@ -2569,12 +2807,21 @@ type StrictServerInterface interface {
 	// One operation's journal record
 	// (GET /ops/{operation_id})
 	GetOperation(ctx context.Context, request GetOperationRequestObject) (GetOperationResponseObject, error)
+	// Pause admission of new operations for a self-update
+	// (POST /quiesce)
+	Quiesce(ctx context.Context, request QuiesceRequestObject) (QuiesceResponseObject, error)
+	// Resume admission of new operations after an aborted update
+	// (POST /resume)
+	Resume(ctx context.Context, request ResumeRequestObject) (ResumeResponseObject, error)
 	// One supervised unit's liveness
 	// (GET /units/{name})
 	GetUnit(ctx context.Context, request GetUnitRequestObject) (GetUnitResponseObject, error)
 	// Start or restart a supervised unit
 	// (POST /units/{name})
 	ActOnUnit(ctx context.Context, request ActOnUnitRequestObject) (ActOnUnitResponseObject, error)
+	// Stage a signed release and launch a detached self-update
+	// (POST /update)
+	Update(ctx context.Context, request UpdateRequestObject) (UpdateResponseObject, error)
 	// List every VM this host observes
 	// (GET /vms)
 	ListVirtualMachines(ctx context.Context, request ListVirtualMachinesRequestObject) (ListVirtualMachinesResponseObject, error)
@@ -2755,6 +3002,54 @@ func (sh *strictHandler) GetOperation(w http.ResponseWriter, r *http.Request, op
 	}
 }
 
+// Quiesce operation middleware
+func (sh *strictHandler) Quiesce(w http.ResponseWriter, r *http.Request) {
+	var request QuiesceRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.Quiesce(ctx, request.(QuiesceRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "Quiesce")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(QuiesceResponseObject); ok {
+		if err := validResponse.VisitQuiesceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// Resume operation middleware
+func (sh *strictHandler) Resume(w http.ResponseWriter, r *http.Request) {
+	var request ResumeRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.Resume(ctx, request.(ResumeRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "Resume")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ResumeResponseObject); ok {
+		if err := validResponse.VisitResumeResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetUnit operation middleware
 func (sh *strictHandler) GetUnit(w http.ResponseWriter, r *http.Request, name UnitName) {
 	var request GetUnitRequestObject
@@ -2807,6 +3102,37 @@ func (sh *strictHandler) ActOnUnit(w http.ResponseWriter, r *http.Request, name 
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(ActOnUnitResponseObject); ok {
 		if err := validResponse.VisitActOnUnitResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// Update operation middleware
+func (sh *strictHandler) Update(w http.ResponseWriter, r *http.Request) {
+	var request UpdateRequestObject
+
+	var body UpdateJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.Update(ctx, request.(UpdateRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "Update")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UpdateResponseObject); ok {
+		if err := validResponse.VisitUpdateResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

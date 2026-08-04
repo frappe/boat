@@ -807,6 +807,113 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /quiesce:
+    post:
+      summary: Pause admission of new operations for a self-update
+      description: |
+        §5 step 3, driven by the out-of-cgroup updater over the local socket.
+        Raise the admission gate so this daemon refuses to CLAIM new operations,
+        wait (bounded) for the operations already in flight to reach their journal
+        checkpoint, and record a checkpoint of its own — so an update interrupted
+        mid-restart is replayable rather than lost. Idempotent: quiescing an
+        already-quiesced daemon returns once in-flight work has drained.
+
+        It is called by the updater, never by Atlas: only a process OUTSIDE
+        boat.service's cgroup can quiesce the serving daemon and then survive the
+        restart that swaps its binary. While quiesced, the mutating verbs answer
+        409 with reason `service-quiescing` — a retryable refusal, no claim and no
+        journal record — so their callers re-try once the new binary serves;
+        reads (/export, /health, /ops) keep answering throughout.
+      operationId: quiesce
+      responses:
+        "200":
+          description: The daemon is quiesced and in-flight work has drained
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuiesceState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          description: |
+            In-flight work did not drain within the bounded grace, or the
+            checkpoint could not be recorded. The gate is lowered again on this
+            path, so a failed quiesce leaves the daemon serving rather than half-
+            paused.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /resume:
+    post:
+      summary: Resume admission of new operations after an aborted update
+      description: |
+        Lower the admission gate /quiesce raised, so the daemon claims new
+        operations again. It is the ABORT path only: once the update has restarted
+        the daemon a fresh process is serving and there is nothing to resume, so
+        this is called just when the updater gives up BEFORE the swap. Idempotent.
+      operationId: resume
+      responses:
+        "200":
+          description: The daemon is serving again
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuiesceState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /update:
+    post:
+      summary: Stage a signed release and launch a detached self-update
+      description: |
+        Atlas pushes a signed release here (§5). The daemon VERIFIES it FIRST — the
+        ed25519 signature over the (version, checksum) manifest and the checksum
+        over the bytes — and refuses a release that does not verify with 400 before
+        anything touches the disk. On success it writes the binary and its manifest
+        to a staging directory under the daemon's StateDirectory and spawns a
+        DETACHED updater OUTSIDE boat.service's cgroup (systemd-run --scope), then
+        answers 202 at once: the update proceeds asynchronously and Atlas observes
+        the new version through /export.
+
+        The cgroup handoff is load-bearing. The updater restarts boat.service,
+        which SIGTERMs boat.service's whole cgroup; an updater running inside it
+        would be killed mid-restart and could never health-check or roll back. So
+        the daemon only STARTS the update here — it never runs it.
+      operationId: update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateRequest"
+      responses:
+        "202":
+          description: The release verified and a detached updater was launched
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateAccepted"
+        "400":
+          description: |
+            The release did not verify — a bad signature, a wrong checksum, or a
+            malformed manifest. Nothing was staged and no updater was launched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: |
+            This host has no trusted update key configured, so it accepts no
+            self-update. Configure --update-key-file and restart the daemon.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
 components:
   securitySchemes:
     bearerToken:
@@ -1282,12 +1389,19 @@ components:
             `fence-regression` and `stale-observation` are the two 409s a PUT
             can return, and they call for opposite behaviour: one must not be
             retried, the other must be retried against a fresh export.
+
+            `service-quiescing` is the 409 a mutating verb returns while the
+            daemon is paused for a self-update (POST /quiesce). It MUST be
+            retried, unchanged, once the new binary serves — no claim was made
+            and no journal record was written, so the retry is the first real
+            attempt, not a replay.
           enum:
             - operation-identifier-conflict
             - no-fence
             - stale-fence
             - fence-regression
             - stale-observation
+            - service-quiescing
 
     ReservedIpRequest:
       type: object
@@ -1542,3 +1656,54 @@ components:
           description: |
             Bound the graceful drain without skipping the unit's ExecStopPost.
             0 leaves systemd's default drain in place.
+
+    QuiesceState:
+      type: object
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [quiesced, serving]
+          description: quiesced after /quiesce, serving after /resume.
+
+    UpdateRequest:
+      type: object
+      required: [version, sha256, signature, binary]
+      properties:
+        version:
+          type: string
+          description: |
+            The git-describe version this release claims to be, bound into the
+            signed manifest. `different from running` is the whole update test —
+            versions are not ordered, so a downgrade is as valid as an upgrade.
+        sha256:
+          type: string
+          description: |
+            Lowercase hex SHA-256 of the binary, bound into the signed manifest.
+            The signature authenticates this claim; the checksum authenticates the
+            bytes; an update proceeds on neither alone.
+        signature:
+          type: string
+          format: byte
+          description: |
+            The ed25519 signature over the canonical (version, checksum) manifest,
+            base64-encoded. The daemon verifies it against its configured trusted
+            key before anything touches the disk.
+        binary:
+          type: string
+          format: byte
+          description: The release binary itself, base64-encoded.
+
+    UpdateAccepted:
+      type: object
+      required: [update_id, version]
+      properties:
+        update_id:
+          type: string
+          description: |
+            The staging identifier this update runs under. The detached updater's
+            transient scope unit is boat-update-<update_id> and its staged release
+            lives at <StateDirectory>/update/<update_id>.
+        version:
+          type: string
+          description: The version being applied, echoed back so the caller can watch /export for it.
