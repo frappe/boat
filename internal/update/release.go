@@ -113,6 +113,21 @@ func validateManifest(manifest Manifest) error {
 	return nil
 }
 
+// SignRelease is Verify's inverse: it produces a release the given key vouches for,
+// binding the version and the binary's checksum into one signed manifest. It is the
+// single place the signed form is assembled — the release-signing tool and the
+// tests both call it, so the canonical manifest lives in exactly one function and a
+// signer can never drift from what Verify checks.
+func SignRelease(key ed25519.PrivateKey, version string, binary []byte) Release {
+	sum := sha256.Sum256(binary)
+	manifest := Manifest{Version: version, SHA256: hex.EncodeToString(sum[:])}
+	return Release{
+		Manifest:  manifest,
+		Binary:    binary,
+		Signature: ed25519.Sign(key, canonicalManifest(manifest)),
+	}
+}
+
 // ShouldApply is the desired-versus-running decision (§5 step 1). Boat updates when
 // Atlas's desired version differs from what is running — versions are git-describe
 // strings, not orderable semver, so "different" is the whole test and a downgrade
