@@ -93,6 +93,14 @@ func (response *errorResponse) VisitReservedIpVirtualMachineResponse(writer http
 	return response.write(writer)
 }
 
+func (response *errorResponse) VisitMigrateVirtualMachineResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
+func (response *errorResponse) VisitGetMigrationHydrationResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
 func (response *errorResponse) VisitPutVirtualMachineResponse(writer http.ResponseWriter) error {
 	return response.write(writer)
 }

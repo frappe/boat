@@ -772,6 +772,147 @@ Cmnd_Alias BOAT_NETWORKD = \
     /usr/sbin/ip -6 route replace fdaa\:\:/16 dev wg-mesh, \
     /usr/bin/bash -c set\ -e;\ wg\ syncconf\ wg-mesh\ <(wg-quick\ strip\ /run/atlas-networkd/wg-mesh.conf);\ wg\ set\ wg-mesh\ private-key\ /etc/atlas-networkd/wg-private-key\ listen-port\ 51820
 
+# --- Migration: LVM the cross-host saga carves (spec/33-boat.md §8, WO-4) ----
+# The migration phases snapshot a source VM's disk, hydrate a fresh clone on the
+# target and tear the source copy down. Naming is derived from the UUID and never
+# stored (internal/migration/commands.go): atlas-snap-<uuid>-migrate and
+# atlas-datasnap-<uuid>-migrate are the transient export snapshots,
+# atlas-image-<name> a shipped local base, atlas-clonemeta-<key> a dm-clone's
+# metadata LV. The reads and activations follow the BOAT_VIRTUAL_MACHINE_VOLUMES
+# precedent — pinned to the atlas- prefixes, `lvs` read across the group — and the
+# one destructive tool, lvremove, spells the UUID out character by character the
+# way BOAT_VIRTUAL_MACHINE_VOLUME_REMOVE does, so a `*` cannot span a space into a
+# second volume. The source's own disk removal and its VM tree/`disable --now` are
+# NOT here: cleanup-source reuses BOAT_VIRTUAL_MACHINE_VOLUME_REMOVE and
+# BOAT_VIRTUAL_MACHINE_TERMINATE for those, and the network.env probe reuses
+# BOAT_VIRTUAL_MACHINE_MARKERS.
+#
+# RESIDUAL RISK: the create/activate/blockdev lines carry the atlas- prefix `*`
+# BOAT_VOLUMES already sanctions, so a `*` could add a flag to a tool that already
+# creates or reads a volume in this group. atlas-clonemeta-base-<image> keys off
+# an image name, not a UUID, so its lvremove is pinned to the prefix rather than a
+# character class — a base ship is the one migration LV whose name has no UUID to
+# spell; internal/migration only ever renders it from the image being shipped.
+Cmnd_Alias BOAT_MIGRATION_LVM = \
+    /usr/bin/mkdir -p /var/lib/atlas/run, \
+    /usr/sbin/lvs --noheadings -o lv_attr atlas/*, \
+    /usr/sbin/lvs --noheadings -o metadata_percent atlas/pool0, \
+    /usr/sbin/lvchange -ay -K atlas/atlas-snap-*, \
+    /usr/sbin/lvchange -ay -K atlas/atlas-datasnap-*, \
+    /usr/sbin/lvchange -ay -K atlas/atlas-image-*, \
+    /usr/sbin/lvchange -ay -K atlas/atlas-clonemeta-*, \
+    /usr/sbin/lvchange --permission r atlas/atlas-image-*, \
+    /usr/sbin/blockdev --getsize64 /dev/atlas/atlas-snap-*, \
+    /usr/sbin/blockdev --getsize64 /dev/atlas/atlas-datasnap-*, \
+    /usr/sbin/blockdev --getsize64 /dev/atlas/atlas-image-*, \
+    /usr/sbin/blockdev --getsize64 /dev/nbd*, \
+    /usr/sbin/lvcreate --type thin --thinpool atlas/pool0 -V [0-9]*G -n atlas-* atlas, \
+    /usr/sbin/lvcreate -s atlas/* -n atlas-snap-*, \
+    /usr/sbin/lvcreate -s atlas/* -n atlas-datasnap-*, \
+    /usr/sbin/lvremove -f atlas/atlas-snap-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-migrate, \
+    /usr/sbin/lvremove -f atlas/atlas-datasnap-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-migrate, \
+    /usr/sbin/lvremove -f atlas/atlas-clonemeta-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f], \
+    /usr/sbin/lvremove -f atlas/atlas-clonemeta-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-data, \
+    /usr/sbin/lvremove -f atlas/atlas-clonemeta-base-*
+
+# --- Migration: the device-mapper clone stack ------------------------------
+# A dm-clone serves reads from the source over NBD until a region is hydrated,
+# lands writes on the local dest LV and — messaged enable_hydration — copies every
+# region in the background; at 100% the VM-disk clone is collapsed transparently
+# (suspend -> reload linear -> resume, keeping the maj:min the guest's fd holds)
+# and the base-ship clone is plainly removed. Pinned to the two clone name shapes
+# — atlas-vm-<key>-clone (VM disks) and atlas-base-<image>-clone (a base ship) —
+# so nothing here touches the plain LV's own mapper entry or any other dm device.
+# atlas-vm-*-clone info/remove are already granted by BOAT_VIRTUAL_MACHINE_CLONE.
+#
+# VERIFY ON A REAL HOST: the create and reload tables are one argument built from
+# device paths and sizes (internal/migration/clone.go, collapse_clone.go), so
+# `--table *` cannot be pinned further offline. It is byte-coupled to those
+# templates; render one and check it with `sudo -u boat sudo -n -l <command>`
+# before dogfooding, exactly as the networkd and Firecracker-API blocks demand.
+Cmnd_Alias BOAT_MIGRATION_DEVICE_MAPPER = \
+    /usr/sbin/dmsetup info atlas-base-*-clone, \
+    /usr/sbin/dmsetup remove atlas-base-*-clone, \
+    /usr/sbin/dmsetup table atlas-vm-*-clone, \
+    /usr/sbin/dmsetup table atlas-base-*-clone, \
+    /usr/sbin/dmsetup status atlas-vm-*-clone, \
+    /usr/sbin/dmsetup status atlas-base-*-clone, \
+    /usr/sbin/dmsetup message atlas-vm-*-clone 0 enable_hydration, \
+    /usr/sbin/dmsetup message atlas-base-*-clone 0 enable_hydration, \
+    /usr/sbin/dmsetup suspend atlas-vm-*-clone, \
+    /usr/sbin/dmsetup resume atlas-vm-*-clone, \
+    /usr/sbin/dmsetup create atlas-vm-*-clone --table *, \
+    /usr/sbin/dmsetup create atlas-base-*-clone --table *, \
+    /usr/sbin/dmsetup reload atlas-vm-*-clone --table *, \
+    /usr/bin/dd if=/dev/zero of=/dev/atlas/atlas-clonemeta-* bs=1M count=16 conv=fsync
+
+# --- Migration: the NBD data plane (stage-1 plain TCP) ----------------------
+# The source serves its snapshot(s) and any local base over qemu-nbd bound to its
+# public IPv4; the target dials them with nbd-client over plain TCP. Ports are
+# derived from the UUID (10000-15002, five digits) and pinned to a five-digit
+# class so a `*` cannot grow a second operand; the bind address and source host
+# are migration parameters with no fixed shape and stay `*`. The pidfiles and the
+# image-dir tar live under the pinned /var/lib/atlas/run. nbd-client -d, the kill
+# and the pidfile rm are the cleanup teardown.
+#
+# VERIFY ON A REAL HOST: the `--fork *` device operand, the `nbd-client -N ""`
+# empty export name, and the tar operands are byte-coupled to
+# internal/migration/nbd.go and baseship.go. `-N ""` matches one empty argument;
+# confirm the rendered argv with `sudo -u boat sudo -n -l <command>` before
+# dogfooding. Ubuntu paths: qemu-nbd in /usr/bin, nbd-client in /usr/sbin —
+# resolve per distro, a binary in the other directory is a silent denial.
+Cmnd_Alias BOAT_MIGRATION_NBD = \
+    /usr/sbin/modprobe nbd, \
+    /usr/sbin/modprobe dm_clone, \
+    /usr/bin/qemu-nbd --persistent --read-only --cache=none --bind=* --port=[0-9][0-9][0-9][0-9][0-9] --pid-file=/var/lib/atlas/run/migrate-nbd-[0-9][0-9][0-9][0-9][0-9].pid --fork *, \
+    /usr/sbin/nbd-client -N "" * [0-9][0-9][0-9][0-9][0-9] /dev/nbd* -persist, \
+    /usr/sbin/nbd-client -d /dev/nbd*, \
+    /usr/bin/test -f /var/lib/atlas/run/migrate-nbd-[0-9][0-9][0-9][0-9][0-9].pid, \
+    /usr/bin/cat /var/lib/atlas/run/migrate-nbd-[0-9][0-9][0-9][0-9][0-9].pid, \
+    /usr/bin/rm -f /var/lib/atlas/run/migrate-nbd-[0-9][0-9][0-9][0-9][0-9].pid, \
+    /usr/bin/kill [0-9]*, \
+    /usr/bin/stat -c %s /var/lib/atlas/run/migrate-base-meta-*.tar, \
+    /usr/bin/tar -cf /var/lib/atlas/run/migrate-base-meta-*.tar -C /var/lib/atlas/images/* ., \
+    /usr/bin/tar -xf /dev/nbd* -C /var/lib/atlas/images/*, \
+    /usr/bin/install -d -m 0700 /var/lib/atlas/images/*, \
+    /usr/bin/rm -f /var/lib/atlas/run/migrate-base-meta-*.tar
+
+# --- Migration: the keep-address forward tunnel -----------------------------
+# When a VM migrates keeping its /128 the source forwards its inbound to the
+# target over a per-VM socat tun bridged to a TCP stream. Device (mig6-<8 hex>),
+# port (15000-19999) and route table (20000-59999) are pure functions of the UUID
+# and pinned to their shapes; the link-local ends (fe80::a/64, fe80::b/64), the
+# MTU (1280) and the nft chain are fixed literals. The /128 and the uplink stay
+# `*` for the reason BOAT_PARK_ROUTING and BOAT_WAKE_TRAP give — a canonical IPv6
+# has no fnmatch shape — and the proxy-NDP replace/del reuse BOAT_PARK_ROUTING.
+#
+# VERIFY ON A REAL HOST, HIGHEST RISK IN THIS FILE: the systemd-run line's
+# --property=ExecStartPost=* is a value systemd runs as root, built by
+# internal/migration/forward.go:rewireCommand from the role, device, table and
+# /128. It cannot be pinned byte-exact offline and, like the networkd `bash -c`
+# line, MUST be verified against the exact rendered forms (or the ExecStartPost
+# mechanism reconsidered) before any live migration — an unpinned root ExecStartPost
+# is a root shell if its inputs are ever attacker-controlled. `-- socat` pins the
+# unit's own command; the endpoints stay `*`.
+Cmnd_Alias BOAT_MIGRATION_FORWARD = \
+    /usr/sbin/sysctl -q -w net.ipv6.conf.all.forwarding=1, \
+    /usr/bin/systemctl stop atlas-mig6-[0-9][0-9][0-9][0-9][0-9], \
+    /usr/bin/systemctl reset-failed atlas-mig6-[0-9][0-9][0-9][0-9][0-9], \
+    /usr/bin/systemctl is-active atlas-mig6-[0-9][0-9][0-9][0-9][0-9], \
+    /usr/bin/systemd-run --unit=atlas-mig6-[0-9][0-9][0-9][0-9][0-9] --property=Type=simple --property=Restart=always --property=RestartSec=2 --property=ExecStartPost=* -- socat * *, \
+    /usr/sbin/ip -6 addr replace fe80\:\:a/64 dev mig6-* nodad, \
+    /usr/sbin/ip -6 addr replace fe80\:\:b/64 dev mig6-* nodad, \
+    /usr/sbin/ip link set mig6-* mtu 1280 up, \
+    /usr/sbin/ip link del mig6-*, \
+    /usr/sbin/ip -6 route replace */128 dev mig6-*, \
+    /usr/sbin/ip -6 route del */128 dev mig6-*, \
+    /usr/sbin/ip -6 route replace default dev mig6-* table [0-9][0-9][0-9][0-9][0-9], \
+    /usr/sbin/ip -6 route del default dev mig6-* table [0-9][0-9][0-9][0-9][0-9], \
+    /usr/sbin/ip -6 rule add from * lookup [0-9][0-9][0-9][0-9][0-9] priority 100, \
+    /usr/sbin/ip -6 rule del from * lookup [0-9][0-9][0-9][0-9][0-9] priority 100, \
+    /usr/sbin/nft add rule inet atlas forward ip6 daddr * oifname mig6-* accept, \
+    /usr/sbin/nft add rule inet atlas forward ip6 saddr * iifname mig6-* accept
+
 boat ALL=(root) NOPASSWD: BOAT_VIRTUAL_MACHINE_UNIT, BOAT_VIRTUAL_MACHINE_MARKERS, \
     BOAT_VIRTUAL_MACHINE_STOP_TIMEOUT, BOAT_VIRTUAL_MACHINE_CLONE, BOAT_FIRECRACKER_API, \
     BOAT_ADOPTION, BOAT_HOST_CAPACITY, BOAT_FIRECRACKER_LIVENESS, \
@@ -780,4 +921,6 @@ boat ALL=(root) NOPASSWD: BOAT_VIRTUAL_MACHINE_UNIT, BOAT_VIRTUAL_MACHINE_MARKER
     BOAT_VIRTUAL_MACHINE_VOLUMES, BOAT_VIRTUAL_MACHINE_VOLUME_REMOVE, \
     BOAT_VIRTUAL_MACHINE_FILESYSTEM, BOAT_VIRTUAL_MACHINE_JAIL_NODES, \
     BOAT_VIRTUAL_MACHINE_RESIZE, BOAT_VIRTUAL_MACHINE_IDENTITY, \
-    BOAT_VIRTUAL_MACHINE_TERMINATE, BOAT_NETWORKD
+    BOAT_VIRTUAL_MACHINE_TERMINATE, BOAT_NETWORKD, \
+    BOAT_MIGRATION_LVM, BOAT_MIGRATION_DEVICE_MAPPER, BOAT_MIGRATION_NBD, \
+    BOAT_MIGRATION_FORWARD

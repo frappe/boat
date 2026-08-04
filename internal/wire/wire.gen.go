@@ -41,6 +41,18 @@ const (
 	HealthStatusOk HealthStatus = "ok"
 )
 
+// Defines values for MigrateRequestBasePhase.
+const (
+	MigrateRequestBasePhaseFinalize MigrateRequestBasePhase = "finalize"
+	MigrateRequestBasePhasePrepare  MigrateRequestBasePhase = "prepare"
+)
+
+// Defines values for MigrateRequestRole.
+const (
+	MigrateRequestRoleSource MigrateRequestRole = "source"
+	MigrateRequestRoleTarget MigrateRequestRole = "target"
+)
+
 // Defines values for OperationStatus.
 const (
 	OperationStatusFailure OperationStatus = "Failure"
@@ -270,6 +282,110 @@ type LogicalVolume struct {
 	Origin    *string `json:"origin,omitempty"`
 	Pool      *string `json:"pool,omitempty"`
 	SizeBytes *int64  `json:"size_bytes,omitempty"`
+}
+
+// MigrateRequest defines model for MigrateRequest.
+type MigrateRequest struct {
+	// BasePhase receive-base only: which half of the two-step base ship runs this
+	// tick — prepare lays down the nbd client, thin LV, dm-clone and image
+	// directory; finalize collapses the fully-hydrated clone to a read-only
+	// base LV. PollHydration runs between them.
+	BasePhase *MigrateRequestBasePhase `json:"base_phase,omitempty"`
+
+	// BindAddress export-source, export-base: the source's own public IPv4 that
+	// qemu-nbd binds, dialed directly by the target's nbd client over plain
+	// TCP (stage 1, no tunnel). The one thing the source cannot derive from
+	// the UUID.
+	BindAddress *string `json:"bind_address,omitempty"`
+
+	// DataDiskGb clone-target: the data disk size, 0 for a VM with no data disk.
+	// collapse-clone: whether a second (data) clone must be collapsed too.
+	DataDiskGb *int `json:"data_disk_gb,omitempty"`
+
+	// DiskGb clone-target, receive-base: the size of the destination thin LV the
+	// clone hydrates into, which must be >= the source blockdev — a smaller
+	// dest makes dm-clone fail with "Invalid argument".
+	DiskGb *int `json:"disk_gb,omitempty"`
+
+	// Identity What makes a freshly laid-down root filesystem this VM's rather than the
+	// image's. Boat writes every field of it into the mounted filesystem
+	// without interpreting any of it: an address is bytes it puts in a file,
+	// an authorized-keys blob is a blob, and `extra_env` is a list of paths
+	// and contents Boat cannot tell apart from one another.
+	//
+	// Hostname and machine-id are deliberately absent. Boat derives both from
+	// the UUID by a fixed rule it owns, because naming a host after its UUID
+	// is mechanics rather than identity, and a value sent for them could
+	// disagree with the one the host already uses.
+	Identity *GuestIdentity `json:"identity,omitempty"`
+
+	// ImageName export-base, clone-target, receive-base: the base image being shipped
+	// or cloned from — the kernel comes from it at cutover. A LOCAL image
+	// (no rootfs URL) is the only kind shipped over NBD; a syncable image
+	// uses Sync to Server instead.
+	ImageName *string `json:"image_name,omitempty"`
+
+	// NbdPid cleanup-source only: the qemu-nbd pid export-source recorded, killed
+	// first, with the port's pidfile as the fallback. The port itself is
+	// derived from the UUID.
+	NbdPid *int `json:"nbd_pid,omitempty"`
+
+	// OperationId The Atlas Task name. Re-posting one returns the phase's first result
+	// rather than running it again — the idempotent-replay key every verb
+	// shares. Each migration phase is ALSO idempotent against the host, so a
+	// replay whose first record was lost re-derives the same devices and
+	// converges rather than duplicating them.
+	OperationId string `json:"operation_id"`
+
+	// PrivateAddress withdraw-private only: the VM's private-plane /128 to withdraw from
+	// THIS (source) host's local-ownership cache, so its ANCP daemon stops
+	// advertising the address before the target boots the guest and
+	// advertises the same /128. Empty is a clean no-op for a tenant-less VM.
+	PrivateAddress *string `json:"private_address,omitempty"`
+
+	// Role forward-up, forward-down: which end of the keep-address forward
+	// tunnel this host is — the source (TCP listener) or the target
+	// (connector).
+	Role *MigrateRequestRole `json:"role,omitempty"`
+
+	// SourceHost clone-target, receive-base: the source's reachable address the nbd
+	// client dials. forward-up (target role only): the address the socat
+	// connector dials.
+	SourceHost *string `json:"source_host,omitempty"`
+
+	// VirtualMachineIpv6 forward-up, source-forward, target-receive, forward-down: the VM's
+	// /128 whose delivery is forwarded onto (or off) the tunnel. Optional on
+	// forward-up, which runs once with a bare tunnel before the routes are
+	// known and again at cutover once they are.
+	VirtualMachineIpv6 *string `json:"virtual_machine_ipv6,omitempty"`
+}
+
+// MigrateRequestBasePhase receive-base only: which half of the two-step base ship runs this
+// tick — prepare lays down the nbd client, thin LV, dm-clone and image
+// directory; finalize collapses the fully-hydrated clone to a read-only
+// base LV. PollHydration runs between them.
+type MigrateRequestBasePhase string
+
+// MigrateRequestRole forward-up, forward-down: which end of the keep-address forward
+// tunnel this host is — the source (TCP listener) or the target
+// (connector).
+type MigrateRequestRole string
+
+// MigrationHydration defines model for MigrationHydration.
+type MigrationHydration struct {
+	// HydrationPercent 0..100, the MIN across the VM's disk clones — the phase advances only
+	// when every disk is fully local. 100 means every block is on this host
+	// (or the clone is already gone), and only then may collapse-clone run.
+	// Meaningless, and reported 0, when source_healthy is false.
+	HydrationPercent int `json:"hydration_percent"`
+
+	// SourceHealthy Whether the source nbd client backing the clone is still alive. False
+	// means the source died and hydration is frozen; the controller must
+	// re-run the clone-target phase, which rebuilds the stack and
+	// re-hydrates from 0. The one three-valued host check in a migration —
+	// an unreadable liveness surfaces as a 500 rather than rounding to
+	// "dead" and triggering a destructive rebuild.
+	SourceHealthy bool `json:"source_healthy"`
 }
 
 // Operation defines model for Operation.
@@ -517,11 +633,24 @@ type PutVirtualMachineParams struct {
 	IfMatch *ObservedEpochPrecondition `json:"If-Match,omitempty"`
 }
 
+// GetMigrationHydrationParams defines parameters for GetMigrationHydration.
+type GetMigrationHydrationParams struct {
+	// CloneDevice Poll this single dm device instead of the VM's own disk clones. Empty
+	// (the usual case) polls the root clone plus the data clone when it
+	// exists and reports the MIN. Set to a base-image ship's clone
+	// (atlas-base-<image>-clone) it reuses this same percent for the
+	// local-base ship.
+	CloneDevice *string `form:"clone_device,omitempty" json:"clone_device,omitempty"`
+}
+
 // ActOnUnitJSONRequestBody defines body for ActOnUnit for application/json ContentType.
 type ActOnUnitJSONRequestBody = UnitActionRequest
 
 // PutVirtualMachineJSONRequestBody defines body for PutVirtualMachine for application/json ContentType.
 type PutVirtualMachineJSONRequestBody = DesiredVirtualMachine
+
+// MigrateVirtualMachineJSONRequestBody defines body for MigrateVirtualMachine for application/json ContentType.
+type MigrateVirtualMachineJSONRequestBody = MigrateRequest
 
 // PauseVirtualMachineJSONRequestBody defines body for PauseVirtualMachine for application/json ContentType.
 type PauseVirtualMachineJSONRequestBody = OperationRequest
@@ -585,6 +714,12 @@ type ServerInterface interface {
 	// Assert this VM's desired state
 	// (PUT /vms/{uuid})
 	PutVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid, params PutVirtualMachineParams)
+	// Poll a migrating VM's hydration percent
+	// (GET /vms/{uuid}/migrate/hydration)
+	GetMigrationHydration(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid, params GetMigrationHydrationParams)
+	// Run one mutating phase of a cross-host migration saga
+	// (POST /vms/{uuid}/migrate/{phase})
+	MigrateVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid, phase string)
 	// Pause a running guest
 	// (POST /vms/{uuid}/pause)
 	PauseVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid)
@@ -904,6 +1039,88 @@ func (siw *ServerInterfaceWrapper) PutVirtualMachine(w http.ResponseWriter, r *h
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.PutVirtualMachine(w, r, uuid, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetMigrationHydration operation middleware
+func (siw *ServerInterfaceWrapper) GetMigrationHydration(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "uuid" -------------
+	var uuid VirtualMachineUuid
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uuid", r.PathValue("uuid"), &uuid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uuid", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetMigrationHydrationParams
+
+	// ------------- Optional query parameter "clone_device" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "clone_device", r.URL.Query(), &params.CloneDevice)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "clone_device", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetMigrationHydration(w, r, uuid, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// MigrateVirtualMachine operation middleware
+func (siw *ServerInterfaceWrapper) MigrateVirtualMachine(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "uuid" -------------
+	var uuid VirtualMachineUuid
+
+	err = runtime.BindStyledParameterWithOptions("simple", "uuid", r.PathValue("uuid"), &uuid, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "uuid", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "phase" -------------
+	var phase string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "phase", r.PathValue("phase"), &phase, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "phase", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.MigrateVirtualMachine(w, r, uuid, phase)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1373,6 +1590,8 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("DELETE "+options.BaseURL+"/vms/{uuid}", wrapper.DeleteVirtualMachine)
 	m.HandleFunc("GET "+options.BaseURL+"/vms/{uuid}", wrapper.GetVirtualMachine)
 	m.HandleFunc("PUT "+options.BaseURL+"/vms/{uuid}", wrapper.PutVirtualMachine)
+	m.HandleFunc("GET "+options.BaseURL+"/vms/{uuid}/migrate/hydration", wrapper.GetMigrationHydration)
+	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/migrate/{phase}", wrapper.MigrateVirtualMachine)
 	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/pause", wrapper.PauseVirtualMachine)
 	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/rebuild", wrapper.RebuildVirtualMachine)
 	m.HandleFunc("POST "+options.BaseURL+"/vms/{uuid}/reserved-ip", wrapper.ReservedIpVirtualMachine)
@@ -1702,6 +1921,117 @@ func (response PutVirtualMachine401JSONResponse) VisitPutVirtualMachineResponse(
 type PutVirtualMachine409JSONResponse Error
 
 func (response PutVirtualMachine409JSONResponse) VisitPutVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type GetMigrationHydrationRequestObject struct {
+	Uuid   VirtualMachineUuid `json:"uuid"`
+	Params GetMigrationHydrationParams
+}
+
+type GetMigrationHydrationResponseObject interface {
+	VisitGetMigrationHydrationResponse(w http.ResponseWriter) error
+}
+
+type GetMigrationHydration200JSONResponse MigrationHydration
+
+func (response GetMigrationHydration200JSONResponse) VisitGetMigrationHydrationResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type GetMigrationHydration400JSONResponse Error
+
+func (response GetMigrationHydration400JSONResponse) VisitGetMigrationHydrationResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type GetMigrationHydration401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response GetMigrationHydration401JSONResponse) VisitGetMigrationHydrationResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type GetMigrationHydration404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response GetMigrationHydration404JSONResponse) VisitGetMigrationHydrationResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type GetMigrationHydration500JSONResponse Error
+
+func (response GetMigrationHydration500JSONResponse) VisitGetMigrationHydrationResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type MigrateVirtualMachineRequestObject struct {
+	Uuid  VirtualMachineUuid `json:"uuid"`
+	Phase string             `json:"phase"`
+	Body  *MigrateVirtualMachineJSONRequestBody
+}
+
+type MigrateVirtualMachineResponseObject interface {
+	VisitMigrateVirtualMachineResponse(w http.ResponseWriter) error
+}
+
+type MigrateVirtualMachine200JSONResponse struct{ OperationAcceptedJSONResponse }
+
+func (response MigrateVirtualMachine200JSONResponse) VisitMigrateVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type MigrateVirtualMachine400JSONResponse Error
+
+func (response MigrateVirtualMachine400JSONResponse) VisitMigrateVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type MigrateVirtualMachine401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response MigrateVirtualMachine401JSONResponse) VisitMigrateVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type MigrateVirtualMachine404JSONResponse struct{ NotFoundJSONResponse }
+
+func (response MigrateVirtualMachine404JSONResponse) VisitMigrateVirtualMachineResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type MigrateVirtualMachine409JSONResponse struct {
+	OperationIdentifierConflictJSONResponse
+}
+
+func (response MigrateVirtualMachine409JSONResponse) VisitMigrateVirtualMachineResponse(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(409)
 
@@ -2257,6 +2587,12 @@ type StrictServerInterface interface {
 	// Assert this VM's desired state
 	// (PUT /vms/{uuid})
 	PutVirtualMachine(ctx context.Context, request PutVirtualMachineRequestObject) (PutVirtualMachineResponseObject, error)
+	// Poll a migrating VM's hydration percent
+	// (GET /vms/{uuid}/migrate/hydration)
+	GetMigrationHydration(ctx context.Context, request GetMigrationHydrationRequestObject) (GetMigrationHydrationResponseObject, error)
+	// Run one mutating phase of a cross-host migration saga
+	// (POST /vms/{uuid}/migrate/{phase})
+	MigrateVirtualMachine(ctx context.Context, request MigrateVirtualMachineRequestObject) (MigrateVirtualMachineResponseObject, error)
 	// Pause a running guest
 	// (POST /vms/{uuid}/pause)
 	PauseVirtualMachine(ctx context.Context, request PauseVirtualMachineRequestObject) (PauseVirtualMachineResponseObject, error)
@@ -2581,6 +2917,67 @@ func (sh *strictHandler) PutVirtualMachine(w http.ResponseWriter, r *http.Reques
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(PutVirtualMachineResponseObject); ok {
 		if err := validResponse.VisitPutVirtualMachineResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetMigrationHydration operation middleware
+func (sh *strictHandler) GetMigrationHydration(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid, params GetMigrationHydrationParams) {
+	var request GetMigrationHydrationRequestObject
+
+	request.Uuid = uuid
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetMigrationHydration(ctx, request.(GetMigrationHydrationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetMigrationHydration")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetMigrationHydrationResponseObject); ok {
+		if err := validResponse.VisitGetMigrationHydrationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// MigrateVirtualMachine operation middleware
+func (sh *strictHandler) MigrateVirtualMachine(w http.ResponseWriter, r *http.Request, uuid VirtualMachineUuid, phase string) {
+	var request MigrateVirtualMachineRequestObject
+
+	request.Uuid = uuid
+	request.Phase = phase
+
+	var body MigrateVirtualMachineJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.MigrateVirtualMachine(ctx, request.(MigrateVirtualMachineRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "MigrateVirtualMachine")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(MigrateVirtualMachineResponseObject); ok {
+		if err := validResponse.VisitMigrateVirtualMachineResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

@@ -665,6 +665,122 @@ paths:
         "409":
           $ref: "#/components/responses/OperationIdentifierConflict"
 
+  /vms/{uuid}/migrate/{phase}:
+    parameters:
+      - $ref: "#/components/parameters/VirtualMachineUuid"
+      - name: phase
+        in: path
+        required: true
+        description: |
+          Which mutating phase of the cross-host migration saga to run on this
+          host. Atlas is the saga orchestrator and drives the phases one RPC at a
+          time in a star (the two hosts never talk on the control plane); this
+          host runs the named phase as a stateless, idempotent step and reports
+          its typed result. One of: export-source, export-base, clone-target,
+          receive-base, inject-identity, collapse-clone, forward-up,
+          source-forward, target-receive, forward-down, withdraw-private,
+          cleanup-source. The poll-only Hydrating phase is GET
+          .../migrate/hydration instead, because it runs every controller tick
+          and must not journal a record per tick.
+        schema:
+          type: string
+    post:
+      summary: Run one mutating phase of a cross-host migration saga
+      description: |
+        Each phase is a stateless idempotent host operation keyed off host
+        artifacts (dmsetup info, qemu-nbd pidfiles, /sys/block/nbdN/pid), never
+        off stored state, so a lost-task re-entry re-derives the same devices
+        from the UUID alone and converges. It runs through the same claim →
+        per-UUID turn → terminal-record machinery as every other verb, so a
+        retried Atlas Task returns its first result rather than re-running the
+        phase, and two phases for one VM never overlap.
+
+        Unlike the lifecycle verbs it does NOT require the VM to already exist on
+        this host: a target-side phase (clone-target, inject-identity) builds the
+        VM's disk before any cutover, and a source-side phase (cleanup-source)
+        runs as the VM is being retired. The phase's typed result rides on the
+        operation record's `result`, the same field `sleep-vm` uses.
+      operationId: MigrateVirtualMachine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MigrateRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationAccepted"
+        "400":
+          description: |
+            The phase is not one this host runs, or its required parameters are
+            missing — an export with no bind address, a forward-up with no role.
+            Refused at the boundary before an operation is claimed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/OperationIdentifierConflict"
+
+  /vms/{uuid}/migrate/hydration:
+    parameters:
+      - $ref: "#/components/parameters/VirtualMachineUuid"
+      - name: clone_device
+        in: query
+        required: false
+        description: |
+          Poll this single dm device instead of the VM's own disk clones. Empty
+          (the usual case) polls the root clone plus the data clone when it
+          exists and reports the MIN. Set to a base-image ship's clone
+          (atlas-base-<image>-clone) it reuses this same percent for the
+          local-base ship.
+        schema:
+          type: string
+    get:
+      summary: Poll a migrating VM's hydration percent
+      description: |
+        The Hydrating phase, called once per controller tick. Deliberately a GET
+        with no operation identifier and no journal record: `perform` writes one
+        terminal record per operation_id, and a per-tick poll would either need a
+        fresh id every tick or bury the journal — so this is a plain read path,
+        the same shape as GET /export. It still enables hydration on first touch
+        (an idempotent dmsetup message) and reads the current percent, but writes
+        nothing down and takes no per-UUID turn.
+
+        A missing clone reads as 100% — it was never built or already collapsed,
+        so a re-entry after cutover advances cleanly. A dead source is reported
+        `source_healthy: false` rather than as a percent, because the percent is
+        meaningless on a dead source and the controller must re-run the
+        clone-target phase to rebuild the stack.
+      operationId: GetMigrationHydration
+      responses:
+        "200":
+          description: The current hydration reading for this migrating VM
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MigrationHydration"
+        "400":
+          description: The uuid is not a virtual machine UUID.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          description: The hydration state could not be read from the host
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /ops/{operation_id}:
     parameters:
       - name: operation_id
@@ -1192,6 +1308,108 @@ components:
             The public IPv4 to 1:1-NAT to this VM's guest. Required for attach;
             ignored for detach, which keys on the guest's private address, so a
             detach need not re-state the address being taken away.
+
+    MigrateRequest:
+      type: object
+      required: [operation_id]
+      properties:
+        operation_id:
+          type: string
+          description: |
+            The Atlas Task name. Re-posting one returns the phase's first result
+            rather than running it again — the idempotent-replay key every verb
+            shares. Each migration phase is ALSO idempotent against the host, so a
+            replay whose first record was lost re-derives the same devices and
+            converges rather than duplicating them.
+        bind_address:
+          type: string
+          description: |
+            export-source, export-base: the source's own public IPv4 that
+            qemu-nbd binds, dialed directly by the target's nbd client over plain
+            TCP (stage 1, no tunnel). The one thing the source cannot derive from
+            the UUID.
+        image_name:
+          type: string
+          description: |
+            export-base, clone-target, receive-base: the base image being shipped
+            or cloned from — the kernel comes from it at cutover. A LOCAL image
+            (no rootfs URL) is the only kind shipped over NBD; a syncable image
+            uses Sync to Server instead.
+        disk_gb:
+          type: integer
+          description: |
+            clone-target, receive-base: the size of the destination thin LV the
+            clone hydrates into, which must be >= the source blockdev — a smaller
+            dest makes dm-clone fail with "Invalid argument".
+        data_disk_gb:
+          type: integer
+          description: |
+            clone-target: the data disk size, 0 for a VM with no data disk.
+            collapse-clone: whether a second (data) clone must be collapsed too.
+        source_host:
+          type: string
+          description: |
+            clone-target, receive-base: the source's reachable address the nbd
+            client dials. forward-up (target role only): the address the socat
+            connector dials.
+        base_phase:
+          type: string
+          enum: [prepare, finalize]
+          description: |
+            receive-base only: which half of the two-step base ship runs this
+            tick — prepare lays down the nbd client, thin LV, dm-clone and image
+            directory; finalize collapses the fully-hydrated clone to a read-only
+            base LV. PollHydration runs between them.
+        role:
+          type: string
+          enum: [source, target]
+          description: |
+            forward-up, forward-down: which end of the keep-address forward
+            tunnel this host is — the source (TCP listener) or the target
+            (connector).
+        virtual_machine_ipv6:
+          type: string
+          description: |
+            forward-up, source-forward, target-receive, forward-down: the VM's
+            /128 whose delivery is forwarded onto (or off) the tunnel. Optional on
+            forward-up, which runs once with a bare tunnel before the routes are
+            known and again at cutover once they are.
+        private_address:
+          type: string
+          description: |
+            withdraw-private only: the VM's private-plane /128 to withdraw from
+            THIS (source) host's local-ownership cache, so its ANCP daemon stops
+            advertising the address before the target boots the guest and
+            advertises the same /128. Empty is a clean no-op for a tenant-less VM.
+        nbd_pid:
+          type: integer
+          description: |
+            cleanup-source only: the qemu-nbd pid export-source recorded, killed
+            first, with the port's pidfile as the fallback. The port itself is
+            derived from the UUID.
+        identity:
+          $ref: "#/components/schemas/GuestIdentity"
+
+    MigrationHydration:
+      type: object
+      required: [hydration_percent, source_healthy]
+      properties:
+        hydration_percent:
+          type: integer
+          description: |
+            0..100, the MIN across the VM's disk clones — the phase advances only
+            when every disk is fully local. 100 means every block is on this host
+            (or the clone is already gone), and only then may collapse-clone run.
+            Meaningless, and reported 0, when source_healthy is false.
+        source_healthy:
+          type: boolean
+          description: |
+            Whether the source nbd client backing the clone is still alive. False
+            means the source died and hydration is frozen; the controller must
+            re-run the clone-target phase, which rebuilds the stack and
+            re-hydrates from 0. The one three-valued host check in a migration —
+            an unreadable liveness surfaces as a 500 rather than rounding to
+            "dead" and triggering a destructive rebuild.
 
     OperationRequest:
       type: object

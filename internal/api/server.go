@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/frappe/boat/internal/hostfacts"
+	"github.com/frappe/boat/internal/migration"
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/netapply/reservedip"
 	"github.com/frappe/boat/internal/run"
@@ -112,6 +113,12 @@ type VirtualMachines interface {
 	Wake(ctx context.Context, runner *run.Runner, uuid string) error
 	Resize(ctx context.Context, runner *run.Runner, uuid string, request vm.ResizeRequest) error
 	Rebuild(ctx context.Context, runner *run.Runner, uuid string, request vm.RebuildRequest) error
+	// InjectIdentity writes a migrated VM's identity through a device the
+	// migration phase already selected (the live clone, or the plain LV once it
+	// has collapsed). It is the InjectingIdentity phase's `inject` callback, and it
+	// preserves the disk's host keys — the disk moved wholesale, so its SSH
+	// identity must survive the move.
+	InjectIdentity(ctx context.Context, runner *run.Runner, device string, uuid string, identity vm.Identity) error
 	ReservedIP(ctx context.Context, runner *run.Runner, uuid string, request vm.ReservedIPRequest) (reservedip.Delivery, error)
 	Terminate(ctx context.Context, runner *run.Runner, uuid string) error
 	FirecrackerUID(ctx context.Context, runner *run.Runner, uuid string) (int, error)
@@ -176,6 +183,13 @@ type Server struct {
 	// hostFacts is a field for the same reason: an export has to be answerable in
 	// a test that has no host under it.
 	hostFacts func(ctx context.Context, runner *run.Runner) (model.HostFacts, error)
+	// runMigrationPhase executes one mutating migration phase and pollHydration
+	// reads a migration's hydration, both fields for the same reason newRunner is:
+	// the phases run qemu-nbd, dmsetup and nbd-client through a real runner, so a
+	// handler test — which has none of those and no root — substitutes them. The
+	// defaults dispatch to internal/migration; see migration.go.
+	runMigrationPhase func(ctx context.Context, runner *run.Runner, uuid, phase string, body wire.MigrateRequest) (model.OperationResult, error)
+	pollHydration     func(ctx context.Context, runner *run.Runner, uuid, cloneDevice string) (migration.PollHydrationResult, error)
 }
 
 // The generated contract is the compile-time check that nothing here drifts
@@ -204,7 +218,7 @@ func NewServer(dependencies Dependencies) *Server {
 	if decisions == nil {
 		decisions = refusedDecision{}
 	}
-	return &Server{
+	server := &Server{
 		operations:      dependencies.Operations,
 		state:           dependencies.State,
 		virtualMachines: dependencies.VirtualMachines,
@@ -216,6 +230,14 @@ func NewServer(dependencies Dependencies) *Server {
 		newRunner:       run.NewRunner,
 		hostFacts:       hostfacts.Read,
 	}
+	// The migration seams are bound after the struct exists: runMigrationPhase is a
+	// method value over this server (it reaches the VM manager for the identity
+	// callback), and pollHydration is the plain read the Hydrating GET drives.
+	server.runMigrationPhase = server.executeMigrationPhase
+	server.pollHydration = func(ctx context.Context, runner *run.Runner, uuid, cloneDevice string) (migration.PollHydrationResult, error) {
+		return migration.PollHydration(ctx, runner, uuid, migration.PollHydrationParams{CloneDevice: cloneDevice})
+	}
+	return server
 }
 
 // refusedDecision stands in for a journal a Server was built without. Every

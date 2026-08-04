@@ -93,6 +93,12 @@ func (fake *fakeHost) ReservedIP(
 	return reservedip.Delivery{}, nil
 }
 
+func (fake *fakeHost) InjectIdentity(
+	ctx context.Context, runner *run.Runner, device string, uuid string, identity vm.Identity,
+) error {
+	return nil
+}
+
 // Terminate is the real thing's shape: the unit and the volumes are gone
 // afterwards, so the VM reads Stopped forever and a start would have nothing to
 // boot.

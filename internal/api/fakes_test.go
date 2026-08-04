@@ -326,10 +326,15 @@ type fakeVirtualMachines struct {
 	rebuildRequests    []vm.RebuildRequest
 	reservedIPRequests []vm.ReservedIPRequest
 	reservedDelivery   reservedip.Delivery
-	verbError          error
-	sleepResult        vm.SleepResult
-	firecrackerUID     int
-	firecrackerUIDErr  error
+	// injectDevices and injectIdentities record what the migration
+	// InjectingIdentity phase selected and asked to write, so a test can prove the
+	// callback reached the manager with the live clone rather than the plain LV.
+	injectDevices     []string
+	injectIdentities  []vm.Identity
+	verbError         error
+	sleepResult       vm.SleepResult
+	firecrackerUID    int
+	firecrackerUIDErr error
 	// beforeRebuild runs as the rebuild reaches the host, which is the only place
 	// a test can see what was recorded BEFORE the volume would have been dropped.
 	// Ordering is the whole of the write-ahead rule, and it is invisible to any
@@ -413,6 +418,16 @@ func (fake *fakeVirtualMachines) Rebuild(
 		fake.beforeRebuild()
 	}
 	fake.rebuildRequests = append(fake.rebuildRequests, request)
+	fake.writeTrace()
+	return fake.verbError
+}
+
+func (fake *fakeVirtualMachines) InjectIdentity(
+	ctx context.Context, runner *run.Runner, device string, uuid string, identity vm.Identity,
+) error {
+	defer fake.enter()()
+	fake.injectDevices = append(fake.injectDevices, device)
+	fake.injectIdentities = append(fake.injectIdentities, identity)
 	fake.writeTrace()
 	return fake.verbError
 }

@@ -57,6 +57,21 @@ const (
 	dataDiskLabelLine = "LABEL=" + dataFilesystemTag
 )
 
+// InjectIdentity writes a VM's identity through an already-selected device — the
+// exported seam a cross-host migration's InjectingIdentity phase drives.
+//
+// Rebuild owns device selection (it just laid the volume down) and calls the
+// unexported form directly; a migration selects the device itself — the live
+// dm-clone the guest will boot on, or the plain LV once the clone is gone — and
+// hands it here. Host keys are PRESERVED either way (ensureHostKeys), because the
+// disk moved wholesale and its SSH identity must survive the move; that is the
+// regenerate_host_keys=False contract the migration script named.
+func (manager *Manager) InjectIdentity(
+	ctx context.Context, runner *run.Runner, devicePath string, uuid string, identity Identity,
+) error {
+	return manager.injectIdentity(ctx, manager.commandsFor(runner), devicePath, uuid, identity)
+}
+
 // injectIdentity mounts the disk and writes this VM's identity into it.
 //
 // The mount is torn down on every path out, success or failure. A mount left
