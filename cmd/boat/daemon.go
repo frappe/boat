@@ -42,6 +42,8 @@ type daemonOptions struct {
 	socketPath    string
 	storePath     string
 	tokenFilePath string
+	serverName    string
+	updateKeyPath string
 }
 
 func daemon(arguments []string, errorOutput io.Writer) int {
@@ -67,6 +69,8 @@ func parseDaemonOptions(arguments []string, errorOutput io.Writer) (daemonOption
 	flags.StringVar(&options.socketPath, "socket", defaultSocketPath, "path of the local control socket")
 	flags.StringVar(&options.storePath, "store", defaultStorePath, "path of the observed-state and journal database")
 	flags.StringVar(&options.tokenFilePath, "token-file", defaultTokenFilePath, "file holding the bearer token the tunnel listener demands")
+	flags.StringVar(&options.serverName, "server-name", "", "this host's Frappe Server name; enables the §11.1 placement boot gate (empty leaves it inert)")
+	flags.StringVar(&options.updateKeyPath, "update-key-file", defaultUpdateKeyPath, "file holding the ed25519 public key trusted to sign self-updates; absent disables POST /v1/update")
 	return options, flags.Parse(arguments)
 }
 

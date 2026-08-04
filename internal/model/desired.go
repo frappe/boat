@@ -28,6 +28,15 @@ type DesiredVirtualMachine struct {
 	BootEpoch    int64        `json:"boot_epoch"`
 	DesiredPower DesiredPower `json:"desired_power"`
 
+	// Server is the host Atlas has placed this VM on — its Frappe Server name, not
+	// a tenant or a workload, so it stays within Boat's host-not-owner remit. It is
+	// the §11.1 "server == self" discriminator: a host boots a VM only when the
+	// desired record names THIS host, which refuses a VM Atlas has assigned
+	// elsewhere even at a valid epoch. Empty means Atlas asserted no placement (an
+	// older controller, or a host that has not been told its own name), and the gate
+	// then falls back to the epoch alone — see internal/api/fence.go.
+	Server string `json:"server"`
+
 	VCPUs             int     `json:"vcpus"`
 	CPUMaxCores       float32 `json:"cpu_max_cores"`
 	CPUMode           string  `json:"cpu_mode"`

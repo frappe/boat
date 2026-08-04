@@ -127,6 +127,13 @@ type DesiredVirtualMachine struct {
 	MemoryMegabytes    *int         `json:"memory_megabytes,omitempty"`
 	PrivateAddress     *string      `json:"private_address,omitempty"`
 
+	// Server The host Atlas has placed this VM on — its Frappe Server name. The
+	// §11.1 "server == self" discriminator: a host boots a VM only when the
+	// desired record names THIS host, so a VM assigned elsewhere is refused
+	// even at a valid epoch. Absent means Atlas asserted no placement, and the
+	// boot gate falls back to the epoch alone.
+	Server *string `json:"server,omitempty"`
+
 	// SleepOnIdle Enrolment, not policy. Boat runs the sleep reflex; whether a VM is
 	// enrolled in it is Atlas's decision and arrives here.
 	SleepOnIdle *bool   `json:"sleep_on_idle,omitempty"`

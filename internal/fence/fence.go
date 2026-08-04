@@ -31,6 +31,27 @@ var ErrStaleEpoch = errors.New("the requested fence epoch is older than the one 
 // operator to re-assert intent on the one host that must not have it.
 var ErrNoAuthority = errors.New("this host holds no desired state for the virtual machine")
 
+// ErrWrongServer means the desired record places the VM on a DIFFERENT host than
+// this one, so this host will not boot it however valid its epoch. It is the
+// §11.1 "server == self" rule: placement, not just the epoch, gates a boot, which
+// refuses a VM Atlas has assigned elsewhere even before the epoch has moved. Only
+// checked when this host knows its own name — see Placed.
+var ErrWrongServer = errors.New("this VM is placed on another host")
+
+// Placed reports whether a VM the desired record places on recordServer may boot on
+// a host that calls itself selfServer. It is deliberately permissive at the edges:
+// a host that does not know its own name (selfServer empty — an older bootstrap) or
+// a record that names no placement (recordServer empty — an older controller) falls
+// back to the epoch alone, so enabling the check is safe on a mixed fleet and a
+// misconfigured host never refuses its own VMs. Only two known, differing names is a
+// refusal.
+func Placed(selfServer, recordServer string) error {
+	if selfServer == "" || recordServer == "" || recordServer == selfServer {
+		return nil
+	}
+	return fmt.Errorf("%w: this host is %q, the VM is placed on %q", ErrWrongServer, selfServer, recordServer)
+}
+
 // Allow reports whether this host may boot the VM under requestedEpoch, given
 // the epoch its store holds and whether it holds one at all. A nil error is
 // permission; any error is a refusal, and a refused caller must not start

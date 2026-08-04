@@ -1137,6 +1137,14 @@ components:
             use 0 to mean unfenced.
         desired_power:
           $ref: "#/components/schemas/DesiredPower"
+        server:
+          type: string
+          description: |
+            The host Atlas has placed this VM on — its Frappe Server name. The
+            §11.1 "server == self" discriminator: a host boots a VM only when the
+            desired record names THIS host, so a VM assigned elsewhere is refused
+            even at a valid epoch. Absent means Atlas asserted no placement, and the
+            boot gate falls back to the epoch alone.
         vcpus:
           type: integer
         cpu_max_cores:

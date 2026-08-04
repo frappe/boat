@@ -34,6 +34,8 @@ func (server *Server) refuseUnfenced(uuid string) *errorResponse {
 				", so it will not boot it; assert the desired state first.")
 	case errors.Is(err, fence.ErrStaleEpoch):
 		return conflict("The fence epoch this host holds for " + uuid + " has been superseded, so it will not boot it.")
+	case errors.Is(err, fence.ErrWrongServer):
+		return conflict("This host is not where " + uuid + " is placed, so it will not boot it.")
 	case err != nil:
 		return internalFault("The fence could not be consulted.", err)
 	}
@@ -100,6 +102,12 @@ func (server *Server) allowedToBoot(uuid string) error {
 			"%w: this host holds no desired state for %s, so it holds no authority to boot it",
 			fence.ErrNoAuthority, uuid,
 		)
+	}
+	// Placement gates the boot alongside the epoch (§11.1): a VM Atlas has assigned
+	// to another host is refused here even at a valid epoch. Guarded on this host
+	// knowing its own name, so it is inert until bootstrap provisions --server-name.
+	if err := fence.Placed(server.serverName, record.Server); err != nil {
+		return err
 	}
 	return fence.Allow(heldEpoch, held, record.BootEpoch)
 }

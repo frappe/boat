@@ -175,6 +175,11 @@ type Dependencies struct {
 	// substitutes that default; it is a field so a handler test stages under a
 	// temporary directory instead of the real host path.
 	StateDirectory string
+	// ServerName is this host's own Frappe Server name, provisioned at bootstrap and
+	// passed with --server-name. It is the left side of the §11.1 "server == self"
+	// boot gate; empty leaves the gate inert (the epoch alone decides), so an older
+	// host that never learned its name never refuses its own VMs.
+	ServerName string
 }
 
 // Server answers every documented operation.
@@ -199,6 +204,9 @@ type Server struct {
 	updateKey ed25519.PublicKey
 	// stateDirectory is where POST /v1/update stages a verified release.
 	stateDirectory string
+	// serverName is this host's own Frappe Server name (Dependencies.ServerName),
+	// the left side of the §11.1 placement boot gate. Empty leaves the gate inert.
+	serverName string
 	// launchUpdater spawns the detached out-of-cgroup updater. It is a field so a
 	// handler test asserts 202 + a launch without a real systemd-run under it;
 	// production is spawnDetachedUpdater.
@@ -267,6 +275,7 @@ func NewServer(dependencies Dependencies) *Server {
 		admission:       gate,
 		updateKey:       dependencies.UpdateKey,
 		stateDirectory:  stateDirectory,
+		serverName:      dependencies.ServerName,
 		launchUpdater:   spawnDetachedUpdater,
 		newRunner:       run.NewRunner,
 		hostFacts:       hostfacts.Read,

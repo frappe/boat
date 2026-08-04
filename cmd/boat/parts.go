@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/store"
 	"github.com/frappe/boat/internal/units"
+	"github.com/frappe/boat/internal/update"
 	"github.com/frappe/boat/internal/vm"
 	"github.com/frappe/boat/internal/watch"
 )
@@ -49,6 +52,12 @@ type daemonParts struct {
 	// this daemon's log lines, which is the only record either of them has. The
 	// trap's once-a-second poll deliberately does not use it; see park.NewTrap.
 	runner *run.Runner
+	// serverName is this host's own Frappe Server name (--server-name), the left
+	// side of the §11.1 placement boot gate; empty leaves it inert.
+	serverName string
+	// updateKey is the trusted self-update signer, loaded from --update-key-file. A
+	// nil key (no file) disables POST /v1/update rather than trusting a default.
+	updateKey ed25519.PublicKey
 }
 
 // build constructs the daemon in dependency order: the store, the journal over
@@ -64,7 +73,20 @@ func build(options daemonOptions) (*daemonParts, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not open the store at %s: %w", options.storePath, err)
 	}
-	return assemble(database), nil
+	parts := assemble(database)
+	parts.serverName = options.serverName
+	// The update key is optional: no file means self-update is not enabled on this
+	// host, which is a policy and not a failure; a file that will not parse is an
+	// operator error worth refusing to start over rather than silently disabling.
+	switch key, keyErr := update.LoadTrustedKey(options.updateKeyPath); {
+	case keyErr == nil:
+		parts.updateKey = key
+	case errors.Is(keyErr, os.ErrNotExist):
+		// self-update disabled; leave parts.updateKey nil.
+	default:
+		return nil, fmt.Errorf("could not load the update key at %s: %w", options.updateKeyPath, keyErr)
+	}
+	return parts, nil
 }
 
 // assemble wires the parts that cannot fail. One vm.Manager serves the API and
@@ -118,6 +140,8 @@ func (parts *daemonParts) dependencies() api.Dependencies {
 		Watch:           watch.NewHub(),
 		Units:           parts.units,
 		StartedAt:       time.Now().UTC(),
+		ServerName:      parts.serverName,
+		UpdateKey:       parts.updateKey,
 	}
 }
 

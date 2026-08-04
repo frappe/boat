@@ -68,3 +68,28 @@ func TestStaleEpochErrorNamesBothEpochs(t *testing.T) {
 		}
 	}
 }
+
+// Placed gates on placement only when both names are known and they differ. The
+// two empty cases are the load-bearing ones: an unnamed host or an unplaced record
+// must fall back to the epoch, or enabling the field would refuse valid boots.
+func TestPlaced(t *testing.T) {
+	cases := []struct {
+		self, record string
+		wantRefusal  bool
+	}{
+		{"atlas-host-1", "atlas-host-1", false}, // placed here
+		{"atlas-host-1", "atlas-host-2", true},  // placed elsewhere
+		{"", "atlas-host-2", false},             // this host does not know its name — inert
+		{"atlas-host-1", "", false},             // Atlas asserted no placement — inert
+		{"", "", false},
+	}
+	for _, testCase := range cases {
+		err := Placed(testCase.self, testCase.record)
+		switch {
+		case testCase.wantRefusal && !errors.Is(err, ErrWrongServer):
+			t.Errorf("Placed(%q,%q) = %v, want ErrWrongServer", testCase.self, testCase.record, err)
+		case !testCase.wantRefusal && err != nil:
+			t.Errorf("Placed(%q,%q) = %v, want nil", testCase.self, testCase.record, err)
+		}
+	}
+}
