@@ -96,7 +96,7 @@ func TestReceiveBasePrepare(t *testing.T) {
 		"sudo blockdev --getsize64 "+baseImageDev,
 		"- cat /sys/block/nbd2/pid",
 		"- sudo nbd-client -d /dev/nbd2",
-		"sudo nbd-client -N '' "+testSource+" 11167 /dev/nbd2 -persist",
+		"sudo nbd-client "+testSource+" 11167 /dev/nbd2 -persist",
 		// dm-clone over the base
 		"? sudo dmsetup info "+baseCloneNm,
 		"? sudo lvs --noheadings atlas/"+baseCloneMetaNm,
@@ -112,7 +112,7 @@ func TestReceiveBasePrepare(t *testing.T) {
 		"? test -d "+imageDir,
 		"- cat /sys/block/nbd3/pid",
 		"- sudo nbd-client -d /dev/nbd3",
-		"sudo nbd-client -N '' "+testSource+" 11168 /dev/nbd3 -persist",
+		"sudo nbd-client "+testSource+" 11168 /dev/nbd3 -persist",
 		"sudo install -d -m 0700 "+imageDir,
 		"$ sudo tar -xf /dev/nbd3 -C "+imageDir,
 	)

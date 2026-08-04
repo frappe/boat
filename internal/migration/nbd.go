@@ -111,11 +111,12 @@ func ensureNBDClient(ctx context.Context, cmd commands, host string, port, slot 
 	// reconnect can take the slot) or it is the wrong export (drop and re-dial). Both
 	// are the same idempotent -d; harmless on an already-free slot.
 	cmd.RunUnchecked(ctx, "sudo nbd-client -d {}", device)
-	// -N '' selects the source's default (unnamed) export; the empty name is a
-	// literal in the template, so it splits to one empty argv element the way the
-	// Python's `-N ""` does. -persist re-dials on a transient blip rather than
-	// dropping the client.
-	if _, err := cmd.Run(ctx, "sudo nbd-client -N '' {} {} {} -persist", host, port, device); err != nil {
+	// The plain positional form reaches qemu-nbd's default (unnamed) export.
+	// Verified on a host: the Python's `-N ""` empty-name form both FAILS qemu-nbd's
+	// negotiation ("Exiting") AND cannot be matched by a sudoers grant, because sudo
+	// will not match an empty argv element — so the empty `-N ""` is dropped, not
+	// ported. -persist re-dials on a transient blip rather than dropping the client.
+	if _, err := cmd.Run(ctx, "sudo nbd-client {} {} {} -persist", host, port, device); err != nil {
 		return "", err
 	}
 	return device, nil

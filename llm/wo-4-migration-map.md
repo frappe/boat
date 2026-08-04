@@ -225,3 +225,10 @@ hosts with a real VM — needs `boat daemon` on both, a desired record + fence e
 a booted VM, and the phases driven via `/vms/{uuid}/migrate/{phase}` with the guest
 surviving on the target. Large; the transport (nbd+dm-clone) + sudoers above are the
 prerequisites now verified/flagged.
+
+### RESOLVED (2026-08-04)
+Fixed: dropped the `-N ''` from nbd.go's connect (+ baseship/clone-target tests +
+the sudoers grant). Re-verified on atlas-host-1: `sudo -u boat sudo -n nbd-client
+127.0.0.1 <port> /dev/nbd0 -persist` is now GRANTED and connects
+("Negotiation: size = 8MB"). Both bugs closed — the empty-name form failed
+qemu-nbd negotiation AND was ungrantable; the positional form works and is granted.

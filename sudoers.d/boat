@@ -855,17 +855,18 @@ Cmnd_Alias BOAT_MIGRATION_DEVICE_MAPPER = \
 # image-dir tar live under the pinned /var/lib/atlas/run. nbd-client -d, the kill
 # and the pidfile rm are the cleanup teardown.
 #
-# VERIFY ON A REAL HOST: the `--fork *` device operand, the `nbd-client -N ""`
-# empty export name, and the tar operands are byte-coupled to
-# internal/migration/nbd.go and baseship.go. `-N ""` matches one empty argument;
-# confirm the rendered argv with `sudo -u boat sudo -n -l <command>` before
-# dogfooding. Ubuntu paths: qemu-nbd in /usr/bin, nbd-client in /usr/sbin —
+# VERIFY ON A REAL HOST: the `--fork *` device operand and the tar operands are
+# byte-coupled to internal/migration/nbd.go and baseship.go; confirm the rendered
+# argv with `sudo -u boat sudo -n -l <command>` before dogfooding. The connect is
+# the PLAIN positional form (no `-N ""`): sudo cannot match an empty argv element,
+# and qemu-nbd's default export is reached without a name anyway — both VERIFIED on
+# atlas-host-1. Ubuntu paths: qemu-nbd in /usr/bin, nbd-client in /usr/sbin —
 # resolve per distro, a binary in the other directory is a silent denial.
 Cmnd_Alias BOAT_MIGRATION_NBD = \
     /usr/sbin/modprobe nbd, \
     /usr/sbin/modprobe dm_clone, \
     /usr/bin/qemu-nbd --persistent --read-only --cache=none --bind=* --port=[0-9][0-9][0-9][0-9][0-9] --pid-file=/var/lib/atlas/run/migrate-nbd-[0-9][0-9][0-9][0-9][0-9].pid --fork *, \
-    /usr/sbin/nbd-client -N "" * [0-9][0-9][0-9][0-9][0-9] /dev/nbd* -persist, \
+    /usr/sbin/nbd-client * [0-9][0-9][0-9][0-9][0-9] /dev/nbd* -persist, \
     /usr/sbin/nbd-client -d /dev/nbd*, \
     /usr/bin/test -f /var/lib/atlas/run/migrate-nbd-[0-9][0-9][0-9][0-9][0-9].pid, \
     /usr/bin/cat /var/lib/atlas/run/migrate-nbd-[0-9][0-9][0-9][0-9][0-9].pid, \

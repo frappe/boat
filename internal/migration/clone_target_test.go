@@ -60,7 +60,7 @@ func TestCloneTargetFreshPrepare(t *testing.T) {
 		"sudo blockdev --getsize64 "+vmDiskDev,
 		"- cat /sys/block/nbd0/pid",
 		"- sudo nbd-client -d /dev/nbd0",
-		"sudo nbd-client -N '' "+testSource+" 11165 /dev/nbd0 -persist",
+		"sudo nbd-client "+testSource+" 11165 /dev/nbd0 -persist",
 		// dm-clone: metadata LV then the create
 		"? sudo dmsetup info "+vmCloneRoot,
 		"? sudo lvs --noheadings atlas/"+cloneMetaRoot,
@@ -96,7 +96,7 @@ func TestCloneTargetLeavesHealthyCloneAlone(t *testing.T) {
 	assertNotIssued(t, fake, "dmsetup create")
 	// A live, right-sized client is reused, not re-dialed.
 	assertNotIssued(t, fake, "nbd-client -d")
-	assertNotIssued(t, fake, "nbd-client -N")
+	assertNotIssued(t, fake, "-persist")
 }
 
 // A dead source client under an existing clone is torn down so the stack rebuilds.
@@ -117,7 +117,7 @@ func TestCloneTargetRebuildsWedgedClone(t *testing.T) {
 	}
 	// Wedge repair: the clone is removed and the dead client re-dialed.
 	assertIssued(t, fake, "sudo dmsetup remove "+vmCloneRoot)
-	assertIssued(t, fake, "sudo nbd-client -N '' "+testSource+" 11165 /dev/nbd0 -persist")
+	assertIssued(t, fake, "sudo nbd-client "+testSource+" 11165 /dev/nbd0 -persist")
 }
 
 func TestCloneTargetDataDisk(t *testing.T) {
@@ -139,7 +139,7 @@ func TestCloneTargetDataDisk(t *testing.T) {
 	// The data disk gets its own thin LV, its own nbd client on port+1/slot+1, and its
 	// own dm-clone.
 	assertIssued(t, fake, "sudo lvcreate --type thin --thinpool atlas/pool0 -V 20G -n "+dataDisk+" atlas")
-	assertIssued(t, fake, "sudo nbd-client -N '' "+testSource+" 11166 /dev/nbd1 -persist")
+	assertIssued(t, fake, "sudo nbd-client "+testSource+" 11166 /dev/nbd1 -persist")
 	assertIssued(t, fake, "sudo dmsetup create atlas-vm-3f2504e0-4f89-41d3-9a0c-0305e82c3301-data-clone")
 }
 
@@ -162,7 +162,7 @@ func TestCloneTargetPreflightFailures(t *testing.T) {
 				t.Fatal("CloneTarget accepted a failed pre-flight")
 			}
 			assertNotIssued(t, fake, "lvcreate")
-			assertNotIssued(t, fake, "nbd-client -N")
+			assertNotIssued(t, fake, "-persist")
 		})
 	}
 }
