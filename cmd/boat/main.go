@@ -38,6 +38,7 @@ usage:
   boat vm-network-down <uuid>
   boat vm-disk-up <uuid>
   boat bootstrap
+  boat networkd
   boat image-import <name> <rootfs-file> <disk-gb>
   boat vm-create-disk <uuid> <image-name>
   boat metrics
@@ -77,6 +78,10 @@ func dispatch(arguments []string, output io.Writer, errorOutput io.Writer) int {
 	case "bootstrap":
 		// Brings THIS host to VM-ready — one command, boat driving every step.
 		return bootstrapCommand(arguments[1:], errorOutput)
+	case "networkd":
+		// The ANCP wg-mesh gossip control plane (spec/31, WO-5). A long-running
+		// daemon in its own unit, privileged for wg/ip — not a client of the API.
+		return networkdCommand(arguments[1:], errorOutput)
 	case "image-import":
 		return imageImport(arguments[1:], errorOutput)
 	case "vm-create-disk":

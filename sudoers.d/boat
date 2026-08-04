@@ -733,6 +733,45 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_TERMINATE = \
     /usr/bin/systemctl disable --now firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service, \
     /usr/bin/rm -rf /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
 
+# --- ANCP network control plane: boat networkd (spec/31, WO-5) -------------
+# The privileged wg/ip commands the networkd daemon runs to bring up and converge
+# the wg-mesh interface. boat-networkd.service is a SEPARATE unit from boat.service
+# but runs as the same non-root `boat` user, so its grants are pinned here beside
+# the VM-lifecycle ones.
+#
+# There is no per-VM UUID in any of these — they are VM-independent, fleet-wide mesh
+# operations — so there is no character-class UUID to spell out. The pins are the
+# literal `wg-mesh` device name and the literal /run + /etc paths instead.
+#
+#   - The five `ip` bring-up commands: create the device (idempotent — the daemon
+#     ignores the device-exists failure), pin MTU, assign the host's own infra /128,
+#     bring the link up, own the fdaa::/16 private plane. The mesh address is a `*`
+#     because it is a code-validated value: networkd netip-parses
+#     identity.mesh_address (internal/networkd.validMeshAddress) before it is ever
+#     rendered — the same "an address netip parsed" `*` this file already sanctions
+#     at the top — and the trailing `dev wg-mesh` pins the interface after it.
+#   - The one `bash -c`: the whole-table apply. It needs a shell only for the
+#     `<(wg-quick strip …)` process substitution; every field is a fixed constant, so
+#     it is pinned as a single literal line carrying `wg syncconf` FIRST then
+#     `wg set … private-key … listen-port` LAST (the load-bearing order
+#     internal/networkd.assertApplyOrder guards code-side). It is BYTE-COUPLED to
+#     applyScript in internal/networkd/apply.go — a drift is a denied sudo that fails
+#     the apply loud. Like every `sh -c`/`bash -c` line here it MUST be verified
+#     against a real host with `sudo -u boat sudo -n -l <the exact rendered command>`
+#     before dogfooding — reading is not verification. As a fallback an operator may
+#     run boat-networkd.service as root, where sudo needs no rule at all.
+#
+# Paths are Ubuntu merged-/usr as resolved elsewhere in this file (/usr/sbin/ip,
+# /usr/bin/bash); resolve per distro — a binary in the other directory is a silent
+# denial.
+Cmnd_Alias BOAT_NETWORKD = \
+    /usr/sbin/ip link add dev wg-mesh type wireguard, \
+    /usr/sbin/ip link set dev wg-mesh mtu 1420, \
+    /usr/sbin/ip -6 addr replace * dev wg-mesh, \
+    /usr/sbin/ip link set dev wg-mesh up, \
+    /usr/sbin/ip -6 route replace fdaa\:\:/16 dev wg-mesh, \
+    /usr/bin/bash -c set\ -e;\ wg\ syncconf\ wg-mesh\ <(wg-quick\ strip\ /run/atlas-networkd/wg-mesh.conf);\ wg\ set\ wg-mesh\ private-key\ /etc/atlas-networkd/wg-private-key\ listen-port\ 51820
+
 boat ALL=(root) NOPASSWD: BOAT_VIRTUAL_MACHINE_UNIT, BOAT_VIRTUAL_MACHINE_MARKERS, \
     BOAT_VIRTUAL_MACHINE_STOP_TIMEOUT, BOAT_VIRTUAL_MACHINE_CLONE, BOAT_FIRECRACKER_API, \
     BOAT_ADOPTION, BOAT_HOST_CAPACITY, BOAT_FIRECRACKER_LIVENESS, \
@@ -741,4 +780,4 @@ boat ALL=(root) NOPASSWD: BOAT_VIRTUAL_MACHINE_UNIT, BOAT_VIRTUAL_MACHINE_MARKER
     BOAT_VIRTUAL_MACHINE_VOLUMES, BOAT_VIRTUAL_MACHINE_VOLUME_REMOVE, \
     BOAT_VIRTUAL_MACHINE_FILESYSTEM, BOAT_VIRTUAL_MACHINE_JAIL_NODES, \
     BOAT_VIRTUAL_MACHINE_RESIZE, BOAT_VIRTUAL_MACHINE_IDENTITY, \
-    BOAT_VIRTUAL_MACHINE_TERMINATE
+    BOAT_VIRTUAL_MACHINE_TERMINATE, BOAT_NETWORKD

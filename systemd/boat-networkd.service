@@ -1,0 +1,79 @@
+# boat-networkd.service — the ANCP wg-mesh gossip control plane (spec/31, WO-5).
+#
+# THE RULE (boat.service): every host-side service is the same /usr/local/bin/boat
+# binary under a different subcommand. This unit runs `boat networkd` — the network
+# control plane that gossips wg-mesh peer/ownership records over hashicorp/memberlist
+# and converges each host's wg-mesh.conf. It is a SEPARATE unit from `boat daemon`
+# (the API): a wedged or restarting control plane must not take the VM API down with
+# it, and the two have different privilege needs.
+#
+# It runs as the unprivileged `boat` user, exactly like boat.service, and reaches root
+# ONLY through the pinned /etc/sudoers.d/boat lines (Cmnd_Alias BOAT_NETWORKD): the
+# five `ip` bring-up commands and the one whole-table `wg` apply. That is the whole
+# privilege surface — no CAP_NET_ADMIN on the daemon itself, no shell, no wildcard.
+#
+# Install (operator step; boat never edits its own unit):
+#   sudo install -m 0755 bin/boat /usr/local/bin/boat
+#   sudo install -m 0644 systemd/boat-networkd.service /etc/systemd/system/boat-networkd.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now boat-networkd.service
+#
+# The bootstrap contract lives under /etc/atlas-networkd/ (identity.json, seed.json +
+# seed.json.sig + operator-public-key, and the wg + signing key pairs). The controller
+# provisions those files; they MUST be readable by the `boat` user (keys 0640
+# root:boat, or the directory owned by boat), and the directory MUST be boat-writable
+# on a host where the keys are self-generated rather than pushed. A fresh host with no
+# identity.json fails its unit loud rather than inventing a ghost identity.
+
+[Unit]
+Description=Boat ANCP wg-mesh network control plane
+Documentation=https://github.com/frappe/boat
+Documentation=file:///usr/share/doc/atlas/spec/31-networkd.md
+After=network-online.target local-fs.target
+Wants=network-online.target
+# Bound the restart rate so a genuinely fatal fault — an unreadable seed signature, a
+# missing identity, a bind that always fails — leaves the unit `failed` and visible to
+# the operator rather than hot-looping every RestartSec and filling the journal.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+# Type=notify: the daemon sends READY=1 once memberlist is created and the first apply
+# has run (see internal/networkd sd_notify), so systemd only reports the unit active
+# when the mesh is actually being served. WatchdogSec pairs with the WATCHDOG=1 the
+# loop pats every tick — a wedged loop (a render that never returns, a deadlocked
+# apply) is relaunched rather than sitting silently dark.
+Type=notify
+WatchdogSec=30
+User=boat
+Group=boat
+
+# systemd creates both directories owned by the service user before ExecStart.
+# RuntimeDirectory holds the rendered wg-mesh.conf on tmpfs (/run/atlas-networkd);
+# StateDirectory holds the daemon's own crash-recovery state, the operator status
+# surface and the conflict log (/var/lib/atlas-networkd: state.json, status.json,
+# conflicts.jsonl).
+RuntimeDirectory=atlas-networkd
+RuntimeDirectoryMode=0750
+StateDirectory=atlas-networkd
+StateDirectoryMode=0750
+
+ExecStart=/usr/local/bin/boat networkd
+
+Restart=on-failure
+RestartSec=2
+
+# SIGTERM drives the graceful shutdown: broadcast a memberlist Leave so peers fast-path
+# this host, persist the ownership generation counter, and sd_notify STOPPING so the
+# exit reads as clean rather than failed. TimeoutStopSec bounds it above the Leave
+# broadcast window.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# No sandboxing directives beyond User=/Group=, for the same reason boat.service gives:
+# NoNewPrivileges=yes would break sudo (it is setuid), and ProtectSystem/PrivateTmp
+# would confine the root children sudo spawns. The privilege boundary for this daemon
+# is the pinned allow-list in /etc/sudoers.d/boat (Cmnd_Alias BOAT_NETWORKD), which
+# enumerates every root command by name.
+
+[Install]
+WantedBy=multi-user.target
