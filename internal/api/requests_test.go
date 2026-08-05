@@ -23,6 +23,21 @@ func postJSON(t *testing.T, handler http.Handler, path string, body any) *httpte
 	return postBody(handler, path, string(encoded))
 }
 
+// postAsync is a caller that polls: RFC 7240's Prefer header, which is what
+// Atlas sends so a long verb holds no connection.
+func postAsync(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("could not encode the request body: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(encoded)))
+	request.Header.Set("Prefer", "respond-async")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
 func postBody(handler http.Handler, path string, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	recorder := httptest.NewRecorder()

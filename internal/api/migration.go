@@ -64,7 +64,7 @@ func (server *Server) MigrateVirtualMachine(ctx context.Context, request wire.Mi
 		return badRequest("Unknown migration phase " + request.Phase + "; this host runs no such phase."), nil
 	}
 	body := *request.Body
-	work := func(runner *run.Runner) (model.OperationResult, error) {
+	work := func(ctx context.Context, runner *run.Runner) (model.OperationResult, error) {
 		return server.runMigrationPhase(ctx, runner, request.Uuid, request.Phase, body)
 	}
 	operation, failure := server.performMigrationPhase(ctx, request.Body.OperationId, verb, request.Uuid, work)
@@ -137,10 +137,10 @@ func (server *Server) performMigrationPhase(
 		return operation, nil
 	}
 	recorded, failure := operation, (*errorResponse)(nil)
-	turnError := server.reconciler.Do(ctx, uuid, func(context.Context) error {
+	turnError := server.reconciler.Do(ctx, uuid, func(ctx context.Context) error {
 		var trace bytes.Buffer
 		runner := server.newRunner(&trace)
-		result, verbError := execute(runner)
+		result, verbError := execute(ctx, runner)
 		recorded, failure = server.record(operation, &trace, result, verbError)
 		return nil
 	})

@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/frappe/boat/internal/model"
@@ -17,6 +19,7 @@ import (
 	"github.com/frappe/boat/internal/units"
 	"github.com/frappe/boat/internal/vm"
 	"github.com/frappe/boat/internal/watch"
+	"github.com/frappe/boat/internal/wire"
 )
 
 // fakeStore is the store without bbolt. The rules the handlers lean on are kept
@@ -313,6 +316,9 @@ type fakeVirtualMachines struct {
 	missing      bool
 	observed     model.VirtualMachine
 	observeError error
+	// beforeStart runs inside Start, so a test can hold a verb open and watch
+	// what its caller was told while the work is still going.
+	beforeStart func()
 
 	// One counter per WO-2 verb, and the request each was handed. The requests
 	// are what the desired-state tests are about: a verb that ran is not the same
@@ -358,6 +364,9 @@ type fakeVirtualMachines struct {
 
 func (fake *fakeVirtualMachines) Start(ctx context.Context, runner *run.Runner, uuid string) (bool, error) {
 	defer fake.enter()()
+	if fake.beforeStart != nil {
+		fake.beforeStart()
+	}
 	fake.starts++
 	fake.writeTrace()
 	return false, fake.startError
@@ -579,4 +588,27 @@ func (fake *fakeUnits) LivenessOf(
 func (fake *fakeUnits) Act(ctx context.Context, runner *run.Runner, name string, action units.Action) error {
 	fake.acted = append(fake.acted, string(action)+" "+name)
 	return fake.actErr
+}
+
+// awaitOperation waits for the verb a request started.
+//
+// A verb no longer runs inside its request: the POST answers with the claim and
+// the daemon runs the work after it, which is what lets Atlas survive a dropped
+// connection. A test asserting on an OUTCOME is standing in for the client's
+// `GET /ops/{operation_id}` poll, so it waits here and then reads the record —
+// the same two steps, without the sleep a real poll loop needs.
+func awaitOperation(t *testing.T, server *Server) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.DrainOperations(ctx); err != nil {
+		t.Fatalf("waiting for the operation to finish: %v", err)
+	}
+}
+
+// recordOf reads an operation's journal record the way a client polls for it.
+func recordOf(t *testing.T, server *Server, handler http.Handler, identifier string) wire.Operation {
+	t.Helper()
+	awaitOperation(t, server)
+	return decodeOperation(t, get(t, handler, "/ops/"+identifier))
 }

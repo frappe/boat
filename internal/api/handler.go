@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
@@ -44,7 +45,10 @@ func (server *Server) routes() http.Handler {
 	router := http.NewServeMux()
 	router.Handle("/", documented)
 	router.Handle(versionPrefix+"/", http.StripPrefix(versionPrefix, documented))
-	return router
+	// Both listeners, because whether a caller waits is the caller's business and
+	// not the transport's: Atlas polls over the tunnel, an operator's break-glass
+	// verb blocks on the socket, and either could want the other.
+	return preferRespondAsync(router)
 }
 
 // strictHandler wires the generated glue to error handlers that speak the
@@ -100,4 +104,30 @@ func requestNotUnderstood(writer http.ResponseWriter, request *http.Request, err
 func responseNotWritten(writer http.ResponseWriter, request *http.Request, err error) {
 	slog.Error("could not write a response", "path", request.URL.Path, "error", err)
 	writeError(writer, http.StatusInternalServerError, "This host could not complete the request.")
+}
+
+// respondAsyncKey marks a request whose caller polls rather than waits.
+type respondAsyncKey struct{}
+
+// preferRespondAsync reads RFC 7240's `Prefer: respond-async`.
+//
+// A header rather than a field in every verb's request body, because it is not
+// about the work: the same start does the same thing either way, and only the
+// answer differs. Atlas sends it and then polls `GET /ops/{operation_id}`, so a
+// verb that takes half an hour holds no connection and a dropped one loses no
+// outcome. `boat vm start` sends nothing and blocks, which is what an operator
+// at a terminal wants.
+func preferRespondAsync(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.Contains(strings.ToLower(request.Header.Get("Prefer")), "respond-async") {
+			request = request.WithContext(context.WithValue(request.Context(), respondAsyncKey{}, true))
+		}
+		next.ServeHTTP(writer, request)
+	})
+}
+
+// respondAsync reports whether this request's caller asked to poll.
+func respondAsync(ctx context.Context) bool {
+	asked, _ := ctx.Value(respondAsyncKey{}).(bool)
+	return asked
 }

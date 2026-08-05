@@ -14,7 +14,8 @@ import (
 func TestStartIsRefusedWhenThisHostHoldsNoFence(t *testing.T) {
 	state := newFakeStore()
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(state, machines).SocketHandler()
+	server := newTestServer(state, machines)
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/start", wire.StartRequest{OperationId: "Task-20"})
 
@@ -37,10 +38,12 @@ func TestStartIsRefusedWhenThisHostHoldsNoFence(t *testing.T) {
 func TestStartIsPermittedOnceAFenceIsHeld(t *testing.T) {
 	state := newFakeStore()
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(state, machines).SocketHandler()
+	server := newTestServer(state, machines)
+	handler := server.SocketHandler()
 	putJSON(t, handler, "/vms/"+testUuid, desiredBody(2, wire.DesiredPowerRunning))
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/start", wire.StartRequest{OperationId: "Task-21"})
+	awaitOperation(t, server)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200: %s", recorder.Code, recorder.Body)
@@ -90,6 +93,7 @@ func TestStartIsPermittedWhenPlacedHereOrNameUnknown(t *testing.T) {
 		putJSON(t, handler, "/vms/"+testUuid, body)
 
 		recorder := postJSON(t, handler, "/vms/"+testUuid+"/start", wire.StartRequest{OperationId: "Task-31"})
+		awaitOperation(t, server)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("serverName=%q: got %d, want 200: %s", selfName, recorder.Code, recorder.Body)
 		}
@@ -104,9 +108,11 @@ func TestStartIsPermittedWhenPlacedHereOrNameUnknown(t *testing.T) {
 func TestStopIsNotFenced(t *testing.T) {
 	state := newFakeStore()
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(state, machines).SocketHandler()
+	server := newTestServer(state, machines)
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/stop", wire.StopRequest{OperationId: "Task-22"})
+	awaitOperation(t, server)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200: %s", recorder.Code, recorder.Body)

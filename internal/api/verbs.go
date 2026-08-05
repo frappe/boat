@@ -35,7 +35,7 @@ const (
 
 func (server *Server) PauseVirtualMachine(ctx context.Context, request wire.PauseVirtualMachineRequestObject) (wire.PauseVirtualMachineResponseObject, error) {
 	operation, failure := server.operation(ctx, request.Body, verbPauseVirtualMachine, request.Uuid,
-		func(runner *run.Runner) (model.OperationResult, error) {
+		func(ctx context.Context, runner *run.Runner) (model.OperationResult, error) {
 			return nil, server.virtualMachines.Pause(ctx, runner, request.Uuid)
 		})
 	if failure != nil {
@@ -59,7 +59,7 @@ func (server *Server) ResumeVirtualMachine(ctx context.Context, request wire.Res
 		return failure, nil
 	}
 	operation, failure := server.operation(ctx, request.Body, verbResumeVirtualMachine, request.Uuid,
-		func(runner *run.Runner) (model.OperationResult, error) {
+		func(ctx context.Context, runner *run.Runner) (model.OperationResult, error) {
 			return nil, server.virtualMachines.Resume(ctx, runner, request.Uuid)
 		})
 	if failure != nil {
@@ -78,7 +78,7 @@ func (server *Server) ResumeVirtualMachine(ctx context.Context, request wire.Res
 // See vm.Manager.FirecrackerUID.
 func (server *Server) SleepVirtualMachine(ctx context.Context, request wire.SleepVirtualMachineRequestObject) (wire.SleepVirtualMachineResponseObject, error) {
 	operation, failure := server.operation(ctx, request.Body, verbSleepVirtualMachine, request.Uuid,
-		func(runner *run.Runner) (model.OperationResult, error) {
+		func(ctx context.Context, runner *run.Runner) (model.OperationResult, error) {
 			return server.sleep(ctx, runner, request.Uuid)
 		})
 	if failure != nil {
@@ -160,7 +160,7 @@ func (server *Server) WakeVirtualMachine(ctx context.Context, request wire.WakeV
 		return failure, nil
 	}
 	operation, failure := server.operation(ctx, request.Body, verbWakeVirtualMachine, request.Uuid,
-		func(runner *run.Runner) (model.OperationResult, error) {
+		func(ctx context.Context, runner *run.Runner) (model.OperationResult, error) {
 			return nil, server.virtualMachines.Wake(ctx, runner, request.Uuid)
 		})
 	if failure != nil {
@@ -193,7 +193,7 @@ func (server *Server) WakeVirtualMachine(ctx context.Context, request wire.WakeV
 // The fence epoch is deliberately kept; see retract.
 func (server *Server) TerminateVirtualMachine(ctx context.Context, request wire.TerminateVirtualMachineRequestObject) (wire.TerminateVirtualMachineResponseObject, error) {
 	operation, failure := server.operation(ctx, request.Body, verbTerminateVirtualMachine, request.Uuid,
-		func(runner *run.Runner) (model.OperationResult, error) {
+		func(ctx context.Context, runner *run.Runner) (model.OperationResult, error) {
 			if err := server.state.DeleteDesired(request.Uuid); err != nil {
 				return nil, fmt.Errorf("the desired state of %s could not be retracted: %w", request.Uuid, err)
 			}
@@ -219,7 +219,7 @@ func (server *Server) ResizeVirtualMachine(ctx context.Context, request wire.Res
 		return failure, nil
 	}
 	operation, failure := server.operation(ctx, request.Body, verbResizeVirtualMachine, request.Uuid,
-		func(runner *run.Runner) (model.OperationResult, error) {
+		func(ctx context.Context, runner *run.Runner) (model.OperationResult, error) {
 			return nil, server.virtualMachines.Resize(ctx, runner, request.Uuid, resize)
 		})
 	if failure != nil {
@@ -246,7 +246,7 @@ func (server *Server) RebuildVirtualMachine(ctx context.Context, request wire.Re
 	if failure != nil {
 		return failure, nil
 	}
-	build := func(runner *run.Runner) (model.OperationResult, error) {
+	build := func(ctx context.Context, runner *run.Runner) (model.OperationResult, error) {
 		if err := server.decisions.Record(rebuildSource(request.Body.OperationId, rebuild)); err != nil {
 			return nil, err
 		}
@@ -315,7 +315,7 @@ func (server *Server) ReservedIpVirtualMachine(ctx context.Context, request wire
 		return failure, nil
 	}
 	operation, failure := server.perform(ctx, request.Body.OperationId, verbReservedIPVirtualMachine, request.Uuid,
-		func(runner *run.Runner) (model.OperationResult, error) {
+		func(ctx context.Context, runner *run.Runner) (model.OperationResult, error) {
 			delivery, err := server.virtualMachines.ReservedIP(ctx, runner, request.Uuid, reserved)
 			if err != nil {
 				return nil, err

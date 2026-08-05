@@ -17,7 +17,8 @@ func TestReservedIPAttachRunsTheVerbAndReportsTheDeliveryModel(t *testing.T) {
 	machines := &fakeVirtualMachines{
 		reservedDelivery: reservedip.Delivery{Anchored: true, Anchor: reservedip.Anchor{Address: "10.47.0.10"}},
 	}
-	handler := newTestServer(newFakeStore(), machines).SocketHandler()
+	server := newTestServer(newFakeStore(), machines)
+	handler := server.SocketHandler()
 
 	body := wire.ReservedIpRequest{
 		OperationId:  "Task-rip-1",
@@ -25,6 +26,7 @@ func TestReservedIPAttachRunsTheVerbAndReportsTheDeliveryModel(t *testing.T) {
 		ReservedIpv4: reservedIPv4Pointer("146.190.11.153"),
 	}
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/reserved-ip", body)
+	awaitOperation(t, server)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200: %s", recorder.Code, recorder.Body)
@@ -45,7 +47,8 @@ func TestReservedIPAttachRunsTheVerbAndReportsTheDeliveryModel(t *testing.T) {
 // stated — and reports no result, because it removed a NAT and nothing else.
 func TestReservedIPDetachRunsTheVerbWithNoAddress(t *testing.T) {
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(newFakeStore(), machines).SocketHandler()
+	server := newTestServer(newFakeStore(), machines)
+	handler := server.SocketHandler()
 
 	body := wire.ReservedIpRequest{OperationId: "Task-rip-2", Action: wire.ReservedIpRequestActionDetach}
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/reserved-ip", body)
@@ -56,7 +59,7 @@ func TestReservedIPDetachRunsTheVerbWithNoAddress(t *testing.T) {
 	if len(machines.reservedIPRequests) != 1 || !machines.reservedIPRequests[0].Detach {
 		t.Fatalf("the verb saw %+v, want one detach", machines.reservedIPRequests)
 	}
-	if operation := decodeOperation(t, recorder); operation.Result != nil {
+	if operation := recordOf(t, server, handler, "Task-rip-2"); operation.Result != nil {
 		t.Errorf("a detach carried a result: %+v", operation.Result)
 	}
 }
@@ -83,7 +86,8 @@ func TestReservedIPAttachRefusesAValueThatIsNotAnAddress(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			machines := &fakeVirtualMachines{}
-			handler := newTestServer(newFakeStore(), machines).SocketHandler()
+			server := newTestServer(newFakeStore(), machines)
+			handler := server.SocketHandler()
 
 			recorder := postJSON(t, handler, "/vms/"+testUuid+"/reserved-ip", testCase.body)
 
@@ -101,7 +105,8 @@ func TestReservedIPAttachRefusesAValueThatIsNotAnAddress(t *testing.T) {
 // missing identifier is refused exactly as it is for every other verb.
 func TestReservedIPRefusesAMissingOperationIdentifier(t *testing.T) {
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(newFakeStore(), machines).SocketHandler()
+	server := newTestServer(newFakeStore(), machines)
+	handler := server.SocketHandler()
 
 	body := wire.ReservedIpRequest{Action: wire.ReservedIpRequestActionAttach, ReservedIpv4: reservedIPv4Pointer("146.190.11.153")}
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/reserved-ip", body)

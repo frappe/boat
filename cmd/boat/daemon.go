@@ -245,7 +245,13 @@ func serveUntilSignal(active []listening) error {
 // the branch below — the one that decides whether the store may be closed — is
 // reachable from a test without a ten-second wait in it.
 func shutdown(ctx context.Context, active []listening, work *background, parts *daemonParts, socketPath string) error {
-	quiet := errors.Join(drain(ctx, active), work.stopAndWait(ctx))
+	// Three things have to go quiet, and the operations are the one that is not
+	// a request: a verb outlives the request that asked for it, so draining the
+	// listeners says nothing about whether a start is still mid-flight. Without
+	// this the store could close under a verb that had not yet recorded its
+	// outcome — the one thing the journal exists to prevent.
+	quiet := errors.Join(drain(ctx, active), parts.api.DrainOperations(ctx), work.stopAndWait(ctx))
+	parts.api.StopBackground()
 	if quiet != nil {
 		slog.Error("boat is exiting with work still in flight, and is leaving its store open so that work can still record its outcome", "error", quiet)
 		return errors.Join(quiet, removeSocket(socketPath))

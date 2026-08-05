@@ -40,7 +40,8 @@ func TestDeleteRetractsTheDesiredStateAndTouchesNothingOnTheHost(t *testing.T) {
 	state := newFakeStore()
 	machines := &fakeVirtualMachines{}
 	asserted(state, model.PowerRunning, 4)
-	handler := newTestServer(state, machines).SocketHandler()
+	server := newTestServer(state, machines)
+	handler := server.SocketHandler()
 
 	recorder := deleteVirtualMachine(handler, "/vms/"+testUuid)
 
@@ -66,7 +67,8 @@ func TestDeleteRetractsTheDesiredStateAndTouchesNothingOnTheHost(t *testing.T) {
 func TestDeleteKeepsTheFenceEpoch(t *testing.T) {
 	state := newFakeStore()
 	asserted(state, model.PowerRunning, 9)
-	handler := newTestServer(state, &fakeVirtualMachines{}).SocketHandler()
+	server := newTestServer(state, &fakeVirtualMachines{})
+	handler := server.SocketHandler()
 
 	deleteVirtualMachine(handler, "/vms/"+testUuid)
 
@@ -79,7 +81,8 @@ func TestDeleteKeepsTheFenceEpoch(t *testing.T) {
 // would tell Atlas this host still holds intent it does not hold.
 func TestDeleteIsIdempotent(t *testing.T) {
 	state := newFakeStore()
-	handler := newTestServer(state, &fakeVirtualMachines{}).SocketHandler()
+	server := newTestServer(state, &fakeVirtualMachines{})
+	handler := server.SocketHandler()
 
 	first := deleteVirtualMachine(handler, "/vms/"+testUuid)
 	second := deleteVirtualMachine(handler, "/vms/"+testUuid)
@@ -93,7 +96,8 @@ func TestDeleteReportsAStoreItCouldNotWrite(t *testing.T) {
 	state := newFakeStore()
 	asserted(state, model.PowerRunning, 1)
 	state.writeError = errStoreUnavailable
-	handler := newTestServer(state, &fakeVirtualMachines{}).SocketHandler()
+	server := newTestServer(state, &fakeVirtualMachines{})
+	handler := server.SocketHandler()
 
 	recorder := deleteVirtualMachine(handler, "/vms/"+testUuid)
 
@@ -113,10 +117,12 @@ func TestTerminateRetractsTheDesiredStateThatWouldRestartTheVirtualMachine(t *te
 	state := newFakeStore()
 	machines := &fakeVirtualMachines{}
 	asserted(state, model.PowerRunning, 2)
-	handler := newTestServer(state, machines).SocketHandler()
+	server := newTestServer(state, machines)
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/terminate",
 		wire.OperationRequest{OperationId: "Task-terminate-1"})
+	awaitOperation(t, server)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200: %s", recorder.Code, recorder.Body)
@@ -146,9 +152,11 @@ func TestTerminateRetractsBeforeItReachesTheHost(t *testing.T) {
 	machines.beforeTerminate = func() {
 		_, stillDesired, _ = state.GetDesired(testUuid)
 	}
-	handler := newTestServer(state, machines).SocketHandler()
+	server := newTestServer(state, machines)
+	handler := server.SocketHandler()
 
 	postJSON(t, handler, "/vms/"+testUuid+"/terminate", wire.OperationRequest{OperationId: "Task-terminate-2"})
+	awaitOperation(t, server)
 
 	if stillDesired {
 		t.Error("the host was torn down while the assertion that resurrects it was still stored")
@@ -164,10 +172,12 @@ func TestTerminateThatCannotRetractDestroysNothing(t *testing.T) {
 	machines := &fakeVirtualMachines{}
 	asserted(state, model.PowerRunning, 1)
 	state.writeError = errStoreUnavailable
-	handler := newTestServer(state, machines).SocketHandler()
+	server := newTestServer(state, machines)
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/terminate",
 		wire.OperationRequest{OperationId: "Task-terminate-3"})
+	awaitOperation(t, server)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("got %d, want the operation record: %s", recorder.Code, recorder.Body)

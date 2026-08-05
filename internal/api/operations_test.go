@@ -20,14 +20,17 @@ func TestStartRecordsSuccessAndObservesTheHost(t *testing.T) {
 		traceText: "+ systemctl start firecracker-vm@" + testUuid + ".service\n",
 		observed:  model.VirtualMachine{ObservedStatus: model.StatusRunning, UnitActiveState: "active"},
 	}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/start", wire.StartRequest{OperationId: "Task-1"})
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200: %s", recorder.Code, recorder.Body)
 	}
-	operation := decodeOperation(t, recorder)
+	// The POST answers with the claim; the outcome is the journal record, read
+	// here as the client reads it.
+	operation := recordOf(t, server, handler, "Task-1")
 	if operation.Status != wire.OperationStatusSuccess {
 		t.Errorf("got status %q, want Success", operation.Status)
 	}
@@ -52,7 +55,8 @@ func TestStartRecordsSuccessAndObservesTheHost(t *testing.T) {
 // defence the sudoers allow-list is the second half of (sudoers.d/boat).
 func TestAMalformedUUIDIsRefusedAtTheBoundary(t *testing.T) {
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(newFakeStore(), machines).SocketHandler()
+	server := newTestServer(newFakeStore(), machines)
+	handler := server.SocketHandler()
 	const bad = "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"
 
 	// A verb reaches perform's check before it claims an operation or touches the
@@ -76,10 +80,12 @@ func TestStartReplayReturnsTheFirstResultAndRunsNothing(t *testing.T) {
 	operations := newFakeStore()
 	operations.fence(testUuid, 1)
 	machines := &fakeVirtualMachines{traceText: "+ systemctl start\n"}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 	body := wire.StartRequest{OperationId: "Task-2"}
 
-	first := decodeOperation(t, postJSON(t, handler, "/vms/"+testUuid+"/start", body))
+	postJSON(t, handler, "/vms/"+testUuid+"/start", body)
+	first := recordOf(t, server, handler, "Task-2")
 	second := postJSON(t, handler, "/vms/"+testUuid+"/start", body)
 
 	if second.Code != http.StatusOK {
@@ -88,6 +94,8 @@ func TestStartReplayReturnsTheFirstResultAndRunsNothing(t *testing.T) {
 	if machines.starts != 1 {
 		t.Errorf("the verb ran %d times, want 1", machines.starts)
 	}
+	// A replay is answered from the record rather than re-claimed, so the second
+	// POST carries the finished operation where a first one carries the claim.
 	replayed := decodeOperation(t, second)
 	if replayed.Status != first.Status || *replayed.Output != *first.Output {
 		t.Errorf("the replay differs from the first result: %+v vs %+v", replayed, first)
@@ -98,7 +106,8 @@ func TestStartRefusesAnIdentifierAlreadyUsedForOtherWork(t *testing.T) {
 	operations := newFakeStore()
 	operations.fence(testUuid, 1)
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 	postJSON(t, handler, "/vms/"+testUuid+"/stop", wire.StopRequest{OperationId: "Task-3"})
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/start", wire.StartRequest{OperationId: "Task-3"})
@@ -121,14 +130,15 @@ func TestFailingVerbIsRecordedWithItsTrace(t *testing.T) {
 		traceText:  "+ systemctl start firecracker-vm@x.service\n",
 		startError: errors.New("the unit did not become active"),
 	}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/start", wire.StartRequest{OperationId: "Task-4"})
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200: %s", recorder.Code, recorder.Body)
 	}
-	operation := decodeOperation(t, recorder)
+	operation := recordOf(t, server, handler, "Task-4")
 	if operation.Status != wire.OperationStatusFailure {
 		t.Errorf("got status %q, want Failure", operation.Status)
 	}
@@ -167,9 +177,11 @@ func TestUnknownVirtualMachineIsRefusedAndStillJournalled(t *testing.T) {
 	operations := newFakeStore()
 	operations.fence(testUuid, 1)
 	machines := &fakeVirtualMachines{missing: true}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/start", wire.StartRequest{OperationId: "Task-5"})
+	awaitOperation(t, server)
 
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("got %d, want 404: %s", recorder.Code, recorder.Body)
@@ -186,9 +198,11 @@ func TestUnknownVirtualMachineIsRefusedAndStillJournalled(t *testing.T) {
 func TestStopAppliesTheContractsDefaults(t *testing.T) {
 	operations := newFakeStore()
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
 	postJSON(t, handler, "/vms/"+testUuid+"/stop", wire.StopRequest{OperationId: "Task-6"})
+	awaitOperation(t, server)
 
 	if len(machines.stopRequests) != 1 {
 		t.Fatalf("the verb ran %d times, want 1", len(machines.stopRequests))
@@ -204,7 +218,8 @@ func TestStopAppliesTheContractsDefaults(t *testing.T) {
 func TestStopCarriesGracefulAndTimeoutThrough(t *testing.T) {
 	operations := newFakeStore()
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 	graceful := false
 	timeout := 45
 
@@ -213,6 +228,7 @@ func TestStopCarriesGracefulAndTimeoutThrough(t *testing.T) {
 		Graceful:           &graceful,
 		StopTimeoutSeconds: &timeout,
 	})
+	awaitOperation(t, server)
 
 	if len(machines.stopRequests) != 1 {
 		t.Fatalf("the verb ran %d times, want 1", len(machines.stopRequests))
@@ -225,7 +241,8 @@ func TestStopCarriesGracefulAndTimeoutThrough(t *testing.T) {
 func TestStartWithoutAnOperationIdentifierIsRefused(t *testing.T) {
 	operations := newFakeStore()
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/start", wire.StartRequest{})
 
@@ -238,7 +255,8 @@ func TestStartWithoutAnOperationIdentifierIsRefused(t *testing.T) {
 }
 
 func TestMalformedBodyIsRefusedInTheContractsShape(t *testing.T) {
-	handler := newTestServer(newFakeStore(), &fakeVirtualMachines{}).SocketHandler()
+	server := newTestServer(newFakeStore(), &fakeVirtualMachines{})
+	handler := server.SocketHandler()
 
 	recorder := postBody(handler, "/vms/"+testUuid+"/start", "{not json")
 
@@ -256,14 +274,72 @@ func TestAnUnwritableJournalIsAnInternalFault(t *testing.T) {
 	operations := newFakeStore()
 	operations.fence(testUuid, 1)
 	operations.completeError = errors.New("/var/lib/boat/boat.db: no space left on device")
-	handler := newTestServer(operations, &fakeVirtualMachines{}).SocketHandler()
+	server := newTestServer(operations, &fakeVirtualMachines{})
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/start", wire.StartRequest{OperationId: "Task-8"})
+	awaitOperation(t, server)
 
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("got %d, want 500: %s", recorder.Code, recorder.Body)
 	}
 	if strings.Contains(decodeError(t, recorder).Error, "boat.db") {
 		t.Error("the boundary leaked a host path to the caller")
+	}
+}
+
+// TestAPollingCallerIsAnsweredWithTheClaimAndReadsTheOutcomeFromTheRecord is the
+// shape Atlas uses: a verb that takes half an hour must not hold a connection
+// for half an hour, and a connection dropped mid-verb must not lose the outcome.
+func TestAPollingCallerIsAnsweredWithTheClaimAndReadsTheOutcomeFromTheRecord(t *testing.T) {
+	operations := newFakeStore()
+	operations.fence(testUuid, 1)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	machines := &fakeVirtualMachines{traceText: "+ systemctl start\n", beforeStart: func() {
+		close(started)
+		<-release
+	}}
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
+
+	recorder := postAsync(t, handler, "/vms/"+testUuid+"/start", wire.StartRequest{OperationId: "Task-async"})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", recorder.Code, recorder.Body)
+	}
+	// Answered while the verb is still running — that is the whole point.
+	<-started
+	claimed := decodeOperation(t, recorder)
+	if claimed.Status != wire.OperationStatusRunning {
+		t.Errorf("the claim came back %q, want Running", claimed.Status)
+	}
+	if polled := decodeOperation(t, get(t, handler, "/ops/Task-async")); polled.Status != wire.OperationStatusRunning {
+		t.Errorf("a poll mid-verb reported %q, want Running", polled.Status)
+	}
+
+	close(release)
+	finished := recordOf(t, server, handler, "Task-async")
+
+	if finished.Status != wire.OperationStatusSuccess {
+		t.Errorf("the finished record says %q, want Success", finished.Status)
+	}
+	if finished.Output == nil || !strings.Contains(*finished.Output, "systemctl start") {
+		t.Errorf("the trace did not reach the record: %v", finished.Output)
+	}
+}
+
+// A waiting caller gets the outcome in the response, because the operator's
+// break-glass verb has nothing to poll with.
+func TestAWaitingCallerIsAnsweredWithTheOutcome(t *testing.T) {
+	operations := newFakeStore()
+	operations.fence(testUuid, 1)
+	server := newTestServer(operations, &fakeVirtualMachines{traceText: "+ systemctl start\n"})
+	handler := server.SocketHandler()
+
+	recorder := postJSON(t, handler, "/vms/"+testUuid+"/start", wire.StartRequest{OperationId: "Task-wait"})
+
+	if operation := decodeOperation(t, recorder); operation.Status != wire.OperationStatusSuccess {
+		t.Errorf("got %q, want Success in the response itself", operation.Status)
 	}
 }

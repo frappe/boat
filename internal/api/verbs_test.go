@@ -88,14 +88,17 @@ func TestEveryVerbRecordsItsOwnNameAndObservesTheHost(t *testing.T) {
 			traceText: "+ " + verb.verb + "\n",
 			observed:  model.VirtualMachine{ObservedStatus: model.StatusStopped, UnitActiveState: "inactive"},
 		}
-		handler := newTestServer(operations, machines).SocketHandler()
+		server := newTestServer(operations, machines)
+		handler := server.SocketHandler()
 
 		recorder := verb.post(t, handler, "Task-"+name)
 
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("%s: got %d, want 200: %s", name, recorder.Code, recorder.Body)
 		}
-		operation := decodeOperation(t, recorder)
+		// The POST carries the claim; the outcome is the record, read as the
+		// client reads it.
+		operation := recordOf(t, server, handler, "Task-"+name)
 		if operation.Status != wire.OperationStatusSuccess {
 			t.Errorf("%s: got status %q, want Success", name, operation.Status)
 		}
@@ -120,9 +123,11 @@ func TestEveryVerbReplaysInsteadOfRunningTwice(t *testing.T) {
 	for name, verb := range theVerbs {
 		operations := aFencedRunningVirtualMachine()
 		machines := &fakeVirtualMachines{traceText: "+ " + verb.verb + "\n"}
-		handler := newTestServer(operations, machines).SocketHandler()
+		server := newTestServer(operations, machines)
+		handler := server.SocketHandler()
 
-		first := decodeOperation(t, verb.post(t, handler, "Task-replay"))
+		verb.post(t, handler, "Task-replay")
+		first := recordOf(t, server, handler, "Task-replay")
 		second := verb.post(t, handler, "Task-replay")
 
 		if second.Code != http.StatusOK {
@@ -144,7 +149,8 @@ func TestEveryVerbRefusesAVirtualMachineThisHostDoesNotHave(t *testing.T) {
 	for name, verb := range theVerbs {
 		operations := aFencedRunningVirtualMachine()
 		machines := &fakeVirtualMachines{missing: true}
-		handler := newTestServer(operations, machines).SocketHandler()
+		server := newTestServer(operations, machines)
+		handler := server.SocketHandler()
 
 		recorder := verb.post(t, handler, "Task-absent")
 
@@ -164,7 +170,8 @@ func TestEveryVerbNeedsAnOperationIdentifier(t *testing.T) {
 	for name, verb := range theVerbs {
 		operations := aFencedRunningVirtualMachine()
 		machines := &fakeVirtualMachines{}
-		handler := newTestServer(operations, machines).SocketHandler()
+		server := newTestServer(operations, machines)
+		handler := server.SocketHandler()
 
 		recorder := verb.post(t, handler, "")
 
@@ -181,7 +188,8 @@ func TestEveryVerbRefusesAnIdentifierAlreadyUsedForOtherWork(t *testing.T) {
 	for name, verb := range theVerbs {
 		operations := aFencedRunningVirtualMachine()
 		machines := &fakeVirtualMachines{}
-		handler := newTestServer(operations, machines).SocketHandler()
+		server := newTestServer(operations, machines)
+		handler := server.SocketHandler()
 		postJSON(t, handler, "/vms/"+testUuid+"/stop", wire.StopRequest{OperationId: "Task-taken"})
 
 		recorder := verb.post(t, handler, "Task-taken")
@@ -205,7 +213,8 @@ func TestWakeAndResumeDoNotOutrankAStoppedDesire(t *testing.T) {
 			UUID: testUuid, BootEpoch: 1, DesiredPower: model.PowerStopped,
 		})
 		machines := &fakeVirtualMachines{}
-		handler := newTestServer(operations, machines).SocketHandler()
+		server := newTestServer(operations, machines)
+		handler := server.SocketHandler()
 
 		recorder := postJSON(t, handler, "/vms/"+testUuid+"/"+path, wire.OperationRequest{OperationId: "Task-9"})
 
@@ -227,7 +236,8 @@ func TestARefusedWakeLeavesItsIdentifierReusable(t *testing.T) {
 	operations := aFencedRunningVirtualMachine()
 	operations.desire(model.DesiredVirtualMachine{UUID: testUuid, BootEpoch: 1, DesiredPower: model.PowerStopped})
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 	postJSON(t, handler, "/vms/"+testUuid+"/wake", wire.OperationRequest{OperationId: "Task-10"})
 
 	operations.desire(model.DesiredVirtualMachine{UUID: testUuid, BootEpoch: 1, DesiredPower: model.PowerRunning})
@@ -247,7 +257,8 @@ func TestWakeIsFencedLikeAStart(t *testing.T) {
 	operations := newFakeStore()
 	operations.desire(model.DesiredVirtualMachine{UUID: testUuid, BootEpoch: 1, DesiredPower: model.PowerRunning})
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/wake", wire.OperationRequest{OperationId: "Task-11"})
 
@@ -276,7 +287,8 @@ func TestWakeIsRefusedWhenThisHostHoldsNoDesiredState(t *testing.T) {
 	operations := newFakeStore()
 	operations.fenceWithoutDesire(testUuid, 1)
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/wake", wire.OperationRequest{OperationId: "Task-12"})
 
@@ -293,7 +305,8 @@ func TestWakeIsRefusedWhenThisHostHoldsNoDesiredState(t *testing.T) {
 func TestSleepSourcesTheFirecrackerUIDFromTheHost(t *testing.T) {
 	operations := aFencedRunningVirtualMachine()
 	machines := &fakeVirtualMachines{firecrackerUID: 247312}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
 	postJSON(t, handler, "/vms/"+testUuid+"/sleep", wire.OperationRequest{OperationId: "Task-13"})
 
@@ -311,7 +324,8 @@ func TestSleepSourcesTheFirecrackerUIDFromTheHost(t *testing.T) {
 func TestSleepFailsWhenTheFirecrackerUIDCannotBeRead(t *testing.T) {
 	operations := aFencedRunningVirtualMachine()
 	machines := &fakeVirtualMachines{firecrackerUIDErr: errors.New("network.env names no ATLAS_FC_UID")}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/sleep", wire.OperationRequest{OperationId: "Task-14"})
 
@@ -333,7 +347,8 @@ func TestSleepFailsWhenTheFirecrackerUIDCannotBeRead(t *testing.T) {
 func TestResizeAppliesTheDesiredShapeAndItsCgroupCaps(t *testing.T) {
 	operations := aFencedRunningVirtualMachine()
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
 	postJSON(t, handler, "/vms/"+testUuid+"/resize", wire.OperationRequest{OperationId: "Task-15"})
 
@@ -371,7 +386,8 @@ func TestResizeRefusesWhenThereIsNothingAssertedToApply(t *testing.T) {
 			operations.desire(*desired)
 		}
 		machines := &fakeVirtualMachines{}
-		handler := newTestServer(operations, machines).SocketHandler()
+		server := newTestServer(operations, machines)
+		handler := server.SocketHandler()
 
 		recorder := postJSON(t, handler, "/vms/"+testUuid+"/resize", wire.OperationRequest{OperationId: "Task-16"})
 
@@ -389,7 +405,8 @@ func TestResizeRefusesWhenThereIsNothingAssertedToApply(t *testing.T) {
 func TestRebuildJoinsItsRequestToDesiredStateAndTheHost(t *testing.T) {
 	operations := aFencedRunningVirtualMachine()
 	machines := &fakeVirtualMachines{firecrackerUID: 247312}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 	snapshot, dataSnapshot := "/dev/atlas/atlas-snap-77777777", "/dev/atlas/atlas-datasnap-99999999"
 
 	postJSON(t, handler, "/vms/"+testUuid+"/rebuild", wire.RebuildRequest{
@@ -430,7 +447,8 @@ func TestRebuildRecordsItsSourceBeforeItLaysAnythingDown(t *testing.T) {
 				len(operations.decided()))
 		}
 	}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
 	postJSON(t, handler, "/vms/"+testUuid+"/rebuild",
 		wire.RebuildRequest{OperationId: "Task-21", SnapshotDevice: &snapshot})
@@ -488,7 +506,8 @@ func TestRebuildDoesNotRunWhenItsSourceCannotBeRecorded(t *testing.T) {
 func TestRebuildCarriesGuestIdentityAcrossAsOpaqueBytes(t *testing.T) {
 	operations := aFencedRunningVirtualMachine()
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 	image, keys, address := "ubuntu-24.04", "ssh-ed25519 AAAAC3Nz owner\nssh-ed25519 AAAAC3Nz satellite", "2604:a880::1"
 	mountAt := "/data"
 
@@ -529,7 +548,8 @@ func TestRebuildCarriesGuestIdentityAcrossAsOpaqueBytes(t *testing.T) {
 func TestRebuildWithoutAnIdentityIsAnEmptyIdentity(t *testing.T) {
 	operations := aFencedRunningVirtualMachine()
 	machines := &fakeVirtualMachines{}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 	image := "ubuntu-24.04"
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/rebuild",

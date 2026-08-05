@@ -34,14 +34,15 @@ func TestSleepReportsWhetherTheGuestsMemoryWasCaptured(t *testing.T) {
 	machines := &fakeVirtualMachines{
 		sleepResult: vm.SleepResult{MemorySnapshot: true, MemorySnapshotBytes: 536870912},
 	}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/sleep", wire.OperationRequest{OperationId: "Task-sleep-1"})
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200: %s", recorder.Code, recorder.Body)
 	}
-	result := resultOf(t, decodeOperation(t, recorder))
+	result := resultOf(t, recordOf(t, server, handler, "Task-sleep-1"))
 	if result["memory_snapshot"] != true {
 		t.Errorf("memory_snapshot = %v, want true", result["memory_snapshot"])
 	}
@@ -66,11 +67,12 @@ func TestSleepReportsWhyTheNextWakeWillBeAColdBoot(t *testing.T) {
 	machines := &fakeVirtualMachines{
 		sleepResult: vm.SleepResult{Reason: "not enough free space for a 1024 MiB memory file"},
 	}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
-	recorder := postJSON(t, handler, "/vms/"+testUuid+"/sleep", wire.OperationRequest{OperationId: "Task-sleep-2"})
+	postJSON(t, handler, "/vms/"+testUuid+"/sleep", wire.OperationRequest{OperationId: "Task-sleep-2"})
 
-	result := resultOf(t, decodeOperation(t, recorder))
+	result := resultOf(t, recordOf(t, server, handler, "Task-sleep-2"))
 	if result["memory_snapshot"] != false {
 		t.Errorf("memory_snapshot = %v, want false", result["memory_snapshot"])
 	}
@@ -87,7 +89,8 @@ func TestSleepReportsWhyTheNextWakeWillBeAColdBoot(t *testing.T) {
 // and a caller that finds no result must not read it as a result saying no.
 func TestAVerbWithNothingToReportCarriesNoResult(t *testing.T) {
 	operations := aFencedRunningVirtualMachine()
-	handler := newTestServer(operations, &fakeVirtualMachines{}).SocketHandler()
+	server := newTestServer(operations, &fakeVirtualMachines{})
+	handler := server.SocketHandler()
 
 	recorder := postJSON(t, handler, "/vms/"+testUuid+"/start", wire.StartRequest{OperationId: "Task-start-1"})
 
@@ -104,11 +107,12 @@ func TestAFailedVerbCarriesNoResult(t *testing.T) {
 		sleepResult: vm.SleepResult{MemorySnapshot: true},
 		verbError:   errors.New("the virtual machine is stopped but could not be parked for wake"),
 	}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 
-	recorder := postJSON(t, handler, "/vms/"+testUuid+"/sleep", wire.OperationRequest{OperationId: "Task-sleep-3"})
+	postJSON(t, handler, "/vms/"+testUuid+"/sleep", wire.OperationRequest{OperationId: "Task-sleep-3"})
 
-	operation := decodeOperation(t, recorder)
+	operation := recordOf(t, server, handler, "Task-sleep-3")
 	if operation.Status != wire.OperationStatusFailure {
 		t.Fatalf("got status %q, want Failure", operation.Status)
 	}
@@ -126,10 +130,12 @@ func TestAReplayedOperationReturnsTheResultTheFirstAttemptRecorded(t *testing.T)
 	machines := &fakeVirtualMachines{
 		sleepResult: vm.SleepResult{MemorySnapshot: true, MemorySnapshotBytes: 4096},
 	}
-	handler := newTestServer(operations, machines).SocketHandler()
+	server := newTestServer(operations, machines)
+	handler := server.SocketHandler()
 	body := wire.OperationRequest{OperationId: "Task-sleep-4"}
 
 	postJSON(t, handler, "/vms/"+testUuid+"/sleep", body)
+	awaitOperation(t, server)
 	replay := postJSON(t, handler, "/vms/"+testUuid+"/sleep", body)
 
 	if len(machines.sleepRequests) != 1 {

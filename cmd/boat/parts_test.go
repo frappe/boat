@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/frappe/boat/internal/adopt"
+	"github.com/frappe/boat/internal/api"
 	"github.com/frappe/boat/internal/journal"
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/reconcile"
@@ -123,6 +124,10 @@ func newTestParts(t *testing.T, machines reconcile.VirtualMachines) *daemonParts
 	decisions := journal.New(database)
 	parts := &daemonParts{store: database, journal: decisions, runner: run.NewRunner(nil), scanner: &fakeScanner{}}
 	parts.reconciler = reconcile.New(database, machines, decisions)
+	// The API server, because a real daemonParts always has one and shutdown
+	// drains the verbs it is still running. A nil here would only mean the test
+	// shuts down something the daemon never is.
+	parts.api = api.NewServer(parts.dependencies())
 	t.Cleanup(func() { parts.close() })
 	return parts
 }

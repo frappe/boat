@@ -27,7 +27,7 @@ func (server *Server) StartVirtualMachine(ctx context.Context, request wire.Star
 	if failure := server.refuseUnfenced(request.Uuid); failure != nil {
 		return failure, nil
 	}
-	start := func(runner *run.Runner) (model.OperationResult, error) {
+	start := func(ctx context.Context, runner *run.Runner) (model.OperationResult, error) {
 		_, err := server.virtualMachines.Start(ctx, runner, request.Uuid)
 		return nil, err
 	}
@@ -45,7 +45,7 @@ func (server *Server) StopVirtualMachine(ctx context.Context, request wire.StopV
 		return missingOperationIdentifier(), nil
 	}
 	stopRequest := stopRequestFrom(request.Body)
-	stop := func(runner *run.Runner) (model.OperationResult, error) {
+	stop := func(ctx context.Context, runner *run.Runner) (model.OperationResult, error) {
 		return nil, server.virtualMachines.Stop(ctx, runner, request.Uuid, stopRequest)
 	}
 	operation, failure := server.perform(ctx, request.Body.OperationId, verbStopVirtualMachine, request.Uuid, stop)
@@ -85,7 +85,7 @@ func stopRequestFrom(body *wire.StopRequest) vm.StopRequest {
 // package keeps closing. Eight of the nine verbs return nil: they report their
 // trace and nothing else, and nil is how "nothing to report" stays
 // distinguishable from "reported false".
-type hostWork func(runner *run.Runner) (model.OperationResult, error)
+type hostWork func(ctx context.Context, runner *run.Runner) (model.OperationResult, error)
 
 // perform is the shared body of every verb: claim, take the VM's turn, run,
 // record — in that order, and never any other.
@@ -99,6 +99,9 @@ type hostWork func(runner *run.Runner) (model.OperationResult, error)
 // Every verb in this package goes through here, which is what makes "a verb
 // never touches the host directly" structural rather than a rule each new
 // handler has to remember.
+// The response is the CLAIM, not the outcome. A verb runs on after its request
+// is answered and the caller reads the result from `GET /ops/{operation_id}`;
+// see runInBackground for why that is the shape.
 func (server *Server) perform(ctx context.Context, identifier, verb, uuid string, execute hostWork) (model.Operation, *errorResponse) {
 	// Before the claim and before any host command: a malformed uuid must not
 	// even reserve an operation identifier, let alone reach the runner. Every one
@@ -107,6 +110,23 @@ func (server *Server) perform(ctx context.Context, identifier, verb, uuid string
 	if failure := server.refuseMalformedUUID(uuid); failure != nil {
 		return model.Operation{}, failure
 	}
+	// The quiesce gate, consulted before the claim so a raised gate leaves no
+	// journal entry to answer for.
+	//
+	// The gate, its drain and the refusal below were all written for this call
+	// site and none of them was called from it: server.go said "every mutating
+	// verb consults it", POST /v1/quiesce drained a count that never counted, and
+	// unavailableWhileQuiescing's own comment describes the answer perform hands
+	// back. A self-update could therefore swap the binary under a running verb.
+	if !server.admission.enter() {
+		return model.Operation{}, unavailableWhileQuiescing()
+	}
+	admitted := true
+	defer func() {
+		if admitted {
+			server.admission.leave()
+		}
+	}()
 	operation, claimed, err := server.operations.ClaimOperation(identifier, verb, uuid)
 	switch {
 	case errors.Is(err, store.ErrOperationConflict):
@@ -116,7 +136,62 @@ func (server *Server) perform(ctx context.Context, identifier, verb, uuid string
 	case !claimed:
 		return operation, nil
 	}
-	return server.asActor(ctx, operation, uuid, execute)
+	// From here the work is the background's, and so is the gate's release.
+	admitted = false
+	finished := server.runInBackground(operation, uuid, execute)
+	if respondAsync(ctx) {
+		// The caller polls. The claim is the whole answer, and the operation it
+		// names is the one `GET /ops/{operation_id}` will report on.
+		return operation, nil
+	}
+	// The caller waits, so this waits for the same work rather than doing it a
+	// second way: the operator's `boat vm start` blocks and is answered exactly
+	// as it always was, including the 404 for a VM this host does not hold and
+	// the 500 for a journal it could not write. One execution path, two answers.
+	concluded := <-finished
+	return concluded.operation, concluded.failure
+}
+
+// outcome is what a finished verb has to say: the record, and the answer a
+// waiting caller gets.
+type outcome struct {
+	operation model.Operation
+	failure   *errorResponse
+}
+
+// runInBackground runs a claimed verb and hands back a channel that closes when
+// it is done. Every verb goes through here whether or not its caller waits, so
+// the two answers differ in what they wait for and never in what they do.
+//
+// The work runs under the DAEMON's context, never the request's, and that is the
+// whole reason hostWork takes a context instead of closing over the handler's: a
+// request context is cancelled the moment its response is written, so work that
+// outlives the response would be cancelled at birth.
+//
+// It is also why a client hanging up no longer abandons a verb. The operation
+// belongs to the daemon from the claim onwards and the journal answers for it,
+// which is what makes a lost connection survivable: Atlas re-reads
+// `GET /ops/{operation_id}` and finds the record either in flight or finished,
+// where before it had a Task it could never answer.
+//
+// The wait group is what shutdown drains, so a verb in flight still reaches a
+// terminal record before the store closes.
+func (server *Server) runInBackground(operation model.Operation, uuid string, execute hostWork) <-chan outcome {
+	finished := make(chan outcome, 1)
+	server.background.Add(1)
+	go func() {
+		defer server.background.Done()
+		defer server.admission.leave()
+		recorded, failure := server.asActor(server.backgroundContext, operation, uuid, execute)
+		if failure != nil {
+			slog.Error(
+				"operation failed", "operation", operation.Identifier,
+				"verb", operation.Verb, "uuid", uuid,
+			)
+		}
+		finished <- outcome{operation: recorded, failure: failure}
+	}()
+	return finished
 }
 
 // asActor runs the claimed verb inside the reconciler, so that this verb, any
@@ -160,12 +235,17 @@ func (server *Server) abandoned(operation model.Operation, uuid string, cause er
 	return recorded, failure
 }
 
-// runClaimed runs the verb behind a claim and journals the outcome before the
-// response is written: nothing may outlive the request without a record behind
-// it, or a crash would leave Atlas holding an answer the host never kept.
+// runClaimed runs the verb behind a claim and journals the outcome. For a
+// polling caller the record IS the answer, so nothing may return from here
+// without one, or Atlas would poll an operation that never reaches a terminal
+// state.
 func (server *Server) runClaimed(ctx context.Context, operation model.Operation, uuid string, execute hostWork) (model.Operation, *errorResponse) {
 	var trace bytes.Buffer
 	runner := server.newRunner(&trace)
+	// A VM this host does not hold is a failure like any other to the journal:
+	// the operation was claimed, so it owes a terminal record even though the
+	// answer to a waiting caller is 404. A polling caller reads that record and
+	// sees the same refusal a moment later.
 	if !server.virtualMachines.Exists(ctx, runner, uuid) {
 		recorded, failure := server.record(operation, &trace, nil, errUnknownVirtualMachine)
 		if failure == nil {
@@ -173,7 +253,7 @@ func (server *Server) runClaimed(ctx context.Context, operation model.Operation,
 		}
 		return recorded, failure
 	}
-	result, verbError := execute(runner)
+	result, verbError := execute(ctx, runner)
 	if verbError == nil {
 		server.observe(ctx, runner, uuid, &trace)
 	}

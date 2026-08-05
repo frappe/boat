@@ -20,8 +20,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/frappe/boat/internal/hostfacts"
@@ -226,7 +228,40 @@ type Server struct {
 	// defaults dispatch to internal/migration; see migration.go.
 	runMigrationPhase func(ctx context.Context, runner *run.Runner, uuid, phase string, body wire.MigrateRequest) (model.OperationResult, error)
 	pollHydration     func(ctx context.Context, runner *run.Runner, uuid, cloneDevice string) (migration.PollHydrationResult, error)
+	// backgroundContext is the daemon's own lifetime, which every claimed verb
+	// runs under: a verb outlives the request that asked for it, and a request
+	// context is cancelled the moment its response is written. stopBackground
+	// ends it, and background is what DrainOperations waits on.
+	backgroundContext context.Context
+	stopBackground    context.CancelFunc
+	background        sync.WaitGroup
 }
+
+// DrainOperations waits for the verbs still running to reach a terminal record,
+// then gives up when ctx does.
+//
+// Gives up rather than kills: an operation that outlasts the grace keeps its
+// claim in the journal, and the restarted daemon's resume is what closes it
+// (internal/reconcile). Waiting forever would be worse than either — systemd's
+// TimeoutStopSec would SIGKILL the daemon mid-write instead.
+func (server *Server) DrainOperations(ctx context.Context) error {
+	finished := make(chan struct{})
+	go func() {
+		server.background.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("operations still in flight at shutdown: %w", ctx.Err())
+	}
+}
+
+// StopBackground ends the daemon-lifetime context every claimed verb runs under.
+// Called after DrainOperations, so a verb that finished in time is never
+// cancelled and one that did not is not left running against a closing store.
+func (server *Server) StopBackground() { server.stopBackground() }
 
 // The generated contract is the compile-time check that nothing here drifts
 // from api/openapi.yaml.
@@ -263,22 +298,25 @@ func NewServer(dependencies Dependencies) *Server {
 	if stateDirectory == "" {
 		stateDirectory = defaultStateDirectory
 	}
+	backgroundContext, stopBackground := context.WithCancel(context.Background())
 	server := &Server{
-		operations:      dependencies.Operations,
-		state:           dependencies.State,
-		virtualMachines: dependencies.VirtualMachines,
-		decisions:       decisions,
-		reconciler:      serializer,
-		watch:           hub,
-		units:           dependencies.Units,
-		startedAt:       dependencies.StartedAt,
-		admission:       gate,
-		updateKey:       dependencies.UpdateKey,
-		stateDirectory:  stateDirectory,
-		serverName:      dependencies.ServerName,
-		launchUpdater:   spawnDetachedUpdater,
-		newRunner:       run.NewRunner,
-		hostFacts:       hostfacts.Read,
+		backgroundContext: backgroundContext,
+		stopBackground:    stopBackground,
+		operations:        dependencies.Operations,
+		state:             dependencies.State,
+		virtualMachines:   dependencies.VirtualMachines,
+		decisions:         decisions,
+		reconciler:        serializer,
+		watch:             hub,
+		units:             dependencies.Units,
+		startedAt:         dependencies.StartedAt,
+		admission:         gate,
+		updateKey:         dependencies.UpdateKey,
+		stateDirectory:    stateDirectory,
+		serverName:        dependencies.ServerName,
+		launchUpdater:     spawnDetachedUpdater,
+		newRunner:         run.NewRunner,
+		hostFacts:         hostfacts.Read,
 	}
 	// The quiescer shares the gate and records its checkpoint through the operation
 	// store, stamped with this build's version so the journal says which binary was

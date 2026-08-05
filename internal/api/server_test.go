@@ -11,7 +11,8 @@ import (
 )
 
 func TestHealthSaysOnlyThatBoatIsUp(t *testing.T) {
-	handler := newTestServer(newFakeStore(), &fakeVirtualMachines{}).SocketHandler()
+	server := newTestServer(newFakeStore(), &fakeVirtualMachines{})
+	handler := server.SocketHandler()
 
 	recorder := get(t, handler, "/health")
 
@@ -58,7 +59,8 @@ func TestVirtualMachineListAndDocumentComeFromTheStore(t *testing.T) {
 		UnitActiveState: "inactive",
 		Sleeping:        true,
 	}
-	handler := newTestServer(operations, &fakeVirtualMachines{}).SocketHandler()
+	server := newTestServer(operations, &fakeVirtualMachines{})
+	handler := server.SocketHandler()
 
 	var listed []wire.VirtualMachine
 	decode(t, get(t, handler, "/vms"), &listed)
@@ -77,7 +79,8 @@ func TestVirtualMachineListAndDocumentComeFromTheStore(t *testing.T) {
 }
 
 func TestUnknownVirtualMachineAndOperationAreNotFound(t *testing.T) {
-	handler := newTestServer(newFakeStore(), &fakeVirtualMachines{}).SocketHandler()
+	server := newTestServer(newFakeStore(), &fakeVirtualMachines{})
+	handler := server.SocketHandler()
 
 	for _, path := range []string{"/vms/" + testUuid, "/ops/Task-404"} {
 		recorder := get(t, handler, path)
@@ -94,7 +97,8 @@ func TestUnknownVirtualMachineAndOperationAreNotFound(t *testing.T) {
 // crash-recovery truth rather than a response cache.
 func TestOperationRecordIsReadableAfterTheRun(t *testing.T) {
 	operations := newFakeStore()
-	handler := newTestServer(operations, &fakeVirtualMachines{traceText: "+ systemctl stop\n"}).SocketHandler()
+	server := newTestServer(operations, &fakeVirtualMachines{traceText: "+ systemctl stop\n"})
+	handler := server.SocketHandler()
 	postJSON(t, handler, "/vms/"+testUuid+"/stop", wire.StopRequest{OperationId: "Task-9"})
 
 	recorder := get(t, handler, "/ops/Task-9")
@@ -102,7 +106,7 @@ func TestOperationRecordIsReadableAfterTheRun(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("got %d, want 200: %s", recorder.Code, recorder.Body)
 	}
-	operation := decodeOperation(t, recorder)
+	operation := recordOf(t, server, handler, "Task-9")
 	if operation.Verb != verbStopVirtualMachine || operation.Status != wire.OperationStatusSuccess {
 		t.Errorf("got %+v, want a successful stop-vm", operation)
 	}
