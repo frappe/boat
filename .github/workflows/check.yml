@@ -1,0 +1,95 @@
+# Boat's CI. One job, because the steps are cheap and they share a checkout:
+#
+#   1. `make check` — the gate a human already runs locally (gofmt, go vet,
+#      go test -race).
+#   2. `systemd-analyze verify` over systemd/*.service.
+#   3. `visudo -cf` over sudoers.d/boat.
+#
+# 2 and 3 are here because the units and the sudoers allow-list are shipped to
+# every host and are the only files in this repo no compiler reads. Both fail in
+# ways that are invisible until a VM misbehaves in production; the comments on
+# those steps name the two failures that already happened.
+
+name: check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # go.mod is where the toolchain version is declared (`go 1.26.2` today).
+      # Read it rather than copy the number here: a second copy is a drift
+      # waiting to happen, and drift means CI is green on a toolchain nobody
+      # builds with.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: make check (gofmt, go vet, go test -race)
+        run: make check
+
+      # `systemd-analyze verify` resolves ExecStart= against the real filesystem,
+      # and an absent binary is the one thing it does exit non-zero for:
+      #   boat.service: Command /usr/local/bin/boat is not executable: No such file or directory
+      # Rather than filter that line back out, put the binary where the units say
+      # it lives. This is verbatim the install recipe in the header of both unit
+      # files, so the step also checks something true — that ExecStart= points at
+      # where `make build`'s artifact is actually installed — and it leaves the
+      # verify step below with nothing to filter and nothing to swallow.
+      #
+      # If a future unit references some other host path that a runner does not
+      # have, the fix is the same shape: make the path exist for the check. Never
+      # `|| true` — a step that cannot fail is not a check.
+      - name: Install boat where the units say it lives
+        run: |
+          make build
+          sudo install -m 0755 bin/boat /usr/local/bin/boat
+
+      # WHY this step exists: systemd SILENTLY IGNORES a directive it does not
+      # recognise. `ConditionPathNotExists=` is not a systemd directive — the real
+      # negation is `ConditionPathExists=!<path>` — and it sat in a shipped unit
+      # for the entire life of Atlas's sleepy-VM feature doing nothing at all, so
+      # every sleeping VM cold-booted on host reboot instead of resuming from its
+      # memory snapshot. The unit parsed, loaded, started and ran green the whole
+      # time. `systemd-analyze verify` is the only thing that names that class:
+      # a unit that works fine and quietly does not do what it says.
+      #
+      # WHY any output fails the step, and not just a non-zero exit: verify exits
+      # 0 for exactly the faults that matter. Measured against copies of these two
+      # units (systemd 260):
+      #   ConditionPathNotExists=/x -> "Unknown key 'ConditionPathNotExists' in section [Unit], ignoring."  exit 0
+      #   Type=bogus                -> "Failed to parse Type=bogus, ignoring: Invalid argument"             exit 0
+      #   TimeoutStopSec=fifteen    -> "Failed to parse TimeoutStopSec=fifteen, ignoring: Invalid argument"  exit 0
+      # A step that trusted the exit code would pass all three — the same silent
+      # ignore, one layer up. So: any diagnostic on stdout or stderr fails, and
+      # nothing is filtered. A clean run prints nothing.
+      - name: systemd-analyze verify systemd/*.service
+        run: |
+          if ! diagnostics=$(systemd-analyze verify systemd/*.service 2>&1) || [ -n "$diagnostics" ]; then
+            echo "$diagnostics"
+            exit 1
+          fi
+          echo "systemd/*.service: verified clean"
+
+      # WHY: a comment written INSIDE a `Cmnd_Alias` breaks the backslash
+      # continuation, and visudo then rejects the WHOLE file rather than the one
+      # alias. On a host that means /etc/sudoers.d/boat grants nothing at all, and
+      # since boat runs unprivileged and reaches root only through this file,
+      # every verb fails at once. The install recipe is always
+      # `visudo -cf && install`, never `install` alone; this is that first half,
+      # run on every push instead of only in an operator's shell.
+      #
+      # Unlike systemd-analyze, visudo's exit code is trustworthy: a comment
+      # spliced into a Cmnd_Alias prints "syntax error" with the offending line
+      # and exits 1; a good file prints "sudoers.d/boat: parsed OK" and exits 0.
+      - name: visudo -cf sudoers.d/boat
+        run: visudo -cf sudoers.d/boat

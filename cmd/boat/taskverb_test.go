@@ -69,6 +69,19 @@ func TestEveryTaskVerbTakesThePythonsFlags(t *testing.T) {
 	}
 }
 
+// TestHelpExitsZero. Atlas proves a verb is dispatchable on a host by running
+// `boat <verb> --help` and reading the exit code (atlas/atlas/reset.py), so a
+// help that exited non-zero would report every correctly installed host as
+// broken — and the check exists precisely to be believed before a wipe.
+func TestHelpExitsZero(t *testing.T) {
+	for _, verb := range []string{"reset-server", "snapshot-vm", "mgmt-firewall-revert"} {
+		var output, errorOutput bytes.Buffer
+		if code := dispatch([]string{verb, "--help"}, &output, &errorOutput); code != exitSuccess {
+			t.Errorf("`boat %s --help` exited %d, want 0", verb, code)
+		}
+	}
+}
+
 // TestATaskVerbNamesTheFlagItWasNotGiven. argparse exits 2 naming the missing
 // flag; a verb that instead ran with an empty value would do half its work on a
 // host before anyone learned which flag was forgotten.

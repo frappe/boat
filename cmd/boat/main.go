@@ -9,6 +9,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -184,7 +186,15 @@ func usage(errorOutput io.Writer) int {
 
 // reportError states a failure on stderr in the daemon's own words, so the
 // operator reads the sentence the API produced rather than a paraphrase.
+//
+// `--help` is a request rather than a failure, and it exits 0. argparse does,
+// and Atlas leans on it: reset.py proves a verb is dispatchable on a host by
+// running `boat reset-server --help` and reading the exit code, so a help that
+// exited non-zero would report every correctly installed host as broken.
 func reportError(errorOutput io.Writer, err error) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return exitSuccess
+	}
 	fmt.Fprintln(errorOutput, err)
 	return exitFailure
 }

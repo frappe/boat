@@ -201,7 +201,7 @@ func (host *DaemonHost) Resume(ctx context.Context) error {
 //
 // # Why sleeping VMs stay asleep across the restart
 //
-// A sleeping VM parks its firecracker-vm@ unit behind a ConditionPathNotExists on
+// A sleeping VM parks its firecracker-vm@ unit behind a ConditionPathExists=! on
 // its sleep marker, so systemd never (re)starts it, and adopt "never mutates" —
 // it reads the marker and reports the VM asleep, it does not wake it (mirrored by
 // reconcile, whose sweep "converges power and leaves a sleeping VM asleep"). A

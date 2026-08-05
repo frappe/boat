@@ -28,7 +28,7 @@ Wants=network-online.target
 # Deliberately NOT ordered Before=firecracker-vm@.service. Boat adopts what it
 # finds on the host instead of owning its boot order: a VM's unit rebuilds its
 # own netns, routes and disk from network.env, and a sleeping VM suppresses
-# itself with ConditionPathNotExists. Ordering Boat first would assert a
+# itself with `ConditionPathExists=!<marker>`. Ordering Boat first would assert a
 # dependency that does not exist and would hold every VM behind the daemon.
 #
 # Bound the restart rate so a genuinely fatal fault — an unreadable token file, a

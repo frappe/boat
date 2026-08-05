@@ -39,7 +39,7 @@ type VirtualMachines interface {
 - **`stepWake`** — a `StatusSleeping` VM whose desired power is Running and which
   was requested. Today `plan` returns `stepStart` for this, and `vm.Start` cannot
   wake anything: the unit carries
-  `ConditionPathNotExists=…/sleeping`, so `systemctl start` skips it, exit 0,
+  `ConditionPathExists=!…/sleeping`, so `systemctl start` skips it, exit 0,
   and the trailing `is-active` then fails the pass. The marker has to come off
   first, which is `vm.Wake`. **A test currently asserts the wake works because
   the fake's `Start` sets Running unconditionally — fix that fake.**
