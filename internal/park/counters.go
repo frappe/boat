@@ -25,11 +25,23 @@ func Counters(ctx context.Context, runner *run.Runner) (map[string]int64, error)
 }
 
 func (parker *parker) counters(ctx context.Context) (map[string]int64, error) {
-	// Unchecked: a host that has never run a VM has no `inet atlas` table, and
-	// nft exits non-zero saying so. That is a host with no wake counters — a
-	// fact, not a failure — and the daemon must keep polling through it, because
-	// the first VM to sleep creates the table.
-	output, err := parker.commands.RunUnchecked(ctx, "sudo nft -j list counters table inet atlas")
+	// CHECKED, unlike the read this replaced.
+	//
+	// `nft … table inet atlas` exits non-zero both for a host that has no such
+	// table and for a read this daemon was not allowed to make, and it complains on
+	// stderr either way — so there is no rule that tells the two apart, which is
+	// why run.Probe names this exact command as one that must not be asked as a
+	// probe. RunUnchecked answered both with ("", nil), and a caller that dutifully
+	// checked the error then read an empty counter listing off a host full of
+	// sleeping VMs: no wake, ever, and not one line in the journal to say why.
+	//
+	// The table is host floor rather than something that comes and goes —
+	// bootstrap creates it, the boot sweep re-creates it before the first tick, and
+	// every park asserts it — so a non-zero exit here is a fault, and a fault worth
+	// a line per tick until somebody fixes it. tick logs it and polls again a
+	// second later, which is the same tolerance parseCounters already has for
+	// output it cannot read.
+	output, err := parker.commands.Run(ctx, "sudo nft -j list counters table inet atlas")
 	if err != nil {
 		return nil, err
 	}

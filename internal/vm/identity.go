@@ -203,7 +203,17 @@ func (manager *Manager) writeHostname(
 func (manager *Manager) ensureHostKeys(
 	ctx context.Context, commands commands, mountPoint string, hostname string,
 ) error {
-	if commands.OK(ctx, "sudo test -f {}", mountPoint+hostKeyPath) {
+	// Probed, and of every gate in this package this is the one the collapse costs
+	// the most. The negative branch DELETES the disk's host keys and generates a
+	// new pair, so "I could not look" read as "there are none" rotates an SSH
+	// identity nobody asked to rotate — which breaks every client's known_hosts and
+	// looks exactly like an attack, on a mounted rootfs, with no way back. Only a
+	// proven absence is a keyless disk.
+	present, err := hostHas(ctx, commands, "sudo test -f {}", mountPoint+hostKeyPath)
+	if err != nil {
+		return err
+	}
+	if present {
 		return nil
 	}
 	if err := commands.InstallDirectory(ctx, mountPoint+"/etc/ssh", "0755"); err != nil {
@@ -224,7 +234,7 @@ func (manager *Manager) ensureHostKeys(
 	}
 	// ed25519 only: ~0.03s to generate against ~0.9s for RSA, and every modern
 	// client negotiates it first.
-	_, err := commands.Run(
+	_, err = commands.Run(
 		ctx, "sudo ssh-keygen -q -t ed25519 -f {} -N {} -C {}", key, "", "root@"+hostname,
 	)
 	return err
@@ -253,7 +263,15 @@ func (manager *Manager) writeDataDiskMount(
 		)
 	}
 	fstab := mountPoint + "/etc/fstab"
-	if commands.OK(ctx, "sudo grep -q {} {}", dataDiskLabelLine, fstab) {
+	// Probed, because the negative branch APPENDS to the guest's fstab and the
+	// comment above says why a duplicate line there is its own failure. `grep -q`
+	// prints nothing when it does not match, so anything on stderr came from
+	// something other than the answer and is a read that did not happen.
+	mounted, err := hostHas(ctx, commands, "sudo grep -q {} {}", dataDiskLabelLine, fstab)
+	if err != nil {
+		return err
+	}
+	if mounted {
 		return nil
 	}
 	if _, err := commands.Run(ctx, "sudo mkdir -p {}", mountPoint+mountAt); err != nil {

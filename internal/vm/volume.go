@@ -57,6 +57,16 @@ func (disk volume) protected() bool {
 	return disk.name == thinPoolName || strings.HasPrefix(disk.name, baseImagePrefix)
 }
 
+// exists asks LVM whether the volume is there.
+//
+// Left as OK, and not because the collapse is free — three of its callers report
+// the answer in a sentence. It is because lvs cannot be probed: it EXPLAINS its
+// negative, `Failed to find logical volume "atlas/…"` on stderr with exit 5,
+// which is the same shape as a denial and is the case run.Probe names as
+// unaskable. The honest form is a LISTING — one `lvs` over the volume group that
+// exits zero and answers with its output, the way internal/adopt reads the
+// volume group itself — and that is a new command line, so it is a new sudoers
+// grant and belongs with one.
 func (disk volume) exists(ctx context.Context, commands commands) bool {
 	return commands.OK(ctx, "sudo lvs --noheadings {}", disk.reference())
 }
@@ -101,8 +111,9 @@ func (disk volume) activate(ctx context.Context, commands commands) error {
 	if _, err := commands.Run(ctx, "sudo udevadm settle"); err != nil {
 		return err
 	}
-	if disk.nodeIsBlockDevice(ctx, commands) {
-		return nil
+	node, err := disk.nodeIsBlockDevice(ctx, commands)
+	if err != nil || node {
+		return err
 	}
 	if _, err := commands.Run(ctx, "sudo vgmknodes {}", volumeGroup); err != nil {
 		return err
@@ -110,7 +121,11 @@ func (disk volume) activate(ctx context.Context, commands commands) error {
 	if _, err := commands.Run(ctx, "sudo udevadm settle"); err != nil {
 		return err
 	}
-	if !disk.nodeIsBlockDevice(ctx, commands) {
+	node, err = disk.nodeIsBlockDevice(ctx, commands)
+	if err != nil {
+		return err
+	}
+	if !node {
 		return fmt.Errorf("%s activated but %s is not a block device", disk.name, disk.devicePath())
 	}
 	return nil
@@ -119,8 +134,14 @@ func (disk volume) activate(ctx context.Context, commands commands) error {
 // nodeIsBlockDevice asks the host rather than stat-ing in process, which is the
 // one difference from the Python: this daemon does not touch the filesystem
 // itself, so that a test of a verb needs no host at all.
-func (disk volume) nodeIsBlockDevice(ctx context.Context, commands commands) bool {
-	return commands.OK(ctx, "test -b {}", disk.devicePath())
+//
+// Probed rather than OK'd because both callers act on it: the first skips the
+// vgmknodes dance, the second REPORTS "activated but … is not a block device",
+// which is a claim about udev. test(1) has a silent negative, so the third
+// answer here is a `test` that could not be run at all, and saying so beats
+// blaming the device node.
+func (disk volume) nodeIsBlockDevice(ctx context.Context, commands commands) (bool, error) {
+	return hostHas(ctx, commands, "test -b {}", disk.devicePath())
 }
 
 // snapshotInto creates target as a copy-on-write thin snapshot of this volume

@@ -72,7 +72,17 @@ func (manager *Manager) Sleep(
 	if err := manager.requireWakeTrap(); err != nil {
 		return SleepResult{}, err
 	}
-	if commands.OK(ctx, "sudo test -f {}", files.sleepingMarker) {
+	// Probed, and this is the gate reassertSleep's third paragraph is about. A
+	// marker this daemon could not READ collapsed to "not asleep" walks the fresh
+	// path, whose first act is `rm -rf` over a perfectly good memory snapshot; the
+	// PATCH to the dead socket then fails, the fallback removes the READY marker
+	// for good measure and reports Success. That is a snapshot destroyed by a
+	// denied sudo, with a green Task beside it.
+	sleeping, err := hostHas(ctx, commands, "sudo test -f {}", files.sleepingMarker)
+	if err != nil {
+		return SleepResult{}, fmt.Errorf("looking for the sleeping marker of %s: %w", uuid, err)
+	}
+	if sleeping {
 		return manager.reassertSleep(ctx, runner, uuid)
 	}
 	reason, err := manager.memorySnapshotPreflight(ctx, commands, files)
@@ -125,7 +135,11 @@ func (manager *Manager) reassertSleep(
 	if err := manager.stopMarkAndPark(ctx, runner, uuid); err != nil {
 		return SleepResult{}, err
 	}
-	if !manager.memorySnapshotMarkerPresent(ctx, commands, files) {
+	present, err := manager.memorySnapshotMarkerPresent(ctx, commands, files)
+	if err != nil {
+		return SleepResult{}, err
+	}
+	if !present {
 		return SleepResult{
 			Reason: "already sleeping without a memory snapshot; the next wake is a cold boot",
 		}, nil
@@ -196,14 +210,9 @@ func (manager *Manager) requireWakeTrap() error {
 func (manager *Manager) memorySnapshotPreflight(
 	ctx context.Context, commands commands, files virtualMachineFiles,
 ) (string, error) {
-	// A launcher generated before memory snapshots existed always passes
-	// --config-file, so a marker written now would strand the next start
-	// (Firecracker refuses to load a snapshot over a booted guest).
-	if !commands.OK(ctx, "sudo grep -q snapshot/READY {}", files.jailerLaunch) {
-		return "launcher predates memory snapshots; re-provision the VM to enable fast start", nil
-	}
-	if !commands.OK(ctx, "sudo test -S {}", files.apiSocket) {
-		return "API socket missing; is the VM running?", nil
+	reason, err := memorySnapshotRefused(ctx, commands, files)
+	if reason != "" || err != nil {
+		return reason, err
 	}
 	// Drop the previous snapshot before measuring: its space is reclaimed, and a
 	// stale marker must not survive a failure further down.
@@ -211,6 +220,40 @@ func (manager *Manager) memorySnapshotPreflight(
 		return "", err
 	}
 	return manager.freeSpaceForMemorySnapshot(ctx, commands, files)
+}
+
+// memorySnapshotRefused names the host fact that rules a snapshot out, or "" to
+// go ahead.
+//
+// Both questions are probed, because both reasons are REPORTED: they ride out in
+// SleepResult.Reason and are the only record of why a VM will cold-boot next
+// time, and one of them tells an operator to re-provision the VM. A read this
+// daemon was not allowed to make is a fact about the host's sudoers, and dressing
+// it up as a diagnosis of the launcher would send somebody to rebuild a VM that
+// is fine. Both commands have a silent negative — grep -q prints nothing when it
+// does not match, test(1) prints nothing at all — so anything on stderr came from
+// something other than the answer.
+func memorySnapshotRefused(
+	ctx context.Context, commands commands, files virtualMachineFiles,
+) (string, error) {
+	// A launcher generated before memory snapshots existed always passes
+	// --config-file, so a marker written now would strand the next start
+	// (Firecracker refuses to load a snapshot over a booted guest).
+	staged, err := hostHas(ctx, commands, "sudo grep -q snapshot/READY {}", files.jailerLaunch)
+	if err != nil {
+		return "", err
+	}
+	if !staged {
+		return "launcher predates memory snapshots; re-provision the VM to enable fast start", nil
+	}
+	live, err := hostHas(ctx, commands, "sudo test -S {}", files.apiSocket)
+	if err != nil {
+		return "", err
+	}
+	if !live {
+		return "API socket missing; is the VM running?", nil
+	}
+	return "", nil
 }
 
 func (manager *Manager) freeSpaceForMemorySnapshot(
@@ -280,8 +323,15 @@ func (manager *Manager) captureMemorySnapshot(
 	); err != nil {
 		return err
 	}
+	// Probed: "missing or empty" is a diagnosis of what Firecracker just wrote, and
+	// the caller turns this error into the sentence Atlas shows for why the VM will
+	// cold-boot. A read this daemon was not allowed to make must say that instead.
 	for _, file := range []string{files.memorySnapshotVMState, files.memorySnapshotMemory} {
-		if !commands.OK(ctx, "sudo test -s {}", file) {
+		written, err := hostHas(ctx, commands, "sudo test -s {}", file)
+		if err != nil {
+			return err
+		}
+		if !written {
 			return fmt.Errorf("snapshot file missing or empty: %s", file)
 		}
 	}

@@ -52,7 +52,15 @@ func (manager *Manager) Rebuild(
 ) error {
 	commands := manager.commandsFor(runner)
 	files := manager.filesFor(uuid)
-	if !commands.OK(ctx, "sudo test -d {}", files.jailRoot) {
+	// Probed: the sentence below tells an operator to provision a VM that may be
+	// provisioned already. The jail is 0700 and root-owned and this daemon is not
+	// root, so "could not look" is the everyday failure here and it must not be
+	// reported as a jail that is not there.
+	jailed, err := hostHas(ctx, commands, "sudo test -d {}", files.jailRoot)
+	if err != nil {
+		return err
+	}
+	if !jailed {
 		return fmt.Errorf("jail %s missing; provision the VM before rebuilding", files.jailRoot)
 	}
 	origin, err := rebuildOrigin(ctx, commands, request)

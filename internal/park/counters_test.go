@@ -21,9 +21,10 @@ func TestCountersMapEveryWakeCounterToItsVirtualMachine(t *testing.T) {
 		t.Errorf("counters = %v", counters)
 	}
 	// One command for the whole host: the cost of the reflex must not grow with
-	// the number of sleeping VMs, and it is unchecked because a host with no
-	// atlas table is a host with no wake counters rather than a failure.
-	assertTrace(t, fake, "- "+listCounters)
+	// the number of sleeping VMs. Checked — no "- " prefix — because a read of
+	// this table that does not exit zero is a fault, and the alternative is the
+	// bug in TestCountersRefuseToReadADeniedNftAsAHostWithNoSleepingVMs.
+	assertTrace(t, fake, listCounters)
 }
 
 // Another feature's named counter sharing the table must not yield a UUID: the
@@ -45,8 +46,32 @@ func TestCountersIgnoreNamesThatAreNotOurs(t *testing.T) {
 	}
 }
 
-// The first VM to sleep creates the table. Until then nft exits non-zero saying
-// there is none, and the daemon has to keep polling through that.
+// The read is CHECKED, and this is the failure that decides it.
+//
+// `nft -j list counters table inet atlas` exits non-zero with a complaint on
+// stderr both when the table is not there and when sudo will not run it, so the
+// two cannot be told apart — run.Probe names this command as one that must not
+// be asked as a probe for exactly that reason. Read unchecked, both arrived as
+// ("", nil): an empty listing, no sleeping VM ever woken by traffic, and nothing
+// in the journal. The table is host floor (bootstrap creates it, the sweep
+// re-creates it, every park asserts it), so the honest reading of a failure here
+// is a failure.
+func TestCountersRefuseToReadADeniedNftAsAHostWithNoSleepingVMs(t *testing.T) {
+	fake := newFakeCommands()
+	fake.fails(listCounters)
+
+	counters, err := newTestParker(fake).counters(context.Background())
+
+	if err == nil {
+		t.Fatal("a denied counter read reported no error, which reads as a host with nothing asleep")
+	}
+	if counters != nil {
+		t.Errorf("counters = %v, want none: a read that failed has no answer to give", counters)
+	}
+}
+
+// An EMPTY listing is still an answer, and the one a bootstrapped host with
+// nothing asleep gives.
 func TestCountersOnAHostWithNoAtlasTableAreEmpty(t *testing.T) {
 	counters, err := parseCounters("")
 	if err != nil || len(counters) != 0 {

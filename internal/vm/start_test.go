@@ -2,6 +2,7 @@ package vm
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -110,6 +111,57 @@ func TestStartRetriesAtMostOnce(t *testing.T) {
 		t.Fatal("Start succeeded, want the second start failure reported")
 	}
 	assertTrace(t, fake, "? "+marker, start, "? "+marker, resetFailed, start)
+}
+
+// A start refuses to guess at the marker the whole restore is keyed on.
+//
+// The marker lives inside the jail, under root-owned 0700 directories. Read as a
+// bool, a denial is "no snapshot" — so a VM that would have resumed from RAM in
+// milliseconds cold-boots instead, the operation reports restored=false, and
+// nothing anywhere says the question was never asked. Nothing is started on the
+// strength of it either: the probe is the verb's first act, so the refusal leaves
+// a VM down rather than one that came up wrong.
+func TestStartRefusesWhenItCouldNotReadTheMemorySnapshotMarker(t *testing.T) {
+	marker, start, _, _ := startCommands()
+	fake := newFakeCommands()
+	fake.deny(marker)
+
+	restored, err := newTestManager(fake).Start(context.Background(), nil, testUUID)
+
+	if err == nil {
+		t.Fatal("Start succeeded over a marker it could not read")
+	}
+	if restored {
+		t.Error("restored = true on a start that never ran")
+	}
+	assertNotIssued(t, fake, start)
+}
+
+// The SECOND read of the marker decides between "the restore failed, retry it
+// cold" and "the boot failed, report it", and it runs against the same jail the
+// start just failed in.
+//
+// A denial read as "the marker is gone" sends a plain boot failure down the retry
+// path; read the other way round it leaves the operation Failed while
+// Restart=always brings the VM up five seconds later behind the controller's
+// back. Neither is a guess worth making, so the start's own failure and the
+// unreadable marker are reported together and nothing is retried.
+func TestStartReportsAMarkerItCouldNotReReadAlongsideTheStartFailure(t *testing.T) {
+	marker, start, resetFailed, _ := startCommands()
+	fake := newFakeCommands()
+	fake.reply(marker, true)
+	fake.reply(start, false)
+	fake.denyFrom(marker, 1)
+
+	_, err := newTestManager(fake).Start(context.Background(), nil, testUUID)
+
+	if err == nil {
+		t.Fatal("Start succeeded over a marker it could not re-read")
+	}
+	if !strings.Contains(err.Error(), errCommandFailed.Error()) {
+		t.Errorf("got %q, want the start's own failure kept beside the unreadable marker", err)
+	}
+	assertNotIssued(t, fake, resetFailed)
 }
 
 func TestStartFailsWhenTheUnitDoesNotSettle(t *testing.T) {

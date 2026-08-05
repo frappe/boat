@@ -78,7 +78,14 @@ func (manager *Manager) Stop(
 func (manager *Manager) shutDownGuest(
 	ctx context.Context, commands commands, files virtualMachineFiles,
 ) {
-	if !commands.OK(ctx, "sudo test -S {}", files.apiSocket) {
+	// Probed, and "could not look" goes AHEAD rather than back. The probe is here
+	// only to skip a pointless API call on a VM that is not running, and the API
+	// call is itself best-effort — so trying it anyway costs one refused connection
+	// on a socket that was never there, while skipping it on a read this daemon was
+	// not allowed to make silently downgrades a cooperative stop to a SIGKILL of
+	// the cgroup and loses whatever the guest had dirty. Only a PROVEN missing
+	// socket is evidence there is no guest to ask.
+	if answer, _ := commands.Probe(ctx, "sudo test -S {}", files.apiSocket); answer == run.No {
 		return
 	}
 	err := commands.FirecrackerAPI(
@@ -97,7 +104,13 @@ func (manager *Manager) waitForUnitInactive(
 ) {
 	deadline := manager.clock.Now().Add(gracefulShutdownTimeout)
 	for manager.clock.Now().Before(deadline) {
-		if !commands.OK(ctx, "systemctl is-active --quiet {}", files.unit) {
+		// Only a PROVEN inactive unit ends the wait. `is-active --quiet` prints
+		// nothing and exits non-zero for a unit that is down, which is the No this
+		// loop is looking for; a probe that could not be MADE is not that, and
+		// reading it as "the guest finished" would cut the drain from thirty seconds
+		// to none and hard-stop a guest mid-sync. The deadline bounds the wait
+		// either way, so an unaskable host costs the same as a wedged one.
+		if answer, _ := commands.Probe(ctx, "systemctl is-active --quiet {}", files.unit); answer == run.No {
 			return
 		}
 		manager.clock.Sleep(gracefulPollInterval)
@@ -175,6 +188,13 @@ func boundedDrainDropIn(unit string) (directory string, file string) {
 func (manager *Manager) convergeClone(ctx context.Context, commands commands, uuid string) {
 	for _, suffix := range []string{"", "-data"} {
 		name := fmt.Sprintf("atlas-vm-%s%s-clone", uuid, suffix)
+		// Left as OK deliberately, on both of the grounds that keep OK honest.
+		// dmsetup EXPLAINS its negative — `Device does not exist.` on stderr, exit
+		// 1 — so it is one of the commands run.Probe says must not be asked as a
+		// probe at all: an ordinary "no clone here" is shaped exactly like a denial
+		// and no rule recovers the difference. And the collapse costs nothing that
+		// stays quiet: a clone this missed keeps the plain LV busy, and the next
+		// terminate or rebuild fails loudly with "used by another device".
 		if commands.OK(ctx, "sudo dmsetup info {}", name) {
 			commands.RunUnchecked(ctx, "sudo dmsetup remove {}", name)
 		}

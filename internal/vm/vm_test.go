@@ -71,6 +71,13 @@ type fakeCommands struct {
 	replies map[string][]bool
 	calls   map[string]int
 	outputs map[string]string
+	// denied is the third answer a host gives: a question this daemon was not
+	// allowed to PUT to it, mapped to the call from which the host stops answering
+	// it. It is a separate map from replies because a bool has nowhere to put the
+	// third answer — which is exactly why no test in this package could reach the
+	// case that made a sleeping VM read Stopped, or the one that `rm -rf`ed a good
+	// memory snapshot.
+	denied map[string]int
 	// parkError lets a test make arming the wake trap fail, which must fail the
 	// sleep: a VM that is stopped and untrapped can never come back on its own.
 	parkError error
@@ -107,6 +114,7 @@ func newFakeCommands() *fakeCommands {
 		replies: map[string][]bool{},
 		calls:   map[string]int{},
 		outputs: map[string]string{},
+		denied:  map[string]int{},
 		// A live, running guest by default, for the same reason an unscripted
 		// command succeeds by default: a scenario states what it took away from a
 		// healthy host, and everything it did not mention is healthy.
@@ -127,6 +135,29 @@ func (fake *fakeCommands) reply(command string, answers ...bool) {
 
 func (fake *fakeCommands) output(command string, text string) {
 	fake.outputs[command] = text
+}
+
+// deny makes one command unaskable: the host neither confirms nor denies,
+// because sudo would not run it. That is what a missing sudoers grant looks like
+// against the 0700 root-owned VM tree this daemon reads as an unprivileged user.
+func (fake *fakeCommands) deny(command string) {
+	fake.denyFrom(command, 0)
+}
+
+// denyFrom stops the host answering a command from its call'th invocation
+// onward, so a scenario can let one question be answered and then have the SAME
+// question stop being answerable. A verb that asks twice and decides on the
+// difference — a start, whose retry hangs on re-reading one marker — has a case
+// here that no all-or-nothing denial reaches.
+func (fake *fakeCommands) denyFrom(command string, call int) {
+	fake.denied[command] = call
+}
+
+// unaskable reports whether the call'th run of a command is one the host would
+// not answer.
+func (fake *fakeCommands) unaskable(command string, call int) bool {
+	from, ever := fake.denied[command]
+	return ever && call >= from
 }
 
 func (fake *fakeCommands) succeeds(command string) bool {
@@ -165,10 +196,31 @@ func (fake *fakeCommands) RunUnchecked(
 	return fake.outputs[command], nil
 }
 
-func (fake *fakeCommands) OK(_ context.Context, template string, parameters ...any) bool {
+// Probe answers in three values, so a scenario can say "denied" as well as "no".
+func (fake *fakeCommands) Probe(
+	_ context.Context, template string, parameters ...any,
+) (run.Answer, error) {
 	command := render(template, parameters...)
 	fake.record("? ", command)
-	return fake.succeeds(command)
+	call := fake.calls[command]
+	// Scripted answers are consumed either way, so a denial does not shift the
+	// sequence a poll's later answers were written against.
+	answered := fake.succeeds(command)
+	switch {
+	case fake.unaskable(command, call):
+		return run.Unknown, fmt.Errorf("could not run %s", command)
+	case answered:
+		return run.Yes, nil
+	}
+	return run.No, nil
+}
+
+// OK is spelled in terms of Probe exactly as run.Runner.OK is, so a test that
+// denies a command sees the same collapse the daemon does at the sites where the
+// collapse is still deliberate.
+func (fake *fakeCommands) OK(ctx context.Context, template string, parameters ...any) bool {
+	answer, _ := fake.Probe(ctx, template, parameters...)
+	return answer == run.Yes
 }
 
 // Input records the command together with what was fed to its standard input,
@@ -336,5 +388,23 @@ func TestExistsIsFalseForAVirtualMachineThisHostDoesNotHave(t *testing.T) {
 
 	if newTestManager(fake).Exists(context.Background(), nil, testUUID) {
 		t.Fatal("Exists = true, want false")
+	}
+}
+
+// Only a PROVEN no is "this host does not have that VM".
+//
+// The caller turns false into a 404 naming this host and this UUID, and Atlas
+// reads that as "the VM is somewhere else" — the one answer a control plane must
+// never be handed by accident. The directory is 0700 and root-owned and this
+// daemon is not root, so a missing sudoers line is the everyday way this probe
+// fails, and it is a fact about the host rather than about the VM. The verb goes
+// ahead instead and meets the same denial with a command that says what failed.
+func TestExistsDoesNotDisownAVirtualMachineItCouldNotLookFor(t *testing.T) {
+	fake := newFakeCommands()
+	files := testFiles(testUUID)
+	fake.deny("sudo test -d " + files.directory)
+
+	if !newTestManager(fake).Exists(context.Background(), nil, testUUID) {
+		t.Fatal("a directory this host could not read was reported as a VM this host does not have")
 	}
 }

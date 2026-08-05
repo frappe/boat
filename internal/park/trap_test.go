@@ -241,6 +241,55 @@ func TestTheBootSweepSkipsAVirtualMachineWithNoSidecar(t *testing.T) {
 	assertNotIssued(t, fake, "neigh replace")
 }
 
+// A marker the sweep cannot READ must not be read as a VM that is not asleep.
+//
+// The marker is in a 0700 root-owned tree and is asked for through sudo, so a
+// host missing one sudoers line answers the probe with a denial rather than with
+// "no". Asked as a bool, that denial silently removed the VM from the sweep's
+// list — and this sweep is the ONLY thing that re-parks after a reboot, because
+// a sleeping VM's unit is suppressed by the very marker that could not be read.
+// The result was a VM unreachable for as long as it slept, with nothing in the
+// journal. It is still skipped, because parking a VM this sweep cannot confirm
+// is asleep would black-hole a running one, but it is skipped OUT LOUD.
+func TestTheBootSweepSaysSoWhenAMarkerCannotBeRead(t *testing.T) {
+	fake := newFakeCommands().withScaffold()
+	fake.withSleeping(testUUID, testAddress)
+	fake.fails(markerOf(testUUID))
+	journal := captureJournal(t)
+
+	newTestTrap(fake, recordWakes(&[]string{})).sweep(context.Background())
+
+	assertNotIssued(t, fake, "add rule")
+	if !strings.Contains(journal.String(), testUUID) {
+		t.Errorf("a marker that could not be read was skipped in silence: %s", journal.String())
+	}
+}
+
+// The same third answer on the poll's side, and here it goes the other way.
+//
+// A counter that moved says a SYN has already arrived for this VM. Declining to
+// act on it because the marker could not be read leaves that VM asleep with
+// nothing on the host left to notice it — the failure OK's own doc calls "a wake
+// trap declines to wake anything". Asking is safe: the wake is a REQUEST for a
+// pass, and the pass re-reads the host, the desired power and the boot fence
+// before it starts anything, so a wrong ask costs a no-op pass.
+func TestACounterWhoseMarkerCannotBeReadStillAsksForAWake(t *testing.T) {
+	fake := newFakeCommands()
+	fake.output(listCounters, counterListing(wakeCounter{name: "wake_" + testHex, packets: 1}))
+	fake.fails(markerOf(testUUID))
+	journal := captureJournal(t)
+	var woken []string
+
+	newTestTrap(fake, recordWakes(&woken)).tick(context.Background())
+
+	if len(woken) != 1 || woken[0] != testUUID {
+		t.Errorf("woken = %v, want [%s]: a marker nobody could read is not an awake VM", woken, testUUID)
+	}
+	if !strings.Contains(journal.String(), "still sleeping") {
+		t.Errorf("the unreadable marker was not reported: %s", journal.String())
+	}
+}
+
 // Said once, and the poll still starts: the counters of any VM that IS still
 // parked are read regardless of whether the sweep could enumerate anything.
 func TestAnUnreadableVirtualMachineDirectoryLeavesTheSweepEmpty(t *testing.T) {
@@ -371,6 +420,49 @@ func TestTheBootSweepDoesNotReParkAVirtualMachineWokenWhileItRan(t *testing.T) {
 
 	if fake.issued(addRule) || fake.issued(routeReplace) || fake.issued(neighReplace) {
 		t.Errorf("the sweep re-parked a VM that had woken:\n  %s", strings.Join(fake.trace, "\n  "))
+	}
+}
+
+// The turn's re-read gets the same treatment as the listing's: a marker it could
+// not READ is not a VM that woke up, so the re-park is refused and REPORTED
+// rather than skipped as a no-op the way a genuine wake is.
+func TestTheBootSweepReportsATurnWhoseMarkerCannotBeRead(t *testing.T) {
+	fake := newFakeCommands().withScaffold()
+	fake.withSleeping(testUUID, testAddress)
+	journal := captureJournal(t)
+	trap := newTestTrap(fake, recordWakes(&[]string{}))
+	// Denied between the listing and this VM's turn, which is where the sweep asks
+	// again and where the answer decides whether a running VM gets black-holed.
+	trap.SerializeWith(func(ctx context.Context, uuid string, fn func(context.Context) error) error {
+		fake.fails(markerOf(uuid))
+		return fn(ctx)
+	})
+
+	trap.sweep(context.Background())
+
+	if fake.issued(addRule) || fake.issued(routeReplace) {
+		t.Errorf("the sweep parked a VM it could not confirm was asleep:\n  %s",
+			strings.Join(fake.trace, "\n  "))
+	}
+	if !strings.Contains(journal.String(), "could not re-park") {
+		t.Errorf("the refused re-park was not reported: %s", journal.String())
+	}
+}
+
+// The sweep rebuilds the nft scaffold as well as the dummy, and for one reason
+// more than the dummy has: the poll reads its counters out of `table inet atlas`
+// with a CHECKED command, so the table has to be host floor rather than something
+// the first sleeping VM happens to create. Idempotent on a host that has it.
+func TestTheBootSweepRebuildsTheNftablesScaffold(t *testing.T) {
+	fake := newFakeCommands()
+	fake.outputs[defaultRoute] = defaultRouteOutput
+
+	newTestTrap(fake, recordWakes(&[]string{})).sweep(context.Background())
+
+	for _, expected := range []string{deviceAdd, deviceUp, addTable, addChain} {
+		if !fake.issued(expected) {
+			t.Errorf("the sweep did not rebuild %q:\n  %s", expected, strings.Join(fake.trace, "\n  "))
+		}
 	}
 }
 

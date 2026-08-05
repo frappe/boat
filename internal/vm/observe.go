@@ -2,6 +2,7 @@ package vm
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/frappe/boat/internal/fcattach"
@@ -10,16 +11,34 @@ import (
 )
 
 const (
+	// showUnitCommand is what one observation asks systemd for.
+	//
+	// LoadState is in the list because without it a unit systemd has never heard
+	// of answers ActiveState=inactive, SubState=dead — the same three words a VM
+	// an operator stopped answers with — and this package read that as Stopped.
+	// internal/units and internal/adopt both ask for LoadState and both drop
+	// `not-found`; this was the one place in the repo that did not, and it is the
+	// one that drives start and stop.
+	showUnitCommand = "systemctl show {} --property=LoadState " +
+		"--property=ActiveState --property=SubState"
+
+	unitLoadStateProperty   = "LoadState"
 	unitActiveStateProperty = "ActiveState"
 	unitSubStateProperty    = "SubState"
+
+	// loadStateNotFound is systemd's LoadState for a name it holds no unit file
+	// for. It is the ONE value that means this host does not have the unit;
+	// `masked`, `error` and `bad-setting` all mean the host has something and it
+	// is not working, which is a fact about the VM and is reported as one.
+	loadStateNotFound = "not-found"
 
 	unitActive   = "active"
 	unitInactive = "inactive"
 	unitFailed   = "failed"
 )
 
-// Observe reads this VM's state off the host: the unit's ActiveState and
-// SubState, the on-disk markers, and — for a unit claiming to hold a live
+// Observe reads this VM's state off the host: the unit's LoadState, ActiveState
+// and SubState, the on-disk markers, and — for a unit claiming to hold a live
 // Firecracker — the Firecracker itself.
 //
 // This is the inversion the split is for. Atlas used to set a VM's status from
@@ -58,9 +77,7 @@ func (manager *Manager) readUnitAndMarkers(
 	commands := manager.commandsFor(runner)
 	files := manager.filesFor(uuid)
 	observed := model.VirtualMachine{UUID: uuid, ObservedAt: manager.clock.Now()}
-	output, err := commands.Run(
-		ctx, "systemctl show {} --property=ActiveState --property=SubState", files.unit,
-	)
+	output, err := commands.Run(ctx, showUnitCommand, files.unit)
 	if err != nil {
 		observed.ObservedStatus = model.StatusUnknown
 		return observed, err
@@ -68,10 +85,35 @@ func (manager *Manager) readUnitAndMarkers(
 	properties := parseUnitProperties(output)
 	observed.UnitActiveState = properties[unitActiveStateProperty]
 	observed.UnitSubState = properties[unitSubStateProperty]
-	observed.Sleeping = commands.OK(ctx, "sudo test -f {}", files.sleepingMarker)
-	observed.HasMemorySnapshot = manager.memorySnapshotMarkerPresent(ctx, commands, files)
-	observed.ObservedStatus = statusOf(observed)
+	observed.Sleeping, observed.HasMemorySnapshot, err = manager.readMarkers(ctx, commands, files)
+	if err != nil {
+		observed.ObservedStatus = model.StatusUnknown
+		return observed, err
+	}
+	observed.ObservedStatus = statusOf(observed, properties[unitLoadStateProperty])
 	return observed, nil
+}
+
+// readMarkers reads the two on-disk facts an observation rests on, and refuses
+// to guess at either.
+//
+// The sleeping marker is why this is a probe and not a gate. It OUTRANKS the
+// unit state, so a read that could not be made — the marker is in a 0700
+// root-owned tree and this daemon is not root — collapsed to "no marker" makes a
+// sleeping VM read Stopped. Stopped is a status the reconciler acts on: it plans
+// a start, the unit's own ConditionPathExists=! sees the marker that is really
+// there and skips the unit, `systemctl is-active` then fails, and the pass backs
+// off and repeats forever with no path back. Unknown is the status nothing acts
+// on, and "I could not look" is exactly what it means.
+func (manager *Manager) readMarkers(
+	ctx context.Context, commands commands, files virtualMachineFiles,
+) (sleeping bool, memorySnapshot bool, err error) {
+	sleeping, err = hostHas(ctx, commands, "sudo test -f {}", files.sleepingMarker)
+	if err != nil {
+		return false, false, fmt.Errorf("looking for the sleeping marker %s: %w", files.sleepingMarker, err)
+	}
+	memorySnapshot, err = manager.memorySnapshotMarkerPresent(ctx, commands, files)
+	return sleeping, memorySnapshot, err
 }
 
 // confirmRunning asks the Firecracker itself, because an active unit is a claim
@@ -141,6 +183,15 @@ func parseUnitProperties(output string) map[string]string {
 
 // statusOf maps what systemd and the markers said to Boat's status.
 //
+// A unit systemd holds no unit file for is read FIRST and is Unknown. Such a
+// unit answers inactive/dead — word for word what a VM an operator stopped
+// answers — so without LoadState a host that lost its firecracker-vm@.service
+// template reports every VM on it Stopped, and the reconciler starts working
+// through them. "This host does not have the unit" is not "this VM is stopped",
+// and only the second is a thing to act on. It outranks the marker too: a VM
+// whose unit is gone cannot be woken by anything, so calling it Sleeping would
+// name a state it cannot leave.
+//
 // The sleeping marker wins over the unit state, because a sleeping VM's unit is
 // inactive by construction and the marker is what distinguishes "parked, an
 // inbound SYN wakes it" from "stopped, and stays stopped". A unit state we do
@@ -152,8 +203,10 @@ func parseUnitProperties(output string) map[string]string {
 // Paused or Unknown. It is spelled this way round so that the probe runs for
 // exactly the VMs whose status depends on it — the marker still outranks
 // everything, and a stopped VM costs no round trip to a socket that is not there.
-func statusOf(observed model.VirtualMachine) model.VirtualMachineStatus {
+func statusOf(observed model.VirtualMachine, loadState string) model.VirtualMachineStatus {
 	switch {
+	case loadState == loadStateNotFound:
+		return model.StatusUnknown
 	case observed.Sleeping:
 		return model.StatusSleeping
 	case observed.UnitActiveState == unitActive:

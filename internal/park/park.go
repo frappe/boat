@@ -170,6 +170,13 @@ func ParkVirtualMachine(ctx context.Context, runner *run.Runner, uuid string) er
 }
 
 func (parker *parker) ensureDevice(ctx context.Context) error {
+	// Left as OK on both of the grounds that keep OK honest. `ip link show` on a
+	// device that is not there EXPLAINS itself on stderr — `Device "atlas-park0"
+	// does not exist.`, exit 1 — which is the shape run.Probe says cannot be told
+	// apart from a denial, so this question is not askable in three answers. And
+	// the collapse guards a mutation that fails loudly by itself: a wrong "not
+	// there" reaches `ip link add`, which answers `RTNETLINK answers: File exists`
+	// and fails the park. A wasted command and a red Task, never a quiet one.
 	if !parker.commands.OK(ctx, "ip link show {}", Device) {
 		if _, err := parker.commands.Run(ctx, "sudo ip link add {} type dummy", Device); err != nil {
 			return err
@@ -191,6 +198,14 @@ func (parker *parker) ensureDevice(ctx context.Context) error {
 // be parked in name only and could never be woken by traffic, which is precisely
 // the case the sweep exists to cover.
 func (parker *parker) ensureForwardChain(ctx context.Context) error {
+	// Both gates stay OK, for the reason run.Probe names nft by: `nft list table
+	// inet atlas` on a host without it exits 1 with `Error: No such file or
+	// directory` on stderr, which is an ordinary answer wearing a denial's clothes
+	// — and for nft not even the exit code differs. Neither is askable in three
+	// answers. The collapse is also free here, because both adds are idempotent:
+	// `nft add table` and `nft add chain` succeed against a table or chain that is
+	// already there, so a wrong "not there" costs one no-op command, and an add
+	// this daemon is not allowed to make fails loudly and fails the park.
 	if !parker.commands.OK(ctx, "sudo nft list table inet atlas") {
 		if _, err := parker.commands.Run(ctx, "sudo nft add table inet atlas"); err != nil {
 			return err
@@ -269,6 +284,11 @@ func (parker *parker) restoreReachability(ctx context.Context, address string) e
 // armTrap installs the named counter and the rule that references it.
 func (parker *parker) armTrap(ctx context.Context, uuid string, address string) error {
 	name := CounterName(uuid)
+	// OK for the same two reasons ensureForwardChain's gates are: nft explains its
+	// negative so the question has no third answer to keep, and `nft add counter`
+	// against a counter that already exists succeeds without resetting it — so a
+	// wrong "not there" costs one no-op command, and a denied add fails the park
+	// out loud rather than leaving a VM parked with no counter to poll.
 	if !parker.commands.OK(ctx, "sudo nft list counter inet atlas {}", name) {
 		if _, err := parker.commands.Run(ctx, "sudo nft "+counterCommand(uuid)); err != nil {
 			return err

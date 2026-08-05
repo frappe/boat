@@ -100,10 +100,24 @@ func (trap *Trap) SerializeWith(
 	trap.serialize = serialize
 }
 
-// stillSleeping re-reads the marker, through sudo for the same 0700 reason the
-// listing does.
-func (trap *Trap) stillSleeping(ctx context.Context, uuid string) bool {
-	return trap.sweeper.commands.OK(ctx, "sudo test -f {}", trap.sweeper.filesFor(uuid).sleepingMarker)
+// sleepingMarkerPresent reports whether this host is holding uuid asleep,
+// through sudo because the VM tree is 0700 and root-owned and this daemon is not
+// root.
+//
+// Probed rather than gated, and the third answer is the whole point. Read as a
+// bool, "I could not look" arrives as "there is no marker" — and every caller
+// here reads a missing marker as "this VM is not asleep, leave it alone". That
+// is how the boot sweep skips every sleeping VM on a host and leaves them
+// unreachable for as long as they sleep, and how the poll declines to wake one a
+// SYN has already arrived for. Neither says anything, which is what made the
+// same failure survive two rewrites.
+func (parker *parker) sleepingMarkerPresent(ctx context.Context, uuid string) (bool, error) {
+	files := parker.filesFor(uuid)
+	answer, err := parker.commands.Probe(ctx, "sudo test -f {}", files.sleepingMarker)
+	if err != nil {
+		return false, fmt.Errorf("looking for the sleeping marker of %s: %w", uuid, err)
+	}
+	return answer == run.Yes, nil
 }
 
 // resident is set while a Trap is polling in this process.
@@ -175,7 +189,7 @@ func (trap *Trap) tick(ctx context.Context) {
 // real path, so a count outlives the sleep by a moment, and by then an
 // operator's start or an earlier tick has already woken the VM.
 func (trap *Trap) wakeIfSleeping(ctx context.Context, uuid string) {
-	if !trap.poller.commands.OK(ctx, "sudo test -f {}", trap.poller.filesFor(uuid).sleepingMarker) {
+	if !trap.worthWaking(ctx, uuid) {
 		return
 	}
 	slog.Info("waking a sleeping virtual machine", "uuid", uuid, "cause", "inbound TCP SYN")
@@ -185,6 +199,26 @@ func (trap *Trap) wakeIfSleeping(ctx context.Context, uuid string) {
 		// next tick tries again — which is the whole retry mechanism.
 		slog.Error("could not wake a virtual machine", "uuid", uuid, "error", err)
 	}
+}
+
+// worthWaking reads the marker and reports whether this counter is worth acting
+// on. Only a PROVEN absent marker declines.
+//
+// A marker that could not be read asks for the wake anyway, and that is the safe
+// direction rather than the bold one: wake is a REQUEST for a pass (see the type
+// comment), and the pass re-reads the host, the desired power and the boot fence
+// before it starts anything — so asking on an unreadable marker costs a no-op
+// pass, while declining leaves a VM that a SYN has already arrived for asleep
+// with nothing left on this host to notice it. The line in the journal is the
+// part that was missing.
+func (trap *Trap) worthWaking(ctx context.Context, uuid string) bool {
+	sleeping, err := trap.poller.sleepingMarkerPresent(ctx, uuid)
+	if err != nil {
+		slog.Error("could not tell whether a virtual machine is still sleeping",
+			"uuid", uuid, "error", err)
+		return true
+	}
+	return sleeping
 }
 
 // sweep rebuilds park state from the on-disk markers.
@@ -201,6 +235,15 @@ func (trap *Trap) sweep(ctx context.Context) {
 		// Reported and carried on: every re-park below needs the device and each
 		// one says so on its own, so this is a first warning rather than a wall.
 		slog.Error("could not bring up the park device", "device", Device, "error", err)
+	}
+	// The nft scaffold is rebuilt here for the same reason the dummy is — nftables
+	// does not survive a reboot and a host whose VMs are all asleep starts no unit
+	// to rebuild it — and for one more: the poll below reads its counters with a
+	// CHECKED command, so `table inet atlas` has to be host floor rather than a
+	// thing the first sleeping VM happens to create. Idempotent, and every per-VM
+	// park asserts it again anyway.
+	if err := trap.sweeper.ensureForwardChain(ctx); err != nil {
+		slog.Error("could not rebuild the nftables forward chain", "error", err)
 	}
 	for _, uuid := range trap.sleeping(ctx) {
 		// Each VM's re-park takes that VM's turn, and the marker is read AGAIN
@@ -234,7 +277,11 @@ func (trap *Trap) sweep(ctx context.Context) {
 // where "no serializer" has to be read as a decision rather than an oversight.
 func (trap *Trap) reparkInTurn(ctx context.Context, uuid string) error {
 	repark := func(ctx context.Context) error {
-		if !trap.stillSleeping(ctx, uuid) {
+		sleeping, err := trap.sweeper.sleepingMarkerPresent(ctx, uuid)
+		if err != nil {
+			return err
+		}
+		if !sleeping {
 			// Woken between the listing and this turn. Its unit is running and has
 			// rebuilt the real path; re-parking now would take it back down.
 			return nil
@@ -289,7 +336,20 @@ func (trap *Trap) sleeping(ctx context.Context) []string {
 		// Through sudo, and not an in-process stat: the VM tree is 0700 owned by
 		// the per-VM uid, so a stat would report "absent" for a marker that is
 		// plainly there and the sweep would skip every sleeping VM on the host.
-		if trap.sweeper.commands.OK(ctx, "sudo test -f {}", trap.sweeper.filesFor(uuid).sleepingMarker) {
+		marked, err := trap.sweeper.sleepingMarkerPresent(ctx, uuid)
+		if err != nil {
+			// Said out loud and skipped, in that order. Skipped because parking a VM
+			// this sweep cannot confirm is asleep is the worse of the two mistakes:
+			// it routes a RUNNING VM's /128 into the black-hole dummy and drops every
+			// SYN to it, and the poll only ever undoes that for a VM whose marker is
+			// present — which this one's is not, as far as anything here can tell.
+			// Said out loud because silence is precisely what the gate this replaced
+			// did, and a sweep that quietly rebuilds nothing is indistinguishable
+			// from a host with no sleeping VMs.
+			slog.Error("could not tell whether a virtual machine is sleeping", "uuid", uuid, "error", err)
+			continue
+		}
+		if marked {
 			sleeping = append(sleeping, uuid)
 		}
 	}

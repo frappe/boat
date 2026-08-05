@@ -101,7 +101,15 @@ func (manager *Manager) resizePreflight(
 	ctx context.Context, commands commands, files virtualMachineFiles,
 	rootVolume volume, dataVolume volume, request ResizeRequest,
 ) (bool, error) {
-	if !commands.OK(ctx, "sudo test -f {}", files.firecrackerConfig) {
+	// Probed: this is a preflight whose answers are REPORTED, and the point of a
+	// preflight is that it refuses before anything has changed. A config file this
+	// daemon could not read reported as a config file that is missing sends an
+	// operator to re-provision a VM whose disk is about to be grown correctly.
+	configured, err := hostHas(ctx, commands, "sudo test -f {}", files.firecrackerConfig)
+	if err != nil {
+		return false, err
+	}
+	if !configured {
 		return false, fmt.Errorf(
 			"firecracker config %s missing; provision the VM first", files.firecrackerConfig,
 		)

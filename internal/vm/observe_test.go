@@ -10,7 +10,8 @@ import (
 
 func observeCommands() (show, sleeping, snapshot string) {
 	files := testFiles(testUUID)
-	return "systemctl show " + files.unit + " --property=ActiveState --property=SubState",
+	return "systemctl show " + files.unit +
+			" --property=LoadState --property=ActiveState --property=SubState",
 		"sudo test -f " + files.sleepingMarker,
 		"sudo test -f " + files.memorySnapshotMarker
 }
@@ -245,4 +246,88 @@ func TestObserveReportsUnknownWhenTheHostCannotBeRead(t *testing.T) {
 		t.Error("an unreadable host still owes a record of when we tried")
 	}
 	assertTrace(t, fake, show)
+}
+
+// The cascade this package's Probe seam exists for, spelled end to end.
+//
+// The sleeping marker lives in a 0700 root-owned tree and is read through sudo,
+// so a host missing one sudoers line answers the probe with a denial rather than
+// with "no". Asked as a bool, that denial IS "no marker" — and no marker over an
+// inactive unit is Stopped. Stopped is a status the reconciler acts on: it plans
+// a start, the unit's own ConditionPathExists=! sees the marker that is really
+// there and skips the unit with exit 0, the pass's `systemctl is-active` then
+// fails, and it backs off and does the same thing again forever with no path
+// back to a running VM.
+//
+// Unknown is the status nothing acts on, and "I could not look" is what it means.
+func TestObserveWillNotCallASleepingVirtualMachineStoppedBecauseItCouldNotReadTheMarker(t *testing.T) {
+	_, sleeping, _ := observeCommands()
+	fake := aHostSaying("ActiveState=inactive\nSubState=dead\n", true, true)
+	fake.deny(sleeping)
+
+	observed, err := newTestManager(fake).Observe(context.Background(), nil, testUUID)
+
+	if err == nil {
+		t.Fatal("Observe succeeded over a marker it could not read")
+	}
+	if observed.ObservedStatus == model.StatusStopped {
+		t.Fatal("a marker that could not be read was reported as a VM that is stopped, " +
+			"which is the status the reconciler starts")
+	}
+	assertStatus(t, observed, model.StatusUnknown)
+}
+
+// The memory snapshot marker gets the same treatment, and for a reported reason
+// rather than a planned one: HasMemorySnapshot rides out in the export, and a
+// denied read collapsed to false tells Atlas a VM will cold-boot while its
+// snapshot is sitting on disk.
+func TestObserveWillNotReportNoMemorySnapshotBecauseItCouldNotReadTheMarker(t *testing.T) {
+	_, _, snapshot := observeCommands()
+	fake := aHostSaying("ActiveState=inactive\nSubState=dead\n", true, true)
+	fake.deny(snapshot)
+
+	observed, err := newTestManager(fake).Observe(context.Background(), nil, testUUID)
+
+	if err == nil {
+		t.Fatal("Observe succeeded over a marker it could not read")
+	}
+	if observed.HasMemorySnapshot {
+		t.Error("a marker that could not be read was reported as one that is there")
+	}
+	assertStatus(t, observed, model.StatusUnknown)
+}
+
+// A unit systemd holds no unit file for is not a stopped VM.
+//
+// It answers inactive/dead, word for word what a VM an operator stopped answers,
+// so without LoadState a host that lost its firecracker-vm@.service template
+// reports every VM on it Stopped and the reconciler starts working through them —
+// one `systemctl start` per VM per interval against a unit that does not exist.
+// internal/units and internal/adopt have both asked for LoadState and dropped
+// `not-found` all along; this was the one reader that did not, and it is the one
+// that drives start and stop.
+func TestObserveReportsUnknownForAUnitSystemdHasNeverHeardOf(t *testing.T) {
+	observed := observing(t, aHostSaying(
+		"LoadState=not-found\nActiveState=inactive\nSubState=dead\n", false, false,
+	))
+
+	if observed.ObservedStatus == model.StatusStopped {
+		t.Fatal("a unit this host does not have was reported as a VM that is stopped")
+	}
+	assertStatus(t, observed, model.StatusUnknown)
+}
+
+// A unit the host HAS and cannot run is still a fact about the VM, so `masked`,
+// `error` and `bad-setting` are reported as whatever the unit's ActiveState says.
+// Only `not-found` means this host does not have the unit at all.
+func TestObserveReportsALoadedUnitWhateverElseSystemdThinksOfIt(t *testing.T) {
+	for _, loadState := range []string{"loaded", "masked", "error", "bad-setting"} {
+		t.Run(loadState, func(t *testing.T) {
+			observed := observing(t, aHostSaying(
+				"LoadState="+loadState+"\nActiveState=inactive\nSubState=dead\n", false, false,
+			))
+
+			assertStatus(t, observed, model.StatusStopped)
+		})
+	}
 }

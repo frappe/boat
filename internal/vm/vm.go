@@ -27,6 +27,7 @@ package vm
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/frappe/boat/internal/fcattach"
@@ -44,7 +45,17 @@ import (
 type commands interface {
 	Run(ctx context.Context, template string, parameters ...any) (string, error)
 	RunUnchecked(ctx context.Context, template string, parameters ...any) (string, error)
+	// OK is the two-answer gate, and it survives here only at the sites that
+	// GUARD A MUTATION which fails loudly on its own, or that ask a command whose
+	// negative is not silent and therefore cannot be probed at all. Each of those
+	// sites says which of the two it is. Everything else asks Probe.
 	OK(ctx context.Context, template string, parameters ...any) bool
+	// Probe is the same question with the answer OK spends: the host said yes, the
+	// host said no, or the question could not be put to the host. The daemon runs
+	// as an unprivileged user against a 0700 root-owned tree, so "could not look"
+	// is an everyday answer here and is the one that must never be reported as a
+	// VM that is not there.
+	Probe(ctx context.Context, template string, parameters ...any) (run.Answer, error)
 	// Input feeds a command's stdin. It is here for the two appends a rebuild
 	// makes into a mounted rootfs (`tee -a` on /etc/hosts and /etc/fstab), where
 	// the content is data and must not become part of a command line.
@@ -163,16 +174,55 @@ func NewManager() *Manager {
 // question about the host's disk, so it asks the host: the answer distinguishes
 // "not mine" from "mine and broken", and those get very different handling one
 // layer up.
+//
+// Only a PROVEN no is "not mine". The caller turns false into a 404 naming this
+// host and this UUID, so a probe that could not be MADE — the VM tree is 0700
+// and this daemon is not root — would answer a question about the host with a
+// claim about the VM, and Atlas would read "that VM is somewhere else". Unknown
+// therefore lets the verb through, where the verb's own commands meet the same
+// denial and fail loudly with the command that failed in the operation record.
+// The bool cannot carry the third answer; Probe traces it either way.
 func (manager *Manager) Exists(ctx context.Context, runner *run.Runner, uuid string) bool {
 	files := manager.filesFor(uuid)
-	return manager.commandsFor(runner).OK(ctx, "sudo test -d {}", files.directory)
+	answer, _ := manager.commandsFor(runner).Probe(ctx, "sudo test -d {}", files.directory)
+	return answer != run.No
+}
+
+// hostHas asks the host a yes/no question and refuses to answer it with a bool
+// alone.
+//
+// Almost every guard in this package used to be run.Runner.OK, which is
+// `answer, _ := Probe(…); return answer == Yes` — so a question that could not
+// be PUT to the host came back indistinguishable from a host that said no. That
+// collapse is free only where a wrong "no" reaches a mutation which fails loudly
+// by itself; everywhere the answer is reported or decided upon it turns "I could
+// not look" into "it is not there", and it is always the second one a failure
+// rounds to. This is that everywhere-else, spelled once: the error is non-nil
+// exactly when the host could not be asked, and it names the command that
+// stopped the probe.
+func hostHas(
+	ctx context.Context, commands commands, template string, parameters ...any,
+) (bool, error) {
+	answer, err := commands.Probe(ctx, template, parameters...)
+	return answer == run.Yes, err
 }
 
 // memorySnapshotMarkerPresent asks the host rather than stat-ing the path in
 // process: the marker lives inside the jail, under root-owned 0700 directories,
 // so a stat would report "absent" for a marker that is plainly there.
+//
+// Probed rather than OK'd because every caller either REPORTS this answer or
+// acts on it. Observe exports it, Start turns it into "the guest came back from
+// RAM", and reassertSleep decides from it whether a sleeping VM still has a
+// snapshot to come back from — so a denied read collapsed to "no snapshot" is a
+// VM told it will cold-boot while its snapshot sits on disk, and a Start told
+// there was nothing to restore.
 func (manager *Manager) memorySnapshotMarkerPresent(
 	ctx context.Context, commands commands, files virtualMachineFiles,
-) bool {
-	return commands.OK(ctx, "sudo test -f {}", files.memorySnapshotMarker)
+) (bool, error) {
+	present, err := hostHas(ctx, commands, "sudo test -f {}", files.memorySnapshotMarker)
+	if err != nil {
+		return false, fmt.Errorf("looking for the memory snapshot marker %s: %w", files.memorySnapshotMarker, err)
+	}
+	return present, nil
 }

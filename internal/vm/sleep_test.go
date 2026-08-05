@@ -381,6 +381,74 @@ func TestSleepingAnAlreadySleepingVirtualMachineReportsAColdWake(t *testing.T) {
 	assertNotIssued(t, fake, commands.memorySize)
 }
 
+// The same replay, reached the way a broken host actually reaches it, and the
+// cascade that made this verb destructive.
+//
+// The idempotency gate above is a `sudo test -f` against a marker in a 0700
+// root-owned tree. Asked as a bool, a host that would not run that command
+// answers indistinguishably from a host with no marker — so a VM that IS asleep
+// walks the fresh-sleep path, whose first act is `rm -rf` over the snapshot
+// directory it is about to rewrite. The PATCH to the socket then fails (the
+// Firecracker that bound it is long gone), the fallback removes the READY marker
+// for good measure, and the verb returns Success with the VM's memory image
+// deleted. A replay is the DESIGNED recovery from a crash mid-sleep, so this is
+// not a corner: it is the path §11.5 sends every interrupted sleep down.
+//
+// Nothing may be destroyed on the strength of a question that was not answered.
+func TestSleepDestroysNothingWhenItCouldNotReadTheSleepingMarker(t *testing.T) {
+	commands := sleepCommands()
+	fake := newFakeCommands()
+	fake.reply(commands.sleepingMarkerSet, true)
+	fake.deny(commands.sleepingMarkerSet)
+	aHostWithRoom(fake, commands)
+
+	_, err := newTestManager(fake).Sleep(
+		context.Background(), nil, testUUID, SleepRequest{FirecrackerUID: testFirecrackerUID},
+	)
+
+	if err == nil {
+		t.Fatal("Sleep succeeded over a marker it could not read")
+	}
+	assertNotIssued(t, fake, commands.dropSnapshot)
+	assertNotIssued(t, fake, commands.removeMarker)
+	assertNotIssued(t, fake, commands.stop)
+	assertNotIssued(t, fake, commands.markSleeping)
+}
+
+// The preflight's two reasons are REPORTED — they ride out in SleepResult.Reason
+// and one of them tells an operator to re-provision the VM — so a read this
+// daemon was not allowed to make must not be dressed up as a diagnosis of the
+// launcher or of the guest. It fails instead, with the VM left running.
+func TestSleepReportsAPreflightItCouldNotRunRatherThanAReasonToColdBoot(t *testing.T) {
+	for name, denied := range map[string]func(sleepCommandSet) string{
+		"the launcher": func(commands sleepCommandSet) string { return commands.launcher },
+		"the socket":   func(commands sleepCommandSet) string { return commands.socket },
+	} {
+		t.Run(name, func(t *testing.T) {
+			commands := sleepCommands()
+			fake := newFakeCommands()
+			anAwakeVirtualMachine(fake, commands)
+			aHostWithRoom(fake, commands)
+			fake.deny(denied(commands))
+
+			result, err := newTestManager(fake).Sleep(
+				context.Background(), nil, testUUID, SleepRequest{FirecrackerUID: testFirecrackerUID},
+			)
+
+			if err == nil {
+				t.Fatalf("Sleep succeeded over a preflight it could not run, reporting %q", result.Reason)
+			}
+			if result.Reason != "" {
+				t.Errorf("reason = %q, want none: nothing was diagnosed", result.Reason)
+			}
+			// Left running and untouched: the fallback would otherwise have stopped
+			// the VM and marked it sleeping on the strength of an answer nobody gave.
+			assertNotIssued(t, fake, commands.stop)
+			assertNotIssued(t, fake, commands.markSleeping)
+		})
+	}
+}
+
 // A replay whose park fails is still a failure. The VM is asleep and untrapped
 // either way, and reporting Success would close the one operation that could
 // still fix it.

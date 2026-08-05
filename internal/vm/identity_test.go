@@ -107,6 +107,35 @@ func TestRebuildGeneratesHostKeysForADiskThatHasNone(t *testing.T) {
 	}
 }
 
+// The self-heal above is a DESTRUCTIVE default, and this is the guard on it.
+//
+// Its negative branch deletes the disk's host keys and generates a new pair, so
+// a `test -f` this daemon was not allowed to run — read as a bool, that is
+// indistinguishable from a disk with no keys — rotates an SSH identity nobody
+// asked to rotate. Every client's known_hosts then breaks at once, which is what
+// a man-in-the-middle looks like, and the keys the rebuild deleted are not coming
+// back. Only a proven absence is a keyless disk; anything else fails the rebuild
+// with the mounted filesystem's /etc/ssh untouched.
+func TestRebuildDoesNotRotateHostKeysItCouldNotLookFor(t *testing.T) {
+	fake := newFakeCommands()
+	aRebuiltHost(fake)
+	fake.deny("sudo test -f " + testMountPoint + "/etc/ssh/ssh_host_ed25519_key")
+	request := RebuildRequest{
+		Image: testImage, DiskGB: 40, FirecrackerUID: testFirecrackerUID, Identity: testIdentity,
+	}
+
+	err := newTestManager(fake).Rebuild(context.Background(), nil, testUUID, request)
+
+	if err == nil {
+		t.Fatal("Rebuild succeeded over a host key probe it could not make")
+	}
+	for _, line := range fake.trace {
+		if strings.Contains(line, "ssh-keygen") || strings.Contains(line, "rm -f") {
+			t.Errorf("the rebuild touched the VM's SSH identity anyway: %s", line)
+		}
+	}
+}
+
 // A restored rootfs may already carry the data-disk line, and a duplicate fstab
 // entry is its own failure — so the line is appended only when it is absent.
 func TestRebuildDoesNotDuplicateTheDataDiskMount(t *testing.T) {

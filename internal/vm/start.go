@@ -2,6 +2,7 @@ package vm
 
 import (
 	"context"
+	"errors"
 
 	"github.com/frappe/boat/internal/run"
 )
@@ -22,12 +23,12 @@ import (
 func (manager *Manager) Start(ctx context.Context, runner *run.Runner, uuid string) (bool, error) {
 	commands := manager.commandsFor(runner)
 	files := manager.filesFor(uuid)
-	restoring := manager.memorySnapshotMarkerPresent(ctx, commands, files)
+	restoring, err := manager.memorySnapshotMarkerPresent(ctx, commands, files)
+	if err != nil {
+		return false, err
+	}
 	if _, err := commands.Run(ctx, "sudo systemctl start {}", files.unit); err != nil {
-		if !manager.restoreFailed(ctx, commands, files, restoring) {
-			return false, err
-		}
-		if err := manager.startAgainAfterFailedRestore(ctx, commands, files); err != nil {
+		if err := manager.retryIfRestoreFailed(ctx, commands, files, restoring, err); err != nil {
 			return false, err
 		}
 		restoring = false
@@ -38,15 +39,35 @@ func (manager *Manager) Start(ctx context.Context, runner *run.Runner, uuid stri
 	return restoring, nil
 }
 
-// restoreFailed reports the one start failure that must not be handed back to
-// the caller: the marker was present before the start and is gone after it.
-// Only a restore attempt consumes the marker, so that pair is the signature of
-// a restore that failed, as distinct from a boot that failed on its own merits.
-// Any other failure is a real failure and is reported as one.
-func (manager *Manager) restoreFailed(
-	ctx context.Context, commands commands, files virtualMachineFiles, restoring bool,
-) bool {
-	return restoring && !manager.memorySnapshotMarkerPresent(ctx, commands, files)
+// retryIfRestoreFailed handles the one start failure that must not be handed
+// back to the caller — the marker was present before the start and is gone after
+// it — and returns startError unchanged for every other one.
+//
+// Only a restore attempt consumes the marker, so that pair is the signature of a
+// restore that failed, as distinct from a boot that failed on its own merits.
+//
+// The second read is a probe rather than a gate because it runs against the same
+// jail the start just failed in: a marker this daemon could not READ collapsed to
+// "gone" would send a plain boot failure down the retry path, and collapsed the
+// other way would leave the operation Failed while Restart=always brings the VM
+// up five seconds later behind the controller's back. Neither is a guess worth
+// making, so a probe that could not be made is joined to the start's own failure
+// and both are reported.
+func (manager *Manager) retryIfRestoreFailed(
+	ctx context.Context, commands commands, files virtualMachineFiles,
+	restoring bool, startError error,
+) error {
+	if !restoring {
+		return startError
+	}
+	present, err := manager.memorySnapshotMarkerPresent(ctx, commands, files)
+	if err != nil {
+		return errors.Join(startError, err)
+	}
+	if present {
+		return startError
+	}
+	return manager.startAgainAfterFailedRestore(ctx, commands, files)
 }
 
 // startAgainAfterFailedRestore cancels the relaunch that Restart=always has

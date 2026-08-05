@@ -53,7 +53,15 @@ func (manager *Manager) setGuestState(
 ) error {
 	commands := manager.commandsFor(runner)
 	files := manager.filesFor(uuid)
-	if !commands.OK(ctx, "sudo test -S {}", files.apiSocket) {
+	// Probed: this check's whole value is the sentence it produces, and "not
+	// present; is the VM running?" is a diagnosis of the VM. A read this daemon was
+	// not allowed to make is a diagnosis of the host, and sending an operator to
+	// look at a healthy guest is the cost of confusing the two.
+	present, err := hostHas(ctx, commands, "sudo test -S {}", files.apiSocket)
+	if err != nil {
+		return err
+	}
+	if !present {
 		return fmt.Errorf("API socket %s not present; is the VM running?", files.apiSocket)
 	}
 	return commands.FirecrackerAPI(

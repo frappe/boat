@@ -112,6 +112,64 @@ func TestStopGivesUpOnAGuestThatNeverHalts(t *testing.T) {
 	}
 }
 
+// Only a PROVEN missing socket skips the guest's chance to sync.
+//
+// The whole graceful half of a stop is best-effort, which is exactly why the
+// collapse is not free here: a probe read as "no socket" costs a guest its
+// filesystem sync and then SIGKILLs its cgroup, and nothing about that is loud.
+// A socket this daemon could not look at is asked anyway — the API call is itself
+// tolerant, so the cost of being wrong that way is one refused connection.
+func TestStopStillAsksTheGuestWhenItCouldNotLookAtTheSocket(t *testing.T) {
+	commands := stopCommands()
+	fake := newFakeCommands()
+	fake.deny(commands.socket)
+	fake.reply(commands.poll, false)
+	noLeftoverClones(fake, commands)
+
+	if err := newTestManager(fake).Stop(
+		context.Background(), nil, testUUID, StopRequest{},
+	); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	assertTrace(t, fake,
+		"? "+commands.socket,
+		commands.powerOff,
+		"? "+commands.poll,
+		commands.stop,
+		"? "+commands.rootClone,
+		"? "+commands.dataClone,
+	)
+}
+
+// The drain's poll waits for a PROVEN inactive unit, and nothing else ends it
+// early.
+//
+// `is-active --quiet` prints nothing and exits non-zero for a unit that is down,
+// which is the answer this loop is waiting for. A poll that could not be RUN is
+// not that, and reading it as "the guest finished" cuts the drain from thirty
+// seconds to none — a hard stop of a guest that was still syncing, on the first
+// tick, silently. The deadline bounds the wait either way, so an unaskable host
+// costs exactly what a wedged guest costs and no data.
+func TestStopDoesNotCutTheDrainShortOnAPollItCouldNotRun(t *testing.T) {
+	commands := stopCommands()
+	fake := newFakeCommands()
+	fake.reply(commands.socket, true)
+	fake.deny(commands.poll)
+	noLeftoverClones(fake, commands)
+
+	if err := newTestManager(fake).Stop(
+		context.Background(), nil, testUUID, StopRequest{},
+	); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	polls := countTrace(fake, "? "+commands.poll)
+	wantPolls := int(gracefulShutdownTimeout / gracefulPollInterval)
+	if polls != wantPolls {
+		t.Errorf("polled %d times, want the full %d: an unanswerable poll is not a halted guest",
+			polls, wantPolls)
+	}
+}
+
 // A refused power-off is a declined courtesy, not a failed stop.
 func TestStopContinuesWhenTheGuestRefusesThePowerOff(t *testing.T) {
 	commands := stopCommands()
