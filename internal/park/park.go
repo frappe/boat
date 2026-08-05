@@ -50,8 +50,15 @@
 // testable with no host, no nft and no root. That is the division
 // scripts/lib/atlas/park.py drew, kept for the same reason.
 //
-// Ported from scripts/lib/atlas/park.py and scripts/atlas-wake-trap.py; the
-// chapter is spec/32-sleepy-vms.md.
+// The two read-only questions the controller asks a host once a minute about the
+// same feature — is this Running VM idle enough to sleep, and has this Sleeping
+// one already been woken — live here too, in poll.go. They read the state this
+// package installs, so a second package for them would be a second reader of one
+// host fact.
+//
+// Ported from scripts/lib/atlas/park.py, scripts/atlas-wake-trap.py,
+// scripts/poll-vm-traffic.py and scripts/probe-woken-vms.py; the chapter is
+// spec/32-sleepy-vms.md.
 package park
 
 import (
@@ -103,6 +110,9 @@ var _ commands = (*run.Runner)(nil)
 type virtualMachineFiles struct {
 	sleepingMarker     string
 	networkEnvironment string
+	// trafficCounter is the last-seen nft byte total the idle poll compares
+	// against. It is host-local and ephemeral by design — see poll.go.
+	trafficCounter string
 }
 
 func filesFor(uuid string) virtualMachineFiles {
@@ -110,6 +120,7 @@ func filesFor(uuid string) virtualMachineFiles {
 	return virtualMachineFiles{
 		sleepingMarker:     virtualMachine.SleepingMarker(),
 		networkEnvironment: virtualMachine.NetworkEnvironment(),
+		trafficCounter:     virtualMachine.TrafficCounterFile(),
 	}
 }
 

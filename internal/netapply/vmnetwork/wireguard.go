@@ -82,6 +82,23 @@ func parseTunnelConfig(text string) (tunnelConfig, error) {
 	}, nil
 }
 
+// environmentText renders the <tunnel>.env sidecar — the exact inverse of
+// parseTunnelConfig, and the port of TunnelConfig.to_env_text. The PRIVATE KEY is
+// named by path and never written here: the metadata sidecar stays 0644 while the
+// secret keeps its own 0600 file, which is what lets `wg set private-key <path>`
+// keep the key off every command line.
+func (config tunnelConfig) environmentText() string {
+	return strings.Join([]string{
+		"INTERFACE=" + config.interfaceName,
+		"LISTEN_PORT=" + strconv.Itoa(config.listenPort),
+		"PRIVATE_KEY_FILE=" + config.privateKeyPath,
+		"CLIENT_PUBLIC_KEY=" + config.clientPublicKey,
+		"CLIENT_ADDRESS=" + config.clientAddress,
+		"HOST_ADDRESS=" + config.hostAddress,
+		"VIRTUAL_MACHINE_IPV6=" + config.virtualMachine,
+	}, "\n") + "\n"
+}
+
 // applyPersistedTunnels re-applies every tunnel under the VM's tunnels/ directory
 // at bring-up, in sorted order (matching the Python's sorted(os.listdir)). No
 // directory (a VM with no tunnels) is a no-op.
@@ -175,6 +192,34 @@ func applyTunnel(ctx context.Context, commands commands, config tunnelConfig) er
 		}
 	}
 	return nil
+}
+
+// removeTunnel tears one tunnel down, best-effort and idempotent: this
+// interface's rules are deleted by handle in BOTH chains, then the interface
+// itself goes (which takes its addresses and its connected /127 route with it).
+//
+// Both chains, and that is not symmetry for its own sake: the forward rules
+// govern TRANSIT and the input rule governs traffic addressed to the HOST, so
+// leaving the input drop behind would keep a host-local block alive for an
+// interface name a later tunnel can be handed again.
+//
+// A missing rule, chain or interface is not an error — a revoke may run after the
+// VM is already gone, symmetric with the teardown hook. Ported from
+// wireguard.py's remove_tunnel.
+func removeTunnel(ctx context.Context, commands commands, interfaceName string) error {
+	for _, chain := range []string{forwardChain, inputChain} {
+		listing, err := commands.RunUnchecked(ctx, "sudo nft -a list chain inet atlas {}", chain)
+		if err != nil {
+			return err
+		}
+		for _, handle := range handlesFor(listing, interfaceName) {
+			if _, err := commands.RunUnchecked(ctx, "sudo nft delete rule inet atlas {} handle {}", chain, handle); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := commands.RunUnchecked(ctx, "sudo ip link del {}", interfaceName)
+	return err
 }
 
 // ensureChain creates a base chain on demand, guarded — the forward chain is the

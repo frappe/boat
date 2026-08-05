@@ -7,7 +7,9 @@ import (
 	"github.com/frappe/boat/internal/cert"
 	"github.com/frappe/boat/internal/hostkeys"
 	"github.com/frappe/boat/internal/mgmtfirewall"
+	"github.com/frappe/boat/internal/migration"
 	"github.com/frappe/boat/internal/netapply/vmnetwork"
+	"github.com/frappe/boat/internal/park"
 	"github.com/frappe/boat/internal/reset"
 	"github.com/frappe/boat/internal/run"
 )
@@ -139,6 +141,84 @@ func resetServer(arguments []string, errorOutput io.Writer) int {
 		return reportError(errorOutput, err)
 	}
 	return exitSuccess
+}
+
+// pollVMTraffic answers whether each of this host's idle-eligible VMs has moved
+// any traffic since the last poll — `boat poll-vm-traffic`, the port of
+// poll-vm-traffic.py.
+//
+// The delta is computed here rather than by the controller, so Atlas only ever
+// sees a bool: the raw byte totals are host-local and ephemeral, and a counter in
+// the database would be a number nobody could trust across a chain flush.
+func pollVMTraffic(arguments []string, output io.Writer, errorOutput io.Writer) int {
+	flags := newTaskFlags("poll-vm-traffic", errorOutput)
+	virtualMachinesJSON := flags.requiredText("vms-json")
+	if err := flags.parse(arguments); err != nil {
+		return reportError(errorOutput, err)
+	}
+	targets, err := park.ParseTrafficTargets(*virtualMachinesJSON)
+	if err != nil {
+		return reportError(errorOutput, err)
+	}
+	active, err := park.PollTraffic(context.Background(), run.NewRunner(errorOutput), targets)
+	if err != nil {
+		return reportError(errorOutput, err)
+	}
+	return emit(output, errorOutput, map[string]any{"counters": trafficCounters(active)})
+}
+
+// probeWokenVMs answers which of the given Sleeping VMs this host has already
+// woken — `boat probe-woken-vms`, the port of probe-woken-vms.py. Read-only: it
+// changes nothing, and the host is simply the authority for a wake having
+// happened, because only it saw the packet.
+func probeWokenVMs(arguments []string, output io.Writer, errorOutput io.Writer) int {
+	flags := newTaskFlags("probe-woken-vms", errorOutput)
+	virtualMachinesJSON := flags.requiredText("vms-json")
+	if err := flags.parse(arguments); err != nil {
+		return reportError(errorOutput, err)
+	}
+	uuids, err := park.ParseUUIDs(*virtualMachinesJSON)
+	if err != nil {
+		return reportError(errorOutput, err)
+	}
+	woken, err := park.Woken(context.Background(), run.NewRunner(errorOutput), uuids)
+	if err != nil {
+		return reportError(errorOutput, err)
+	}
+	return emit(output, errorOutput, map[string]any{"woken": woken})
+}
+
+// exportCleanupSource stops a base-image export's NBD servers and drops its
+// staged tar — `boat export-cleanup-source`, the port of
+// export-cleanup-source.py. No result line, as the Python has none.
+func exportCleanupSource(arguments []string, errorOutput io.Writer) int {
+	flags := newTaskFlags("export-cleanup-source", errorOutput)
+	imageName := flags.requiredText("image-name")
+	port := flags.number("nbd-port", 0)
+	if err := flags.parse(arguments); err != nil {
+		return reportError(errorOutput, err)
+	}
+	err := migration.ExportCleanupSource(
+		context.Background(), run.NewRunner(errorOutput),
+		migration.ExportCleanupSourceParams{ImageName: *imageName, NBDPort: *port},
+	)
+	if err != nil {
+		return reportError(errorOutput, err)
+	}
+	return exitSuccess
+}
+
+// trafficCounters renders the poll's answer as the nested shape the controller's
+// result field holds: {"<uuid>": {"active": bool}}. The nesting is the Python's
+// and is kept even though there is one key today, because `cls(**payload)` reads
+// the whole dict — a flattened bool would reach the controller as a TypeError on
+// the first VM.
+func trafficCounters(active map[string]bool) map[string]map[string]bool {
+	counters := map[string]map[string]bool{}
+	for uuid, moved := range active {
+		counters[uuid] = map[string]bool{"active": moved}
+	}
+	return counters
 }
 
 // ports keeps an empty list out of the result as `[]` rather than `null`: the

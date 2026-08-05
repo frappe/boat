@@ -58,6 +58,9 @@ result (--help on any of them lists its flags):
   boat sync-image | promote-snapshot-image
   boat regenerate-host-keys-vm | issue-cert | reset-server
   boat mgmt-firewall-apply | mgmt-firewall-confirm | mgmt-firewall-revert
+  boat firewall-apply | vm-tunnel
+  boat poll-vm-traffic | probe-woken-vms
+  boat export-cleanup-source
 
 The six verbs on one line take a UUID and nothing else: their arguments are the
 desired state Atlas already asserted, which the host reads for itself. A resize
@@ -128,6 +131,16 @@ func dispatch(arguments []string, output io.Writer, errorOutput io.Writer) int {
 		return promoteSnapshotImage(arguments[1:], output, errorOutput)
 	case "regenerate-host-keys-vm":
 		return regenerateHostKeysVM(arguments[1:], errorOutput)
+	case "firewall-apply":
+		return firewallApply(arguments[1:], errorOutput)
+	case "vm-tunnel":
+		return vmTunnel(arguments[1:], output, errorOutput)
+	case "poll-vm-traffic":
+		return pollVMTraffic(arguments[1:], output, errorOutput)
+	case "probe-woken-vms":
+		return probeWokenVMs(arguments[1:], output, errorOutput)
+	case "export-cleanup-source":
+		return exportCleanupSource(arguments[1:], errorOutput)
 	case "issue-cert":
 		return issueCert(arguments[1:], output, errorOutput)
 	case "mgmt-firewall-apply", "mgmt-firewall-confirm", "mgmt-firewall-revert":

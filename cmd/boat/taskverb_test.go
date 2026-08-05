@@ -68,6 +68,29 @@ func TestEveryTaskVerbTakesThePythonsFlags(t *testing.T) {
 		"mgmt-firewall-revert":  {},
 		// scripts/reset-server.py takes no inputs at all
 		"reset-server": {},
+		// scripts/bootstrap-server.py — the BootstrapInputs dataclass. Both flags
+		// DEFAULT here where the Python required them, because `boat bootstrap` is
+		// also the by-hand command that brings a bare host up, and an operator
+		// standing on the box should not have to name its own architecture to use
+		// it. Atlas sends both regardless (SCRIPT_FORMS["bootstrap-server"]), so
+		// the Task's command line is unchanged by the defaults.
+		"bootstrap": {"firecracker-version", "architecture"},
+		// scripts/firewall-apply.py. --rule is repeatable and absent on a
+		// deny-all-public firewall, which is a configuration rather than an omission.
+		"firewall-apply": {"virtual-machine-name", "action", "rule"},
+		// scripts/vm-tunnel.py — everything below --action is up-only, and a down is
+		// dispatched with none of it.
+		"vm-tunnel": {
+			"tunnel-name", "virtual-machine-name", "interface", "action",
+			"listen-port", "client-public-key", "client-address", "host-address",
+		},
+		// scripts/poll-vm-traffic.py and scripts/probe-woken-vms.py. Both take the
+		// whole VM list as ONE json argument, and the two documents differ: the poll
+		// takes objects carrying an address, the probe takes bare UUIDs.
+		"poll-vm-traffic": {"vms-json"},
+		"probe-woken-vms": {"vms-json"},
+		// scripts/export-cleanup-source.py
+		"export-cleanup-source": {"image-name", "nbd-port"},
 	}
 
 	for verb, flags := range verbs {

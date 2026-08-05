@@ -43,6 +43,12 @@ func parseFirewallRule(token string) (firewallRule, error) {
 	return firewallRule{protocol: protocol, port: number}, nil
 }
 
+// token is the rule as the sidecar and the controller spell it, `tcp/443` — the
+// exact inverse of parseFirewallRule.
+func (rule firewallRule) token() string {
+	return rule.protocol + "/" + strconv.Itoa(rule.port)
+}
+
 // firewallConfig is one VM's durable firewall — its /128 and the allowed rules.
 // An empty rule set is meaningful: deny all public ingress (reachable only over a
 // tunnel).
@@ -65,6 +71,20 @@ func parseFirewallConfig(text string) (firewallConfig, error) {
 		config.rules = append(config.rules, rule)
 	}
 	return config, nil
+}
+
+// environmentText renders the firewall.env sidecar — the exact inverse of
+// parseFirewallConfig, and the port of FirewallConfig.to_env_text. Bare values,
+// like provision's network.env. RULES is rendered from the PARSED rules rather
+// than from the tokens the controller sent, so what lands on disk is what this
+// host understood; an empty RULES= is a deny-all-public firewall, not an absent
+// one, and the absent case is the file not existing at all.
+func (config firewallConfig) environmentText() string {
+	tokens := make([]string, 0, len(config.rules))
+	for _, rule := range config.rules {
+		tokens = append(tokens, rule.token())
+	}
+	return "VIRTUAL_MACHINE_IPV6=" + config.virtualMachine + "\nRULES=" + strings.Join(tokens, " ") + "\n"
 }
 
 // applyPersistedFirewall re-applies a VM's firewall from its sidecar at cold boot,
