@@ -29,6 +29,12 @@ import (
 	"time"
 )
 
+// waitDelay bounds how long a cancelled command's output pipes stay open after
+// the process is killed. Two seconds is long enough that an ordinary command
+// finishing normally is never cut short, and short enough that a shutdown is
+// not held up by an orphan.
+const waitDelay = 2 * time.Second
+
 // CommandError is a command that exited non-zero. It carries the argv, the
 // code and both streams, so the operation record shows exactly what failed —
 // the equivalent of `bash -x` stopping at the failing line.
@@ -209,6 +215,16 @@ func execute(ctx context.Context, argv []string, stdin string) (outcome, error) 
 	var standardOutput, standardError strings.Builder
 	command.Stdout, command.Stderr = &standardOutput, &standardError
 	command.Stdin = strings.NewReader(stdin)
+	// Killing the child does not necessarily end the wait. Stdout here is a
+	// Builder rather than a file, so exec hands the command a pipe and copies
+	// from it in a goroutine — and that goroutine returns only when EVERY writer
+	// closes the pipe. A grandchild that outlived its parent still holds it, so
+	// `sh -c 'sleep 30'` cancelled after 50ms returned in 30 seconds on Ubuntu
+	// while passing on the developer's machine, where that shell had exec'd the
+	// sleep instead of forking it. WaitDelay bounds it: the pipes close and Wait
+	// returns, which is what stops a shutting-down daemon hanging on whatever a
+	// host verb happened to leave behind.
+	command.WaitDelay = waitDelay
 	err := command.Run()
 	result := outcome{standardOutput: standardOutput.String(), standardError: standardError.String()}
 	return classify(ctx, result, err)
