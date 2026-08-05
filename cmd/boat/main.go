@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/frappe/boat/internal/version"
 )
@@ -41,8 +42,19 @@ usage:
   boat networkd
   boat image-import <name> <rootfs-file> <disk-gb>
   boat vm-create-disk <uuid> <image-name>
+  boat vm-restore <uuid>
   boat metrics
   boat version
+
+The Task verbs Atlas drives over SSH, each taking the flags its Python
+predecessor took and printing one ATLAS_RESULT= line where that verb had a
+result (--help on any of them lists its flags):
+
+  boat snapshot-vm | snapshot-stop-vm | warm-snapshot-vm | delete-snapshot-vm
+  boat upload-snapshot-s3 | restore-snapshot-s3
+  boat sync-image | promote-snapshot-image
+  boat regenerate-host-keys-vm | issue-cert | reset-server
+  boat mgmt-firewall-apply | mgmt-firewall-confirm | mgmt-firewall-revert
 
 The six verbs on one line take a UUID and nothing else: their arguments are the
 desired state Atlas already asserted, which the host reads for itself. A resize
@@ -88,6 +100,37 @@ func dispatch(arguments []string, output io.Writer, errorOutput io.Writer) int {
 		return vmCreateDisk(arguments[1:], errorOutput)
 	case "metrics":
 		return metricsCommand(arguments[1:], output, errorOutput)
+	// The Task verbs Atlas drives over SSH (WO-6). Kebab-named and flag-shaped
+	// to match the Python they replace, because the controller renders the same
+	// command line either way — see taskverb.go.
+	case "snapshot-vm":
+		return snapshotVM(arguments[1:], output, errorOutput)
+	case "snapshot-stop-vm":
+		return snapshotStopVM(arguments[1:], output, errorOutput)
+	case "warm-snapshot-vm":
+		return warmSnapshotVM(arguments[1:], output, errorOutput)
+	case "delete-snapshot-vm":
+		return deleteSnapshotVM(arguments[1:], errorOutput)
+	case "vm-restore":
+		return vmRestore(arguments[1:], errorOutput)
+	case "upload-snapshot-s3":
+		return uploadSnapshotS3(arguments[1:], output, errorOutput)
+	case "restore-snapshot-s3":
+		return restoreSnapshotS3(arguments[1:], output, errorOutput)
+	case "sync-image":
+		return syncImage(arguments[1:], errorOutput)
+	case "promote-snapshot-image":
+		return promoteSnapshotImage(arguments[1:], output, errorOutput)
+	case "regenerate-host-keys-vm":
+		return regenerateHostKeysVM(arguments[1:], errorOutput)
+	case "issue-cert":
+		return issueCert(arguments[1:], output, errorOutput)
+	case "mgmt-firewall-apply", "mgmt-firewall-confirm", "mgmt-firewall-revert":
+		return managementFirewall(
+			strings.TrimPrefix(arguments[0], "mgmt-firewall-"), arguments[1:], output, errorOutput,
+		)
+	case "reset-server":
+		return resetServer(arguments[1:], errorOutput)
 	case "update-apply":
 		// The detached half of a self-update, spawned by POST /v1/update into its
 		// own cgroup so the daemon restart cannot SIGTERM it mid-swap (see update.go).
