@@ -17,6 +17,23 @@ import (
 // and they are the reason this table is worth its length.
 func TestEveryTaskVerbTakesThePythonsFlags(t *testing.T) {
 	verbs := map[string][]string{
+		// scripts/provision-vm.py — the whole ProvisionInputs dataclass, and the
+		// longest argument surface Atlas renders. The DERIVED block (mac-address
+		// through namespace-veth) is required for a reason worth restating here: each
+		// is a controller-allocated value, and a defaulted one mis-wires the jail or
+		// the network rather than failing.
+		"provision-vm": {
+			"virtual-machine-name", "image-name", "kernel-filename", "rootfs-filename",
+			"vcpus", "memory-mb", "disk-gb", "ssh-public-key",
+			"mac-address", "tap-device", "virtual-machine-ipv6",
+			"ipv4-host-cidr", "ipv4-guest-cidr", "ipv4-gateway",
+			"atlas-fc-uid", "atlas-netns", "host-veth", "namespace-veth",
+			"cgroup-arg", "resource-arg", "snapshot-rootfs-path", "routing-base-url",
+			"reserved-ipv4", "private-address", "tenant-prefix",
+			"data-disk-gb", "data-disk-format", "data-disk-mount-at",
+			"data-snapshot-rootfs-path", "preserve-host-keys",
+			"clone-rootfs-device", "warm-snapshot-directory",
+		},
 		// scripts/snapshot-vm.py
 		"snapshot-vm": {"virtual-machine-name", "snapshot-rootfs-path", "data-snapshot-rootfs-path"},
 		// scripts/snapshot-stop-vm.py

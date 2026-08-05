@@ -52,6 +52,7 @@ The Task verbs Atlas drives over SSH, each taking the flags its Python
 predecessor took and printing one ATLAS_RESULT= line where that verb had a
 result (--help on any of them lists its flags):
 
+  boat provision-vm
   boat snapshot-vm | snapshot-stop-vm | warm-snapshot-vm | delete-snapshot-vm
   boat upload-snapshot-s3 | restore-snapshot-s3
   boat sync-image | promote-snapshot-image
@@ -105,6 +106,8 @@ func dispatch(arguments []string, output io.Writer, errorOutput io.Writer) int {
 	// The Task verbs Atlas drives over SSH (WO-6). Kebab-named and flag-shaped
 	// to match the Python they replace, because the controller renders the same
 	// command line either way — see taskverb.go.
+	case "provision-vm":
+		return provisionVM(arguments[1:], output, errorOutput)
 	case "snapshot-vm":
 		return snapshotVM(arguments[1:], output, errorOutput)
 	case "snapshot-stop-vm":
