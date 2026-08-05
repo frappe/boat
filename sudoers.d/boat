@@ -210,7 +210,6 @@ Cmnd_Alias BOAT_ADOPTION = \
     /usr/bin/ls -1 /var/lib/atlas/virtual-machines, \
     /usr/bin/cat /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/network.env, \
     /usr/sbin/vgs --noheadings -o vg_name, \
-    /usr/sbin/vgs --noheadings -o vg_name atlas, \
     /usr/sbin/lvs --noheadings --nosuffix --units b --separator \, -o lv_name\,lv_size\,pool_lv\,origin atlas, \
     /usr/sbin/ip -n * -o link show *, \
     /usr/sbin/ip -n * -o link show
@@ -831,6 +830,7 @@ Cmnd_Alias BOAT_MIGRATION_LVM = \
 # templates; render one and check it with `sudo -u boat sudo -n -l <command>`
 # before dogfooding, exactly as the networkd and Firecracker-API blocks demand.
 Cmnd_Alias BOAT_MIGRATION_DEVICE_MAPPER = \
+    /usr/bin/test -b /dev/atlas/atlas-vm-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f], \
     /usr/sbin/dmsetup info atlas-base-*-clone, \
     /usr/sbin/dmsetup remove atlas-base-*-clone, \
     /usr/sbin/dmsetup table atlas-vm-*-clone, \
@@ -914,6 +914,90 @@ Cmnd_Alias BOAT_MIGRATION_FORWARD = \
     /usr/sbin/nft add rule inet atlas forward ip6 daddr * oifname mig6-* accept, \
     /usr/sbin/nft add rule inet atlas forward ip6 saddr * iifname mig6-* accept
 
+# --- Sibling units: the host's own services, one line per unit per action ---
+# Boat supervises the units that are NOT VMs: the thin pool a VM's disk lives
+# in, the network control plane, the wake trap, the fail-closed management
+# firewall. internal/units holds the same four names as a closed literal list
+# and refuses anything else before a command is rendered; this is the second
+# line, and it is what holds if the first is wrong.
+#
+# EVERY NAME IS FULLY LITERAL. There is no `*` anywhere in this block, and that
+# is not fussiness — `systemctl restart *.service` is root, and so is
+# `systemctl start atlas-pool.service <anything>.service`, because a `*` in a
+# sudoers ARGUMENT matches spaces and sudo joins the user's arguments into one
+# string before matching. The per-VM instances are excluded by construction: a
+# UUID cannot be spelled with these four literals.
+#
+# There is no `stop` and no `reset-failed`, and both absences are deliberate.
+# A stop is the one verb here with teeth and no driver behind it: stopping
+# atlas-wake-trap.service strands every sleeping VM on the host with nothing
+# left watching its counter, and nothing in the reconciler would ever notice,
+# because the reconciler reconciles VMs and not units. `reset-failed` would let
+# the daemon clear a unit's own StartLimitBurst, and a rate limit the
+# rate-limited thing can reset is not one. An operator who genuinely needs
+# either has SSH break-glass (spec/33-boat.md §12).
+#
+# The liveness READ needs no grant at all. `systemctl show --property=...` is a
+# property read over the system bus that the unprivileged service user can
+# make — checked as `sudo -u boat systemctl show ...` on a real host, not
+# assumed — so the endpoint Atlas polls for every host in the fleet reaches
+# nothing that needs root.
+#
+# This block spent a week in llm/wo-3a-sudoers-grants.txt while internal/units,
+# the README and spec/33 all said it was pinned here. The endpoint failed loudly
+# with a 500 rather than lying, so it was dead on arrival instead of wrong — and
+# internal/allowlist is what found it, by asking the two files about each other.
+Cmnd_Alias BOAT_SIBLING_UNITS = \
+    /usr/bin/systemctl start atlas-pool.service, \
+    /usr/bin/systemctl restart atlas-pool.service, \
+    /usr/bin/systemctl start atlas-networkd.service, \
+    /usr/bin/systemctl restart atlas-networkd.service, \
+    /usr/bin/systemctl start atlas-wake-trap.service, \
+    /usr/bin/systemctl restart atlas-wake-trap.service, \
+    /usr/bin/systemctl start atlas-mgmt-firewall.service, \
+    /usr/bin/systemctl restart atlas-mgmt-firewall.service
+
+# --- Reserved-IP egress: the policy route a DO anchor's guest replies through -
+# Attach and detach both run in the daemon (the API's reserved-ip verb reaches
+# internal/vm, which calls reservedip.Attach as a field value), so these need
+# grants even though the sibling bring-up hook does not.
+#
+# The table is the literal 100 — reservedip's `egressTableID`, a constant and
+# not a parameter — which is what keeps this alias off every other routing
+# table on the host. The address fields are `*` for the reason the migration
+# forward block gives: a canonical IPv4 has no fnmatch shape, and the rule form
+# here mirrors the `ip -6 rule` lines already in that block.
+#
+# `ip -4 rule show` reads; it is granted because the code reads it to decide
+# whether the rule is already there, and a denied read there would add a second
+# copy of the rule on every attach.
+Cmnd_Alias BOAT_RESERVED_IP_EGRESS = \
+    /usr/sbin/ip -4 route replace default via * dev * table 100, \
+    /usr/sbin/ip -4 rule show, \
+    /usr/sbin/ip -4 rule add from * lookup 100, \
+    /usr/sbin/ip -4 rule del from * lookup 100
+
+# --- Per-VM network teardown, as the DAEMON reaches it ----------------------
+# `boat vm-network-down` runs from the firecracker-vm@ hook as root, where sudo
+# consults nothing. But a migration's cleanup phase calls vmnetwork.Down through
+# the API — one function of that package, reached from `executeMigrationPhase` —
+# and there the boat user needs these four. The bring-up half is deliberately
+# NOT here: the daemon never builds a VM network, and granting the netns, veth
+# and tap creation so that one teardown could run is how an allow-list grows to
+# fit the imports instead of the caller.
+#
+# Both names are spelled out from the UUID they derive from (Atlas's
+# derive_netns is `atlas-` + 12 hex; derive_veth_pair is `atlas-h` + 7 hex), so
+# neither field can match a space and grow the command a second operand. That
+# matters most for `ip netns del`, which the header names as one of the four
+# shapes where a trailing `*` does no work at all: it destroys, and there is no
+# literal after it to pin.
+Cmnd_Alias BOAT_VIRTUAL_MACHINE_NETWORK_DOWN = \
+    /usr/sbin/ip -4 route del */32 dev atlas-h[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f], \
+    /usr/sbin/ip -6 route del */128 dev atlas-h[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f], \
+    /usr/sbin/ip netns del atlas-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f], \
+    /usr/sbin/ip link del atlas-h[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
+
 boat ALL=(root) NOPASSWD: BOAT_VIRTUAL_MACHINE_UNIT, BOAT_VIRTUAL_MACHINE_MARKERS, \
     BOAT_VIRTUAL_MACHINE_STOP_TIMEOUT, BOAT_VIRTUAL_MACHINE_CLONE, BOAT_FIRECRACKER_API, \
     BOAT_ADOPTION, BOAT_HOST_CAPACITY, BOAT_FIRECRACKER_LIVENESS, \
@@ -924,4 +1008,5 @@ boat ALL=(root) NOPASSWD: BOAT_VIRTUAL_MACHINE_UNIT, BOAT_VIRTUAL_MACHINE_MARKER
     BOAT_VIRTUAL_MACHINE_RESIZE, BOAT_VIRTUAL_MACHINE_IDENTITY, \
     BOAT_VIRTUAL_MACHINE_TERMINATE, BOAT_NETWORKD, \
     BOAT_MIGRATION_LVM, BOAT_MIGRATION_DEVICE_MAPPER, BOAT_MIGRATION_NBD, \
-    BOAT_MIGRATION_FORWARD
+    BOAT_MIGRATION_FORWARD, BOAT_SIBLING_UNITS, BOAT_RESERVED_IP_EGRESS, \
+    BOAT_VIRTUAL_MACHINE_NETWORK_DOWN
