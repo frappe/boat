@@ -51,6 +51,8 @@ type daemonOptions struct {
 	datumURL           string
 	datumTokenFilePath string
 	datumInterval      time.Duration
+
+	metricsListen string
 }
 
 func daemon(arguments []string, errorOutput io.Writer) int {
@@ -84,6 +86,7 @@ func parseDaemonOptions(arguments []string, errorOutput io.Writer) (daemonOption
 	flags.StringVar(&options.datumURL, "datum-url", "", "base URL of the datum ingest service; empty disables metrics export")
 	flags.StringVar(&options.datumTokenFilePath, "datum-token-file", defaultDatumTokenFilePath, "file holding the datum bearer tokens (host + per-VM) Atlas ships")
 	flags.DurationVar(&options.datumInterval, "datum-interval", defaultDatumInterval, "how often to collect and push metrics to datum")
+	flags.StringVar(&options.metricsListen, "metrics-listen", "", "address to serve Prometheus /metrics on (e.g. 127.0.0.1:9109); empty disables it")
 	return options, flags.Parse(arguments)
 }
 

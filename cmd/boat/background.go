@@ -51,6 +51,11 @@ func (parts *daemonParts) runBackground() *background {
 			return parts.pushMetrics(ctx, parts.datumInterval)
 		})
 	}
+	if parts.metricsListen != "" {
+		work.run("metrics endpoint", func(ctx context.Context) error {
+			return parts.serveMetrics(ctx, parts.metricsListen)
+		})
+	}
 	return work
 }
 

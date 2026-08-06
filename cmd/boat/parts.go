@@ -66,6 +66,8 @@ type daemonParts struct {
 	datum         *datum.Client
 	datumTokens   *datum.TokenSet
 	datumInterval time.Duration
+	// metricsListen, when non-empty, is the address the Prometheus /metrics endpoint serves on.
+	metricsListen string
 }
 
 // build constructs the daemon in dependency order: the store, the journal over
@@ -83,6 +85,7 @@ func build(options daemonOptions) (*daemonParts, error) {
 	}
 	parts := assemble(database)
 	parts.serverName = options.serverName
+	parts.metricsListen = options.metricsListen
 	// Metrics export is opt-in: with no --datum-url the client stays nil and the
 	// push loop is never registered, so an un-wired host behaves exactly as before.
 	if options.datumURL != "" {
