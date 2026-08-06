@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/frappe/boat/internal/wire"
@@ -21,6 +22,7 @@ import (
 // stderr (trace), so a handler test needs no host under it.
 type fakeHostVerbs struct {
 	served    map[string]bool
+	reads     map[string]bool
 	runs      []string
 	arguments []string
 	stdout    string
@@ -28,7 +30,8 @@ type fakeHostVerbs struct {
 	exitCode  int
 }
 
-func (fake *fakeHostVerbs) Serves(verb string) bool { return fake.served[verb] }
+func (fake *fakeHostVerbs) Serves(verb string) bool     { return fake.served[verb] }
+func (fake *fakeHostVerbs) ServesRead(verb string) bool { return fake.reads[verb] }
 
 func (fake *fakeHostVerbs) Run(verb string, arguments []string, stdout, stderr io.Writer) int {
 	fake.runs = append(fake.runs, verb)
@@ -196,6 +199,47 @@ func TestHostVerbRefusesAMalformedUuid(t *testing.T) {
 	}
 	if len(verbs.runs) != 0 {
 		t.Errorf("a verb ran against a malformed uuid: %v", verbs.runs)
+	}
+}
+
+// A read verb answers with its output and writes NO operation record — the whole
+// reason the per-minute sweeps do not bury the journal.
+func TestHostReadReturnsOutputAndJournalsNothing(t *testing.T) {
+	verbs := &fakeHostVerbs{
+		reads:  map[string]bool{"poll-vm-traffic": true},
+		stdout: `ATLAS_RESULT={"counters":{}}` + "\n",
+	}
+	server, handler := hostVerbServer(t, verbs)
+
+	recorder := postJSON(t, handler, "/host-reads/poll-vm-traffic", wire.HostReadRequest{
+		Variables: &map[string]any{"VMS_JSON": "[]"},
+	})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", recorder.Code, recorder.Body)
+	}
+	var result wire.HostReadResult
+	decode(t, recorder, &result)
+	if !strings.Contains(result.Output, "ATLAS_RESULT=") {
+		t.Errorf("output %q carried no result line", result.Output)
+	}
+	// No journal: the operation store holds nothing for a read.
+	awaitOperation(t, server)
+	if got := get(t, handler, "/ops/poll-vm-traffic").Code; got != http.StatusNotFound {
+		t.Errorf("a read left an operation record (GET /ops -> %d)", got)
+	}
+}
+
+// A mutating verb is not a read: /host-reads refuses it even though the daemon
+// serves it over /host-verbs.
+func TestHostReadRefusesAMutatingVerb(t *testing.T) {
+	verbs := &fakeHostVerbs{served: map[string]bool{"snapshot-vm": true}}
+	_, handler := hostVerbServer(t, verbs)
+
+	recorder := postJSON(t, handler, "/host-reads/snapshot-vm", wire.HostReadRequest{})
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", recorder.Code)
 	}
 }
 

@@ -300,6 +300,23 @@ type HostFacts struct {
 	VcpusTotal             *int     `json:"vcpus_total,omitempty"`
 }
 
+// HostReadRequest defines model for HostReadRequest.
+type HostReadRequest struct {
+	// Variables The read verb's inputs, the same UPPER_SNAKE variables dict the SSH
+	// runner rendered to flags — for the sweeps, `VMS_JSON`, the list of VMs
+	// to ask about. No operation_id: a read is not journaled and not
+	// replayed.
+	Variables *map[string]interface{} `json:"variables,omitempty"`
+}
+
+// HostReadResult defines model for HostReadResult.
+type HostReadResult struct {
+	// Output The verb's stdout — its one `ATLAS_RESULT=` line where it has a
+	// result — exactly the text run_probe read off the SSH channel, so the
+	// controller parses it with the same `parse_result`.
+	Output string `json:"output"`
+}
+
 // HostVerbRequest defines model for HostVerbRequest.
 type HostVerbRequest struct {
 	// OperationId The Atlas Task name. Re-posting one returns its recorded result.
@@ -748,6 +765,9 @@ type GetMigrationHydrationParams struct {
 	CloneDevice *string `form:"clone_device,omitempty" json:"clone_device,omitempty"`
 }
 
+// RunHostReadJSONRequestBody defines body for RunHostRead for application/json ContentType.
+type RunHostReadJSONRequestBody = HostReadRequest
+
 // RunHostVerbJSONRequestBody defines body for RunHostVerb for application/json ContentType.
 type RunHostVerbJSONRequestBody = HostVerbRequest
 
@@ -804,6 +824,9 @@ type ServerInterface interface {
 	// Host facts and the running Boat version
 	// (GET /host)
 	GetHost(w http.ResponseWriter, r *http.Request)
+	// Run one read-only host verb, without a journal record
+	// (POST /host-reads/{verb})
+	RunHostRead(w http.ResponseWriter, r *http.Request, verb string)
 	// Run one host operation Atlas used to drive over SSH
 	// (POST /host-verbs/{verb})
 	RunHostVerb(w http.ResponseWriter, r *http.Request, verb string)
@@ -932,6 +955,37 @@ func (siw *ServerInterfaceWrapper) GetHost(w http.ResponseWriter, r *http.Reques
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetHost(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RunHostRead operation middleware
+func (siw *ServerInterfaceWrapper) RunHostRead(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "verb" -------------
+	var verb string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "verb", r.PathValue("verb"), &verb, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "verb", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RunHostRead(w, r, verb)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1797,6 +1851,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("GET "+options.BaseURL+"/export", wrapper.GetExport)
 	m.HandleFunc("GET "+options.BaseURL+"/health", wrapper.GetHealth)
 	m.HandleFunc("GET "+options.BaseURL+"/host", wrapper.GetHost)
+	m.HandleFunc("POST "+options.BaseURL+"/host-reads/{verb}", wrapper.RunHostRead)
 	m.HandleFunc("POST "+options.BaseURL+"/host-verbs/{verb}", wrapper.RunHostVerb)
 	m.HandleFunc("GET "+options.BaseURL+"/ops/{operation_id}", wrapper.GetOperation)
 	m.HandleFunc("POST "+options.BaseURL+"/quiesce", wrapper.Quiesce)
@@ -1895,6 +1950,51 @@ type GetHost401JSONResponse struct{ UnauthorizedJSONResponse }
 func (response GetHost401JSONResponse) VisitGetHostResponse(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type RunHostReadRequestObject struct {
+	Verb string `json:"verb"`
+	Body *RunHostReadJSONRequestBody
+}
+
+type RunHostReadResponseObject interface {
+	VisitRunHostReadResponse(w http.ResponseWriter) error
+}
+
+type RunHostRead200JSONResponse HostReadResult
+
+func (response RunHostRead200JSONResponse) VisitRunHostReadResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type RunHostRead400JSONResponse Error
+
+func (response RunHostRead400JSONResponse) VisitRunHostReadResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type RunHostRead401JSONResponse struct{ UnauthorizedJSONResponse }
+
+func (response RunHostRead401JSONResponse) VisitRunHostReadResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(401)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type RunHostRead500JSONResponse Error
+
+func (response RunHostRead500JSONResponse) VisitRunHostReadResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(500)
 
 	return json.NewEncoder(w).Encode(response)
 }
@@ -2934,6 +3034,9 @@ type StrictServerInterface interface {
 	// Host facts and the running Boat version
 	// (GET /host)
 	GetHost(ctx context.Context, request GetHostRequestObject) (GetHostResponseObject, error)
+	// Run one read-only host verb, without a journal record
+	// (POST /host-reads/{verb})
+	RunHostRead(ctx context.Context, request RunHostReadRequestObject) (RunHostReadResponseObject, error)
 	// Run one host operation Atlas used to drive over SSH
 	// (POST /host-verbs/{verb})
 	RunHostVerb(ctx context.Context, request RunHostVerbRequestObject) (RunHostVerbResponseObject, error)
@@ -3102,6 +3205,39 @@ func (sh *strictHandler) GetHost(w http.ResponseWriter, r *http.Request) {
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetHostResponseObject); ok {
 		if err := validResponse.VisitGetHostResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RunHostRead operation middleware
+func (sh *strictHandler) RunHostRead(w http.ResponseWriter, r *http.Request, verb string) {
+	var request RunHostReadRequestObject
+
+	request.Verb = verb
+
+	var body RunHostReadJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.RunHostRead(ctx, request.(RunHostReadRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RunHostRead")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RunHostReadResponseObject); ok {
+		if err := validResponse.VisitRunHostReadResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

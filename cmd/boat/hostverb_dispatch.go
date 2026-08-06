@@ -50,11 +50,25 @@ var servedHostVerbs = map[string]bool{
 	"export-cleanup-source":   true,
 }
 
+// servedHostReads is the closed set of READ-ONLY host verbs the daemon runs over
+// POST /v1/host-reads/{verb} — the per-minute sweeps Atlas drove through run_probe.
+// They change nothing and share their nft-counter reads with the wake trap the
+// daemon already runs, so serving them adds no new grant. Disjoint from
+// servedHostVerbs: a mutating verb is never a read.
+var servedHostReads = map[string]bool{
+	"poll-vm-traffic": true,
+	"probe-woken-vms": true,
+}
+
 type hostVerbRunner struct{}
 
-// Serves reports whether the daemon runs the named verb, so the boundary refuses
-// an unknown one with 400 before it claims an operation identifier.
+// Serves reports whether the daemon runs the named MUTATING verb, so the boundary
+// refuses an unknown one with 400 before it claims an operation identifier.
 func (hostVerbRunner) Serves(verb string) bool { return servedHostVerbs[verb] }
+
+// ServesRead reports whether the named verb is a read-only sweep served over
+// /host-reads.
+func (hostVerbRunner) ServesRead(verb string) bool { return servedHostReads[verb] }
 
 // Run executes the verb in-process, exactly as `boat <verb>` runs it over SSH,
 // writing its trace to stderr and its one ATLAS_RESULT= line (where the verb has
@@ -92,6 +106,11 @@ func (hostVerbRunner) Run(verb string, arguments []string, stdout, stderr io.Wri
 		return vmTunnel(arguments, stdout, stderr)
 	case "export-cleanup-source":
 		return exportCleanupSource(arguments, stderr)
+	// Read-only sweeps, served over /host-reads (servedHostReads).
+	case "poll-vm-traffic":
+		return pollVMTraffic(arguments, stdout, stderr)
+	case "probe-woken-vms":
+		return probeWokenVMs(arguments, stdout, stderr)
 	}
 	return exitUsage
 }

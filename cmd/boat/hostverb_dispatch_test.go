@@ -19,6 +19,21 @@ func TestEveryServedHostVerbIsDispatchable(t *testing.T) {
 			t.Errorf("Run(%q, --help) = %d, want %d — the verb is served but not dispatched", verb, code, exitSuccess)
 		}
 	}
+	for verb := range servedHostReads {
+		if code := runner.Run(verb, []string{"--help"}, io.Discard, io.Discard); code != exitSuccess {
+			t.Errorf("Run(%q, --help) = %d, want %d — the read is served but not dispatched", verb, code, exitSuccess)
+		}
+	}
+}
+
+// A verb is either a mutating host verb or a read-only one, never both — the two
+// endpoints answer opposite questions about it (journal, or do not).
+func TestServedVerbsAndReadsAreDisjoint(t *testing.T) {
+	for verb := range servedHostVerbs {
+		if servedHostReads[verb] {
+			t.Errorf("%q is served as both a mutating verb and a read", verb)
+		}
+	}
 }
 
 // A verb outside the set is not dispatched. Serves already refuses it at the

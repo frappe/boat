@@ -42,13 +42,50 @@ const virtualMachineNameVariable = "VIRTUAL_MACHINE_NAME"
 // daemon and the CLI must run ONE implementation of each verb, not two (§2.1). A
 // Server built without a runner — a handler test, a tool — serves no host verb.
 type HostVerbRunner interface {
-	// Serves reports whether this host runs the named verb, so the boundary
-	// refuses an unknown one with 400 before it claims an operation identifier.
+	// Serves reports whether this host runs the named MUTATING verb, so the
+	// boundary refuses an unknown one with 400 before it claims an identifier.
 	Serves(verb string) bool
+	// ServesRead reports whether the named verb is a READ-ONLY sweep, served over
+	// /host-reads without a journal record. Disjoint from Serves: a mutating verb
+	// is not a read and vice versa.
+	ServesRead(verb string) bool
 	// Run executes the verb, writing its trace to stderr and its one
 	// ATLAS_RESULT= line (where it has a result) to stdout, and returns the exit
 	// code the equivalent Task carried. It is called inside the verb's turn.
 	Run(verb string, arguments []string, stdout, stderr io.Writer) int
+}
+
+// RunHostRead runs a read-only host verb and answers with its output, without a
+// journal record or a turn. It is the transport for the per-minute sweeps
+// (poll-vm-traffic, probe-woken-vms) Atlas drove through run_probe: they change
+// nothing and run every tick, so journaling them would bury the audit log and
+// serializing them would queue a read behind a boot. It also skips the quiesce
+// gate, so a read keeps answering while a self-update drains the mutating verbs —
+// the same rule §5 gives /export and /health.
+func (server *Server) RunHostRead(ctx context.Context, request wire.RunHostReadRequestObject) (wire.RunHostReadResponseObject, error) {
+	verb := request.Verb
+	if server.hostVerbs == nil || !server.hostVerbs.ServesRead(verb) {
+		return wire.RunHostRead400JSONResponse(
+			wire.Error{Error: "This host serves no read-only host verb " + verb + "."},
+		), nil
+	}
+	var variables *map[string]interface{}
+	if request.Body != nil {
+		variables = request.Body.Variables
+	}
+	arguments := hostVerbArguments(variables)
+	var stdout, trace bytes.Buffer
+	code := server.hostVerbs.Run(verb, arguments, &stdout, &trace)
+	if code != 0 {
+		return internalFault(
+			"The read verb "+verb+" failed on the host.",
+			&hostVerbError{verb: verb, code: code, detail: lastLine(trace.String())},
+		), nil
+	}
+	// The verb's stdout carries its one ATLAS_RESULT= line, which is exactly what
+	// run_probe read off the SSH channel and handed to parse_result — so the
+	// controller reads a read the same way whichever transport carried it.
+	return wire.RunHostRead200JSONResponse{Output: stdout.String()}, nil
 }
 
 // RunHostVerb is the transport for the host verbs — the operations that create

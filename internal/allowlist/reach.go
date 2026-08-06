@@ -79,6 +79,11 @@ var hostVerbEntryPoints = []string{
 	"internal/hostkeys.RegenerateHostKeysVM",
 	"internal/netapply/vmnetwork.Firewall",
 	"internal/migration.ExportCleanupSource",
+	// The read-only sweeps served over /host-reads. They only read nft counters
+	// and sleeping markers — the wake trap's own reads, which the daemon already
+	// runs — so like the six above they reach no command the boat user lacks.
+	"internal/park.PollTraffic",
+	"internal/park.Woken",
 }
 
 // function is one function or method and what this check needs to know about

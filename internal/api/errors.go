@@ -137,6 +137,10 @@ func (response *errorResponse) VisitRunHostVerbResponse(writer http.ResponseWrit
 	return response.write(writer)
 }
 
+func (response *errorResponse) VisitRunHostReadResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
 func notFound(message string) *errorResponse {
 	return &errorResponse{statusCode: http.StatusNotFound, message: message}
 }
