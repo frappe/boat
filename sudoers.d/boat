@@ -914,6 +914,27 @@ Cmnd_Alias BOAT_MIGRATION_FORWARD = \
     /usr/sbin/nft add rule inet atlas forward ip6 daddr * oifname mig6-* accept, \
     /usr/sbin/nft add rule inet atlas forward ip6 saddr * iifname mig6-* accept
 
+# --- Migration: the source-autostart fence (spec/24 §3, source Pending) ------
+# The Pending phase takes the SOURCE VM's unit out of multi-user.target for the
+# duration of the move — and an operator can put it back if the move is abandoned.
+# The migration keeps the source guest Stopped from Pending to Cleanup, but the
+# unit is `systemctl enable`d by provision and carries WantedBy=multi-user.target,
+# so until Cleanup's `disable --now` (hours later) a source-host reboot cold-boots
+# a SECOND live copy of the guest — same UUID, MAC, tap, host keys, and on a
+# keep-address migration the same public /128 answered by two hosts. `disable`
+# removes the WantedBy symlink and nothing else, closing that hole while leaving a
+# running unit running and an explicit `systemctl start` rollback working; `enable`
+# is the inverse. Neither is `--now`: that is Cleanup's job (BOAT_..._TERMINATE),
+# and it must not be reachable here.
+#
+# The instance is the spelled-out UUID, not `firecracker-vm@*.service`, for the
+# reason BOAT_VIRTUAL_MACHINE_UNIT gives at length: `.service` pins nothing, so a
+# `*` would let one rendered space reach `enable sshd.service`. A class matches
+# neither a space nor a `/`, so the instance is exactly one VM's.
+Cmnd_Alias BOAT_MIGRATION_SOURCE_AUTOSTART = \
+    /usr/bin/systemctl disable firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service, \
+    /usr/bin/systemctl enable firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service
+
 # --- Sibling units: the host's own services, one line per unit per action ---
 # Boat supervises the units that are NOT VMs: the thin pool a VM's disk lives
 # in, the network control plane, the wake trap, the fail-closed management
@@ -1008,5 +1029,6 @@ boat ALL=(root) NOPASSWD: BOAT_VIRTUAL_MACHINE_UNIT, BOAT_VIRTUAL_MACHINE_MARKER
     BOAT_VIRTUAL_MACHINE_RESIZE, BOAT_VIRTUAL_MACHINE_IDENTITY, \
     BOAT_VIRTUAL_MACHINE_TERMINATE, BOAT_NETWORKD, \
     BOAT_MIGRATION_LVM, BOAT_MIGRATION_DEVICE_MAPPER, BOAT_MIGRATION_NBD, \
-    BOAT_MIGRATION_FORWARD, BOAT_SIBLING_UNITS, BOAT_RESERVED_IP_EGRESS, \
+    BOAT_MIGRATION_FORWARD, BOAT_MIGRATION_SOURCE_AUTOSTART, \
+    BOAT_SIBLING_UNITS, BOAT_RESERVED_IP_EGRESS, \
     BOAT_VIRTUAL_MACHINE_NETWORK_DOWN
