@@ -9,8 +9,13 @@ import (
 // CleanupSourceParams carries the qemu-nbd pid ExportSource recorded, so cleanup can
 // kill the export by pid first (falling back to the port's pidfile). The nbd port
 // itself is DERIVED from the UUID.
+//
+// KeepAddress marks a keep-address (permanent-forward) migration, on which the source
+// keeps forwarding the VM's /128 to the target and the vm-network-down teardown is
+// SUPPRESSED so that forward path survives (spec/24 §2.9.4).
 type CleanupSourceParams struct {
-	NBDPID int
+	NBDPID      int
+	KeepAddress bool
 }
 
 // CleanupSource is the Cleanup phase: after the target VM is confirmed Running and
@@ -57,7 +62,13 @@ func CleanupSource(ctx context.Context, cmd commands, uuid string, params Cleanu
 	// 3. Tear down the stale source VM — the terminate teardown, verbatim in shape.
 	//    Best-effort pokes: the unit may already be gone.
 	cmd.RunUnchecked(ctx, "sudo systemctl disable --now {}", virtualMachine.SystemdUnit())
-	if cmd.OK(ctx, "sudo test -f {}", virtualMachine.NetworkEnvironment()) {
+	// On a keep-address (permanent-forward) migration the source keeps forwarding the
+	// VM's /128 to the target — the mig6 tunnel, its route, the nft forward and the
+	// proxy-NDP re-assert carry live tenant ingress until the block drains (spec/24
+	// §2.9.4). vm-network-down would tear exactly that down and black-hole the tenant,
+	// so it is SUPPRESSED here; the disk/nbd/snapshot teardown around it still runs. A
+	// change-address migration brings the network down, the same teardown terminate does.
+	if !params.KeepAddress && cmd.OK(ctx, "sudo test -f {}", virtualMachine.NetworkEnvironment()) {
 		// Best-effort, like the Python's check=False: a network-down that could not
 		// finish must not strand the rest of cleanup, and the row is the backstop.
 		if err := networkDown(ctx); err != nil {

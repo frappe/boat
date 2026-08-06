@@ -259,7 +259,8 @@ func (server *Server) executeMigrationPhase(
 	case phaseCleanupSource:
 		networkDown := func(ctx context.Context) error { return vmnetwork.Down(ctx, runner, uuid) }
 		return nil, migration.CleanupSource(ctx, runner, uuid, migration.CleanupSourceParams{
-			NBDPID: optional(body.NbdPid),
+			NBDPID:      optional(body.NbdPid),
+			KeepAddress: optional(body.KeepAddress),
 		}, networkDown)
 
 	default:

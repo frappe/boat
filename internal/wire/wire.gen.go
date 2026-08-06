@@ -351,6 +351,16 @@ type MigrateRequest struct {
 	// uses Sync to Server instead.
 	ImageName *string `json:"image_name,omitempty"`
 
+	// KeepAddress cleanup-source only: on a keep-address (permanent-forward) migration
+	// the source keeps forwarding the VM's /128 to the target — the mig6
+	// tunnel, its route, the nft forward and the proxy-NDP re-assert carry
+	// live tenant ingress until the block drains (spec/24 §2.9.4). True
+	// SUPPRESSES the vm-network-down teardown so that forward path stays up;
+	// the disk, nbd and snapshot teardown still run. False (a change-address
+	// migration) brings the source network down, the same teardown terminate
+	// does.
+	KeepAddress *bool `json:"keep_address,omitempty"`
+
 	// NbdPid cleanup-source only: the qemu-nbd pid export-source recorded, killed
 	// first, with the port's pidfile as the fallback. The port itself is
 	// derived from the UUID.

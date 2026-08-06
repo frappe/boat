@@ -57,6 +57,41 @@ func TestCleanupSourceFull(t *testing.T) {
 	)
 }
 
+// A keep-address (permanent-forward) migration leaves the source's /128 forward path
+// UP: the disk/nbd/snapshot teardown runs as always, but vm-network-down is SUPPRESSED
+// so the mig6 tunnel + nft forward + proxy-NDP that carry live tenant ingress survive
+// until the block drains (spec/24 §2.9.4). Change-address cleanup runs the network-down
+// — TestCleanupSourceFull locks that half.
+func TestCleanupSourceKeepAddressLeavesForward(t *testing.T) {
+	fake := newFakeCommands().
+		exists("sudo test -f "+rootPidFile).
+		output("sudo cat "+rootPidFile, "4242\n").
+		exists("sudo lvs --noheadings atlas/" + rootSnap).
+		exists("sudo lvs --noheadings atlas/" + dataSnap).
+		exists("sudo test -f " + vmNetEnv). // present, yet must NOT be consulted or torn down
+		exists("sudo lvs --noheadings atlas/" + vmDisk).
+		exists("sudo lvs --noheadings atlas/" + dataDisk)
+
+	called := false
+	networkDown := func(context.Context) error { called = true; return nil }
+	if err := CleanupSource(context.Background(), fake, testUUID, CleanupSourceParams{NBDPID: 4242, KeepAddress: true}, networkDown); err != nil {
+		t.Fatalf("CleanupSource: %v", err)
+	}
+	if called {
+		t.Error("keep-address cleanup ran vm-network-down and tore the forward path down")
+	}
+	// The forward path is left entirely alone: the sidecar is neither probed nor downed.
+	assertNotIssued(t, fake, vmNetEnv)
+	assertNotIssued(t, fake, "vm-network-down")
+	// The rest of the source teardown still runs: nbd export killed, snapshots + disks
+	// removed, the jail tree swept.
+	assertIssued(t, fake, "sudo kill 4242")
+	assertIssued(t, fake, "sudo lvremove -f atlas/"+rootSnap)
+	assertIssued(t, fake, "sudo lvremove -f atlas/"+vmDisk)
+	assertIssued(t, fake, "sudo lvremove -f atlas/"+dataDisk)
+	assertIssued(t, fake, "sudo rm -rf "+vmDirectory)
+}
+
 // A re-entry after most of cleanup already ran finishes the rest and skips the
 // network-down when the sidecar is already gone.
 func TestCleanupSourceReentryIsClean(t *testing.T) {
