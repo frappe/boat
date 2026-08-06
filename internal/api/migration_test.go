@@ -117,6 +117,32 @@ func TestMigratePhaseReplayDoesNotRerun(t *testing.T) {
 	}
 }
 
+// The source-autostart phase carries its enabled bool through to the host: the
+// Pending fence posts enabled=false (or omits it, which reads as false) to disable
+// the source unit, and the operator's inverse posts enabled=true.
+func TestMigrateSourceAutostartCarriesEnabled(t *testing.T) {
+	seam := &migrationSeam{}
+	handler := migrationServer(t, newFakeStore(), &fakeVirtualMachines{}, seam).SocketHandler()
+
+	body := wire.MigrateRequest{OperationId: "Task-mig-autostart", Enabled: ptr(false)}
+	recorder := postJSON(t, handler, "/vms/"+testUuid+"/migrate/source-autostart", body)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", recorder.Code, recorder.Body)
+	}
+	if seam.count() != 1 {
+		t.Fatalf("the phase ran %d times, want 1", seam.count())
+	}
+	call := seam.calls[0]
+	if call.phase != "source-autostart" || optional(call.body.Enabled) != false {
+		t.Fatalf("the phase saw the wrong request: %+v", call)
+	}
+	operation := decodeOperation(t, recorder)
+	if operation.Verb != "migrate-source-autostart" {
+		t.Errorf("operation names the wrong work: %+v", operation)
+	}
+}
+
 // The same identifier reused for a different phase is a caller bug, refused 409
 // rather than answered with the first phase's result.
 func TestMigratePhaseConflictOnReusedIdentifier(t *testing.T) {
@@ -342,7 +368,8 @@ func TestMigrationVerbNamesEveryPhase(t *testing.T) {
 	for _, phase := range []string{
 		phaseExportSource, phaseExportBase, phaseCloneTarget, phaseReceiveBase,
 		phaseInjectIdentity, phaseCollapseClone, phaseForwardUp, phaseSourceForward,
-		phaseTargetReceive, phaseForwardDown, phaseWithdrawPrivate, phaseCleanupSource,
+		phaseTargetReceive, phaseForwardDown, phaseWithdrawPrivate, phaseSourceAutostart,
+		phaseCleanupSource,
 	} {
 		verb, known := migrationVerb(phase)
 		if !known || verb != "migrate-"+phase {

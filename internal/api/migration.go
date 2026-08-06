@@ -43,6 +43,7 @@ const (
 	phaseTargetReceive   = "target-receive"
 	phaseForwardDown     = "forward-down"
 	phaseWithdrawPrivate = "withdraw-private"
+	phaseSourceAutostart = "source-autostart"
 	phaseCleanupSource   = "cleanup-source"
 )
 
@@ -108,7 +109,8 @@ func migrationVerb(phase string) (string, bool) {
 	switch phase {
 	case phaseExportSource, phaseExportBase, phaseCloneTarget, phaseReceiveBase,
 		phaseInjectIdentity, phaseCollapseClone, phaseForwardUp, phaseSourceForward,
-		phaseTargetReceive, phaseForwardDown, phaseWithdrawPrivate, phaseCleanupSource:
+		phaseTargetReceive, phaseForwardDown, phaseWithdrawPrivate, phaseSourceAutostart,
+		phaseCleanupSource:
 		return "migrate-" + phase, true
 	default:
 		return "", false
@@ -255,6 +257,12 @@ func (server *Server) executeMigrationPhase(
 		// UUID — but it still rides the claim/turn/record machinery for idempotent
 		// replay and per-UUID serialization against the cutover it sequences before.
 		return nil, migration.WithdrawPrivate(optional(body.PrivateAddress))
+
+	case phaseSourceAutostart:
+		// Pending sends enabled=false (or omits it): optional() reads a nil *bool as
+		// false, so an absent field disables — the source-reboot fence — exactly as
+		// the ported script's `enabled` defaulting to 0 did.
+		return nil, migration.SourceAutostart(ctx, runner, uuid, optional(body.Enabled))
 
 	case phaseCleanupSource:
 		networkDown := func(ctx context.Context) error { return vmnetwork.Down(ctx, runner, uuid) }
