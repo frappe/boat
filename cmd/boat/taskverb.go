@@ -25,11 +25,14 @@ import (
 //     misspelled is a TypeError on the controller rather than a wrong value —
 //     loud, but only once it has already run on the host.
 //
-// These verbs run directly, not through the daemon, exactly as the
-// firecracker-vm@ hooks and `boat bootstrap` do. Atlas is already root on the
-// far end of an SSH connection it opened; routing the work back through the
-// local socket would add a second path into the host with no authority the
-// caller lacks.
+// These functions are the verb's ONE implementation, reached two ways. Over the
+// CLI they run directly, as `boat snapshot-vm …`, which is how an operator drives
+// a host and how Atlas still drives the verbs whose grants the boat user does not
+// yet hold. Over the daemon they run in-process behind POST /v1/host-verbs/{verb}
+// (see cmd/boat/hostverb_dispatch.go and internal/api/hostverbs.go), journaled by
+// op_id like every lifecycle verb — which is how Atlas drives the verbs the boat
+// user IS granted, over HTTP rather than SSH (spec/33 §2.4). Same function, so the
+// CLI cannot drift from the endpoint; the seam is which caller reaches it.
 
 // resultMarker is scripts/lib/atlas/_task.py's RESULT_MARKER. It is distinct
 // from any command the verb runs, so trace noise never collides with it.
