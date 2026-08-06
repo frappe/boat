@@ -49,9 +49,11 @@ usage:
   boat metrics
   boat version
 
-The Task verbs Atlas drives over SSH, each taking the flags its Python
-predecessor took and printing one ATLAS_RESULT= line where that verb had a
-result (--help on any of them lists its flags):
+The host verbs, each taking the flags its Python predecessor took and printing
+one ATLAS_RESULT= line where that verb had a result (--help on any of them lists
+its flags). Run here directly as a break-glass tool; Atlas drives the ones the
+boat user is granted through the daemon over HTTP (POST /v1/host-verbs/{verb},
+spec/33 §2.4) and the rest as boat <verb> over SSH:
 
   boat provision-vm
   boat snapshot-vm | snapshot-stop-vm | warm-snapshot-vm | delete-snapshot-vm
@@ -112,9 +114,11 @@ func dispatch(arguments []string, output io.Writer, errorOutput io.Writer) int {
 		return vmCreateDisk(arguments[1:], errorOutput)
 	case "metrics":
 		return metricsCommand(arguments[1:], output, errorOutput)
-	// The Task verbs Atlas drives over SSH (WO-6). Kebab-named and flag-shaped
-	// to match the Python they replace, because the controller renders the same
-	// command line either way — see taskverb.go.
+	// The host verbs (WO-6). Kebab-named and flag-shaped to match the Python they
+	// replace. Reached here as a CLI break-glass tool and, for the served set, by
+	// the daemon over HTTP — the SAME functions run either way (hostverb_dispatch.go
+	// wires them into POST /v1/host-verbs/{verb}), so the CLI cannot drift from the
+	// endpoint. See taskverb.go.
 	case "provision-vm":
 		return provisionVM(arguments[1:], output, errorOutput)
 	case "snapshot-vm":

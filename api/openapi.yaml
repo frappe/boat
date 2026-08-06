@@ -781,6 +781,119 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /host-verbs/{verb}:
+    parameters:
+      - name: verb
+        in: path
+        required: true
+        description: |
+          A host operation Atlas used to drive over SSH as `boat <verb>` —
+          snapshot-vm, provision-vm, sync-image, firewall-apply and the rest of
+          the host-verb set (§2.4). The daemon runs the named verb in-process,
+          through the same claim → turn → terminal-record machinery as every
+          lifecycle verb, so it is auditable, replayable and recoverable rather
+          than a second path into the host the API cannot see (§2.1). The set is
+          closed and compiled in; a verb outside it is refused before a claim.
+        schema:
+          type: string
+    post:
+      summary: Run one host operation Atlas used to drive over SSH
+      description: |
+        The transport for the host verbs — the operations that create disks,
+        take snapshots, sync images and apply per-VM networking. Each was a
+        `boat <verb>` invoked over an SSH connection; each is now a journaled
+        operation with an `op_id`, so a retried Atlas Task returns its first
+        result rather than running the verb twice (§2.7).
+
+        Like a migration phase and unlike a lifecycle verb it does NOT require
+        the VM to already exist: `provision-vm` creates it. A VM-scoped verb
+        (one that names a VIRTUAL_MACHINE_NAME) takes that VM's turn, so it can
+        never overlap a reconcile pass on the same machine; a host-scoped verb
+        (`sync-image`, `reset-server`) takes one host-wide turn instead. The
+        verb's typed result rides on the operation record's `result`, the same
+        field the lifecycle verbs use.
+      operationId: RunHostVerb
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HostVerbRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationAccepted"
+        "400":
+          description: |
+            The verb is not one this host serves, or a VM-scoped verb named a
+            malformed UUID. Refused at the boundary before an operation is
+            claimed, so the identifier is free to reuse.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/OperationIdentifierConflict"
+
+  /host-reads/{verb}:
+    parameters:
+      - name: verb
+        in: path
+        required: true
+        description: |
+          A READ-ONLY host verb Atlas used to drive as `boat <verb>` over SSH
+          through run_probe — the per-minute sweeps poll-vm-traffic and
+          probe-woken-vms. The set is closed and compiled in; a verb outside it,
+          or a mutating verb, is refused.
+        schema:
+          type: string
+    post:
+      summary: Run one read-only host verb, without a journal record
+      description: |
+        The transport for the read-only sweeps — the ones that ask the host a
+        question (which VMs took traffic, which woke) and change nothing. They run
+        once a minute per host, so unlike a mutating host verb this writes NO
+        operation record: a journal entry per tick would bury the audit log the
+        journal is for (the same reason run_probe records no Task row). It carries
+        no `op_id` for the same reason — there is nothing to replay — and answers
+        synchronously with the verb's output rather than a claim to poll.
+
+        POST rather than GET because the input is a list of VMs (`VMS_JSON`) too
+        large for a query string, and it is a read despite the method: idempotent,
+        side-effect-free, and safe to retry.
+      operationId: RunHostRead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HostReadRequest"
+      responses:
+        "200":
+          description: The verb's output — the same text run_probe read off stdout.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostReadResult"
+        "400":
+          description: |
+            The verb is not a read-only host verb this host serves. Read-only, so
+            a mutating verb is refused here even when the daemon serves it over
+            /host-verbs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          description: The verb failed on the host.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /ops/{operation_id}:
     parameters:
       - name: operation_id
@@ -1566,6 +1679,49 @@ components:
           description: |
             The Atlas Task name. Re-posting one returns its recorded result
             rather than running the verb again.
+
+    HostVerbRequest:
+      type: object
+      required: [operation_id]
+      properties:
+        operation_id:
+          type: string
+          description: The Atlas Task name. Re-posting one returns its recorded result.
+        variables:
+          type: object
+          additionalProperties: true
+          description: |
+            The verb's inputs, as the SAME UPPER_SNAKE variables dict the SSH
+            runner rendered to `--kebab-case` flags. A value is a string, or an
+            array of strings for a repeatable flag (`CGROUP_ARG`,
+            `PUBLIC_ALLOW_PORT`). The daemon renders them to the verb's flag argv
+            — the one place the host CLI grammar still appears — so a verb's
+            inputs are stated once and mean the same thing whichever transport
+            carried them, exactly as the lifecycle verbs kept their variable
+            names across the port.
+
+    HostReadRequest:
+      type: object
+      properties:
+        variables:
+          type: object
+          additionalProperties: true
+          description: |
+            The read verb's inputs, the same UPPER_SNAKE variables dict the SSH
+            runner rendered to flags — for the sweeps, `VMS_JSON`, the list of VMs
+            to ask about. No operation_id: a read is not journaled and not
+            replayed.
+
+    HostReadResult:
+      type: object
+      required: [output]
+      properties:
+        output:
+          type: string
+          description: |
+            The verb's stdout — its one `ATLAS_RESULT=` line where it has a
+            result — exactly the text run_probe read off the SSH channel, so the
+            controller parses it with the same `parse_result`.
 
     StartRequest:
       type: object

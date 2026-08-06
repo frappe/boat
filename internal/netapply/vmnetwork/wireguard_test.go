@@ -13,34 +13,9 @@ const testTunnelEnvironment = "INTERFACE=wg-abc123\n" +
 	"HOST_ADDRESS=fdab::1/127\n" +
 	"VIRTUAL_MACHINE_IPV6=2001:db8::2\n"
 
-// The command builders, held to wireguard.py's rendered output.
-func TestTunnelCommandsRenderLikeThePython(t *testing.T) {
-	config, err := parseTunnelConfig(testTunnelEnvironment)
-	if err != nil {
-		t.Fatalf("parseTunnelConfig: %v", err)
-	}
-	for _, testCase := range []struct{ name, got, want string }{
-		{"link add", linkAddCommand(config.interfaceName), "ip link add wg-abc123 type wireguard"},
-		{"link up", linkUpCommand(config.interfaceName), "ip link set wg-abc123 up"},
-		{"addr add", addrAddCommand(config.interfaceName, config.hostAddress), "ip -6 addr add fdab::1/127 dev wg-abc123"},
-		{"wg set interface", wgSetInterfaceCommand(config.interfaceName, config.listenPort, config.privateKeyPath),
-			"wg set wg-abc123 listen-port 51820 private-key /var/lib/atlas/virtual-machines/x/tunnels/wg-abc123.key"},
-		{"wg set peer", wgSetPeerCommand(config.interfaceName, config.clientPublicKey, config.clientAddress),
-			"wg set wg-abc123 peer 0123456789abcdefABCDEF0123456789abcdefABCD0= allowed-ips fdab::2/128"},
-		{"forward accept", tunnelAcceptCommand(config.interfaceName, config.virtualMachine),
-			"insert rule inet atlas forward iifname wg-abc123 ip6 daddr 2001:db8::2 accept"},
-		{"forward drop", tunnelDropCommand(config.interfaceName),
-			"insert rule inet atlas forward iifname wg-abc123 drop"},
-		{"input host drop", tunnelHostDropCommand(config.interfaceName),
-			"add rule inet atlas input iifname wg-abc123 drop"},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			if testCase.got != testCase.want {
-				t.Errorf("rendered\n  %q\nwant\n  %q", testCase.got, testCase.want)
-			}
-		})
-	}
-}
+// The tunnel commands are asserted end-to-end through the fake runner's trace in
+// TestApplyTunnelInstallsInterfaceAndIsolation below — the same rendered lines the
+// former per-builder test checked, now read where they actually run.
 
 // A fresh host: the tunnel interface, its key/port/peer, the host overlay address,
 // and the isolation rules install — drop inserted before accept so the head is
