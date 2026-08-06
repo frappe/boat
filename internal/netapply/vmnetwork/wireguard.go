@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/sidecar"
 )
 
@@ -137,14 +136,20 @@ func applyPersistedTunnels(ctx context.Context, commands commands, tunnelsDirect
 // peer, the host overlay address, and the isolation rules. Re-running is a no-op.
 func applyTunnel(ctx context.Context, commands commands, config tunnelConfig) error {
 	if !commands.OK(ctx, "sudo ip link show {}", config.interfaceName) {
-		if _, err := commands.Run(ctx, "sudo "+linkAddCommand(config.interfaceName)); err != nil {
+		if _, err := commands.Run(ctx, "sudo ip link add {} type wireguard", config.interfaceName); err != nil {
 			return err
 		}
 	}
-	if _, err := commands.Run(ctx, "sudo "+wgSetInterfaceCommand(config.interfaceName, config.listenPort, config.privateKeyPath)); err != nil {
+	if _, err := commands.Run(
+		ctx, "sudo wg set {} listen-port {} private-key {}",
+		config.interfaceName, strconv.Itoa(config.listenPort), config.privateKeyPath,
+	); err != nil {
 		return err
 	}
-	if _, err := commands.Run(ctx, "sudo "+wgSetPeerCommand(config.interfaceName, config.clientPublicKey, config.clientAddress)); err != nil {
+	if _, err := commands.Run(
+		ctx, "sudo wg set {} peer {} allowed-ips {}",
+		config.interfaceName, config.clientPublicKey, config.clientAddress+"/128",
+	); err != nil {
 		return err
 	}
 	addresses, err := commands.RunUnchecked(ctx, "sudo ip -6 addr show dev {}", config.interfaceName)
@@ -152,11 +157,13 @@ func applyTunnel(ctx context.Context, commands commands, config tunnelConfig) er
 		return err
 	}
 	if !strings.Contains(addresses, config.hostAddress) {
-		if _, err := commands.Run(ctx, "sudo "+addrAddCommand(config.interfaceName, config.hostAddress)); err != nil {
+		if _, err := commands.Run(
+			ctx, "sudo ip -6 addr add {} dev {}", config.hostAddress, config.interfaceName,
+		); err != nil {
 			return err
 		}
 	}
-	if _, err := commands.Run(ctx, "sudo "+linkUpCommand(config.interfaceName)); err != nil {
+	if _, err := commands.Run(ctx, "sudo ip link set {} up", config.interfaceName); err != nil {
 		return err
 	}
 
@@ -169,12 +176,17 @@ func applyTunnel(ctx context.Context, commands commands, config tunnelConfig) er
 	}
 	// Insert drop FIRST, accept SECOND, so the head ends [accept, drop, …per-VM…].
 	if !tunnelHasDrop(forward, config.interfaceName) {
-		if _, err := commands.Run(ctx, "sudo nft "+tunnelDropCommand(config.interfaceName)); err != nil {
+		if _, err := commands.Run(
+			ctx, "sudo nft insert rule inet atlas {} iifname {} drop", forwardChain, config.interfaceName,
+		); err != nil {
 			return err
 		}
 	}
 	if !tunnelHasAccept(forward, config.interfaceName, config.virtualMachine) {
-		if _, err := commands.Run(ctx, "sudo nft "+tunnelAcceptCommand(config.interfaceName, config.virtualMachine)); err != nil {
+		if _, err := commands.Run(
+			ctx, "sudo nft insert rule inet atlas {} iifname {} ip6 daddr {} accept",
+			forwardChain, config.interfaceName, config.virtualMachine,
+		); err != nil {
 			return err
 		}
 	}
@@ -187,7 +199,9 @@ func applyTunnel(ctx context.Context, commands commands, config tunnelConfig) er
 		return err
 	}
 	if !tunnelHasDrop(hostInput, config.interfaceName) {
-		if _, err := commands.Run(ctx, "sudo nft "+tunnelHostDropCommand(config.interfaceName)); err != nil {
+		if _, err := commands.Run(
+			ctx, "sudo nft add rule inet atlas {} iifname {} drop", inputChain, config.interfaceName,
+		); err != nil {
 			return err
 		}
 	}
@@ -235,42 +249,12 @@ func ensureChain(ctx context.Context, commands commands, chain, specification st
 
 const inputChainSpecification = "{ type filter hook input priority filter; policy accept; }"
 
-// --- command builders (values run.Quote'd) ---
-
-func linkAddCommand(interfaceName string) string {
-	return "ip link add " + run.Quote(interfaceName) + " type wireguard"
-}
-
-func linkUpCommand(interfaceName string) string {
-	return "ip link set " + run.Quote(interfaceName) + " up"
-}
-
-func addrAddCommand(interfaceName, hostCIDR string) string {
-	return fmt.Sprintf("ip -6 addr add %s dev %s", run.Quote(hostCIDR), run.Quote(interfaceName))
-}
-
-func wgSetInterfaceCommand(interfaceName string, listenPort int, privateKeyPath string) string {
-	return fmt.Sprintf("wg set %s listen-port %s private-key %s",
-		run.Quote(interfaceName), strconv.Itoa(listenPort), run.Quote(privateKeyPath))
-}
-
-func wgSetPeerCommand(interfaceName, clientPublicKey, clientAddress string) string {
-	return fmt.Sprintf("wg set %s peer %s allowed-ips %s",
-		run.Quote(interfaceName), run.Quote(clientPublicKey), run.Quote(clientAddress+"/128"))
-}
-
-func tunnelAcceptCommand(interfaceName, virtualMachine string) string {
-	return fmt.Sprintf("insert rule inet atlas %s iifname %s ip6 daddr %s accept",
-		forwardChain, run.Quote(interfaceName), run.Quote(virtualMachine))
-}
-
-func tunnelDropCommand(interfaceName string) string {
-	return fmt.Sprintf("insert rule inet atlas %s iifname %s drop", forwardChain, run.Quote(interfaceName))
-}
-
-func tunnelHostDropCommand(interfaceName string) string {
-	return fmt.Sprintf("add rule inet atlas %s iifname %s drop", inputChain, run.Quote(interfaceName))
-}
+// The tunnel commands are written inline at their call sites (applyTunnel) as
+// literal templates with `{}` holes, not assembled here from a builder, so the
+// allow-list check can read every `sudo` line rather than seeing a computed
+// `sudo {}` it cannot grant (spec/33 §2.4). The runner shell-quotes each hole
+// value exactly as run.Quote did, so the rendered commands are byte-for-byte
+// what they were — see TestApplyTunnelInstallsInterfaceAndIsolation.
 
 func tunnelHasAccept(listing, interfaceName, virtualMachine string) bool {
 	return anyLine(listing, func(line string) bool {
