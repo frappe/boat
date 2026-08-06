@@ -84,6 +84,18 @@ var hostVerbEntryPoints = []string{
 	// runs — so like the six above they reach no command the boat user lacks.
 	"internal/park.PollTraffic",
 	"internal/park.Woken",
+	// The heavier verbs, each with its own scoped grants in sudoers.d/boat
+	// (BOAT_PROVISION / BOAT_WARM_SNAPSHOT / BOAT_PROMOTE_IMAGE / BOAT_SYNC_IMAGE /
+	// BOAT_S3_BACKUP / BOAT_VM_TUNNEL). The write halves are pinned; the source
+	// globs and open URLs are bounded to /var/lib/atlas and flagged there for the
+	// on-host `sudo -u boat -n -l` audit that tightens what shape alone cannot.
+	"internal/provision.Provision",
+	"internal/snapshot.WarmSnapshotVM",
+	"internal/image.PromoteSnapshotImage",
+	"internal/image.SyncImage",
+	"internal/backup.UploadSnapshotS3",
+	"internal/backup.RestoreSnapshotS3",
+	"internal/netapply/vmnetwork.Tunnel",
 }
 
 // function is one function or method and what this check needs to know about

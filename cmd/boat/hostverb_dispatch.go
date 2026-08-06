@@ -48,6 +48,18 @@ var servedHostVerbs = map[string]bool{
 	"regenerate-host-keys-vm": true,
 	"firewall-apply":          true,
 	"export-cleanup-source":   true,
+	// The heavier verbs, switched on now that their scoped grants are in
+	// sudoers.d/boat (BOAT_PROVISION / BOAT_WARM_SNAPSHOT / BOAT_PROMOTE_IMAGE /
+	// BOAT_SYNC_IMAGE / BOAT_S3_BACKUP / BOAT_VM_TUNNEL) and the allow-list test
+	// proves every command they render is covered. bootstrap and reset-server are
+	// still absent by construction — they install and tear down the daemon.
+	"provision-vm":           true,
+	"warm-snapshot-vm":       true,
+	"promote-snapshot-image": true,
+	"sync-image":             true,
+	"upload-snapshot-s3":     true,
+	"restore-snapshot-s3":    true,
+	"vm-tunnel":              true,
 }
 
 // servedHostReads is the closed set of READ-ONLY host verbs the daemon runs over

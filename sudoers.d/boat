@@ -1019,7 +1019,89 @@ Cmnd_Alias BOAT_VIRTUAL_MACHINE_NETWORK_DOWN = \
     /usr/sbin/ip netns del atlas-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f], \
     /usr/sbin/ip link del atlas-h[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]
 
+# --- Provision (provision-vm): the eight commands not already covered by the
+# --- lifecycle/migration grants. Writes pinned to THIS VM's jail tree or its own
+# --- atlas-data LV; ln/cp SOURCES bounded to /var/lib/atlas. Host-audit the
+# --- source globs + chown uid classes with `sudo -u boat -n -l`.
+Cmnd_Alias BOAT_PROVISION = \
+    /usr/bin/ln -f /var/lib/atlas/images/*/* /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/vmlinux, \
+    /usr/bin/ln -f /var/lib/atlas/*/* /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/snapshot/*, \
+    /usr/bin/chown -R [0-9][0-9][0-9][0-9][0-9][0-9]\:[0-9][0-9][0-9][0-9][0-9][0-9] /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail, \
+    /usr/bin/test -e /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/rootfs.ext4, \
+    /usr/bin/stat -c %u /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/rootfs.ext4, \
+    /usr/bin/systemctl start --no-block firecracker-vm@[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].service, \
+    /usr/sbin/mkfs.ext4 -q -L atlas-data -F /dev/atlas/atlas-data-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f], \
+    /usr/bin/cp /var/lib/atlas/*/host-signature.json /var/lib/atlas/virtual-machines/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/jail/firecracker/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]/root/snapshot/host-signature.json
+
+# --- Warm snapshot (warm-snapshot-vm): stage the captured memory pair root-owned
+# --- 0644 under /var/lib/atlas. chown-to-root removes the caller's own ownership.
+Cmnd_Alias BOAT_WARM_SNAPSHOT = \
+    /usr/bin/chown root\:root /var/lib/atlas/*, \
+    /usr/bin/chmod 0644 /var/lib/atlas/*
+
+# --- Promote (promote-snapshot-image): hard-link a snapshot rootfs into the
+# --- images tree. Both ends bounded to /var/lib/atlas; write end is images.
+Cmnd_Alias BOAT_PROMOTE_IMAGE = \
+    /usr/bin/ln -f /var/lib/atlas/*/* /var/lib/atlas/images/*/*
+
+# --- Sync image (sync-image): download + build a base rootfs. The write targets
+# --- are the image tree and the base LV; sources are bounded to /var/lib/atlas.
+# --- The two `curl` URLs are OPEN (`*`) — the operator configures the image URL,
+# --- so it cannot be pinned; this is "no worse than today" (root runs the same
+# --- curl over SSH) but is the widest grant here and the first thing the on-host
+# --- `sudo -u boat -n -l` audit should tighten. The sed metacharacters are escaped
+# --- so the pattern matches the literal shadow-lock expression, not a glob.
+Cmnd_Alias BOAT_SYNC_IMAGE = \
+    /usr/bin/curl -fsSL --output /var/lib/atlas/images/*/* *, \
+    /usr/bin/sha256sum -c -, \
+    /usr/bin/unsquashfs -d /var/lib/atlas/* /var/lib/atlas/*, \
+    /usr/bin/ln -sf /etc/systemd/system/atlas-network.service /var/lib/atlas/*, \
+    /usr/bin/ln -sf /etc/systemd/system/atlas-zfs-load.service /var/lib/atlas/*, \
+    /usr/bin/ln -sf /dev/null /var/lib/atlas/*, \
+    /usr/bin/chown -R root\:root /var/lib/atlas/*, \
+    /usr/bin/chown -R 1000\:1000 /var/lib/atlas/*, \
+    /usr/bin/truncate -s * /var/lib/atlas/*, \
+    /usr/bin/truncate -s 0 /var/lib/atlas/*, \
+    /usr/sbin/mkfs.ext4 -q -O metadata_csum_seed -L atlas-root -d /var/lib/atlas/* -F /var/lib/atlas/images/*/*, \
+    /usr/bin/sed -i s|^root\:\[^\:\]\*\:|root\:!\:| /var/lib/atlas/*, \
+    /usr/sbin/ldconfig -r /var/lib/atlas/*, \
+    /usr/bin/dpkg-deb -x /var/lib/atlas/* /var/lib/atlas/*, \
+    /usr/bin/cp -a /var/lib/atlas/* /var/lib/atlas/*, \
+    /usr/sbin/depmod -b /var/lib/atlas/* *, \
+    /usr/bin/rm -rf /var/lib/atlas/* /var/lib/atlas/*, \
+    /usr/bin/dd if=/var/lib/atlas/* of=/dev/atlas/* bs=4M conv=fsync status=none
+
+# --- S3 backup (upload/restore-snapshot-s3): compress/decompress a snapshot and
+# --- move it to/from S3. Local ends bounded to /var/lib/atlas; the S3 URL is OPEN
+# --- (`*`) for the same reason the image URL is — audit target.
+Cmnd_Alias BOAT_S3_BACKUP = \
+    /usr/bin/sha256sum /var/lib/atlas/*, \
+    /usr/bin/curl --fail --silent --show-error --output /var/lib/atlas/* *, \
+    /usr/bin/curl --fail --silent --show-error --upload-file /var/lib/atlas/* *, \
+    /usr/bin/sync, \
+    /usr/bin/zstd -q -f -[0-9]* -T0 -o /var/lib/atlas/* /var/lib/atlas/*, \
+    /usr/bin/zstd -d -q -f -o /var/lib/atlas/* /var/lib/atlas/*, \
+    /usr/bin/zstd -d -q -f --sparse -o /var/lib/atlas/* /var/lib/atlas/*
+
+# --- VM tunnel (vm-tunnel): one WireGuard tunnel's interface, key/peer and the
+# --- two isolation nft rules. The interface and peer holes are `*` (the tunnel
+# --- name and the client's key/address are per-VPN and opaque) — audit target;
+# --- the private-key path is bounded to /var/lib/atlas.
+Cmnd_Alias BOAT_VM_TUNNEL = \
+    /usr/sbin/ip link show *, \
+    /usr/sbin/ip link add * type wireguard, \
+    /usr/sbin/ip link set * up, \
+    /usr/sbin/ip -6 addr show dev *, \
+    /usr/sbin/ip -6 addr add * dev *, \
+    /usr/bin/wg set * listen-port [0-9]* private-key /var/lib/atlas/*, \
+    /usr/bin/wg set * peer * allowed-ips *, \
+    /usr/sbin/nft insert rule inet atlas * iifname * drop, \
+    /usr/sbin/nft insert rule inet atlas * iifname * ip6 daddr * accept, \
+    /usr/sbin/nft add rule inet atlas * iifname * drop
+
 boat ALL=(root) NOPASSWD: BOAT_VIRTUAL_MACHINE_UNIT, BOAT_VIRTUAL_MACHINE_MARKERS, \
+    BOAT_PROVISION, BOAT_WARM_SNAPSHOT, BOAT_PROMOTE_IMAGE, \
+    BOAT_SYNC_IMAGE, BOAT_S3_BACKUP, BOAT_VM_TUNNEL, \
     BOAT_VIRTUAL_MACHINE_STOP_TIMEOUT, BOAT_VIRTUAL_MACHINE_CLONE, BOAT_FIRECRACKER_API, \
     BOAT_ADOPTION, BOAT_HOST_CAPACITY, BOAT_FIRECRACKER_LIVENESS, \
     BOAT_FIRECRACKER_API_GUEST_STATE, BOAT_FIRECRACKER_API_SNAPSHOT, \
