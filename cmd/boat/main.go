@@ -41,6 +41,7 @@ usage:
   boat vm-network-down <uuid>
   boat vm-disk-up <uuid>
   boat bootstrap
+  boat pool
   boat networkd
   boat image-import <name> <rootfs-file> <disk-gb>
   boat vm-create-disk <uuid> <image-name>
@@ -96,6 +97,11 @@ func dispatch(arguments []string, output io.Writer, errorOutput io.Writer) int {
 	case "bootstrap":
 		// Brings THIS host to VM-ready — one command, boat driving every step.
 		return bootstrapCommand(arguments[1:], errorOutput)
+	case "pool":
+		// Re-asserts the LVM thin pool on every boot — the atlas-pool.service
+		// oneshot, standalone like bootstrap and not a client of the daemon,
+		// because the pool is what the daemon's VMs are carved from (pool.go).
+		return poolCommand(arguments[1:], errorOutput)
 	case "networkd":
 		// The ANCP wg-mesh gossip control plane (spec/31, WO-5). A long-running
 		// daemon in its own unit, privileged for wg/ip — not a client of the API.
