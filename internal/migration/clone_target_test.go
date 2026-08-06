@@ -58,7 +58,7 @@ func TestCloneTargetFreshPrepare(t *testing.T) {
 		"? sudo dmsetup info "+vmCloneRoot,
 		// nbd client, size-verified against the dest
 		"sudo blockdev --getsize64 "+vmDiskDev,
-		"- cat /sys/block/nbd0/pid",
+		"? test -e /sys/block/nbd0/pid",
 		"- sudo nbd-client -d /dev/nbd0",
 		"sudo nbd-client "+testSource+" 11165 /dev/nbd0 -persist",
 		// dm-clone: metadata LV then the create
@@ -84,8 +84,7 @@ func TestCloneTargetLeavesHealthyCloneAlone(t *testing.T) {
 		exists("sudo dmsetup info "+vmCloneRoot). // clone present
 		exists("sudo lvs --noheadings atlas/"+cloneMetaRoot).
 		output("sudo blockdev --getsize64 "+vmDiskDev, "10737418240\n").
-		output("cat /sys/block/nbd0/pid", "8123\n").
-		exists("test -d /proc/8123").                                  // source client alive
+		exists("test -e /sys/block/nbd0/pid").                         // source client connected
 		output("sudo blockdev --getsize64 /dev/nbd0", "10737418240\n") // connected size matches
 
 	if _, err := CloneTarget(context.Background(), fake, testUUID, CloneTargetParams{ImageName: "debian12", DiskGB: 10, SourceHost: testSource}); err != nil {

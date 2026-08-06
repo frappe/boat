@@ -69,14 +69,23 @@ const nbdMajor = "43" // Linux block major for /dev/nbd*
 // cloneSourceAlive reports whether the nbd client backing a dm-clone is still alive
 // — the REPORTED health poll-hydration surfaces so the controller re-runs prepare
 // (rebuilds the stack) on a dead source. This is the one migration check that is
-// three-valued: a `/proc/<pid>` probe nobody could make must NOT collapse into
-// "dead" and trigger a destructive rebuild, so an Unknown is returned as an error
-// and the poll re-runs rather than acting on a guess.
+// three-valued: a probe nobody could make must NOT collapse into "dead" and trigger
+// a destructive rebuild, so an Unknown is returned as an error and the poll re-runs
+// rather than acting on a guess.
 //
 // dm-clone cannot be asked its source directly, so the clone's live table is read —
 // its 6th field is the source as major:minor (dmsetup reports device NUMBERS, e.g.
-// 43:0 for nbd0) — resolved to /sys/block/nbdN and the nbd's owning pid checked. A
+// 43:0 for nbd0) — resolved to the /sys/block/nbdN whose pid attribute is checked. A
 // non-nbd source (already collapsed) counts as alive: nothing to heal.
+//
+// LIVENESS is the PRESENCE of /sys/block/nbdN/pid, NOT whether the pid it holds names
+// a live process. The kernel creates that attribute on connect and removes it on
+// disconnect, so its presence is the connected signal. It must NOT be read as a
+// process handle: Boat dials nbd-client in its default NETLINK mode, where the
+// configuring process hands the socket to the kernel and exits at once — so a
+// perfectly healthy export has no process at that pid. A `test -d /proc/<pid>` on it
+// reported every healthy netlink source DEAD, and a live 2-host migration looped
+// rebuilding a 256/256-hydrated clone forever because of it.
 func cloneSourceAlive(ctx context.Context, cmd commands, cloneName string) (bool, error) {
 	table, err := cmd.RunUnchecked(ctx, "sudo dmsetup table {}", cloneName)
 	if err != nil {
@@ -95,17 +104,12 @@ func cloneSourceAlive(ctx context.Context, cmd commands, cloneName string) (bool
 	if !strings.HasPrefix(block, "nbd") {
 		return true, nil
 	}
-	output, err := cmd.RunUnchecked(ctx, "cat /sys/block/{}/pid", block)
+	// Present ⟺ connected (the kernel removes the attribute on disconnect); absent ⟺
+	// the client is gone. Probed, not OK'd, so a read that could not be made surfaces
+	// as an error rather than rounding to "dead" and re-preparing.
+	answer, err := cmd.Probe(ctx, "test -e /sys/block/{}/pid", block)
 	if err != nil {
 		return false, err
-	}
-	pid := strings.TrimSpace(output)
-	if !isDigits(pid) {
-		return false, nil // no owner recorded → the client died (a proven negative)
-	}
-	answer, err := cmd.Probe(ctx, "test -d /proc/{}", pid)
-	if err != nil {
-		return false, err // could not look — surfaced, not rounded to "dead"
 	}
 	return answer == run.Yes, nil
 }

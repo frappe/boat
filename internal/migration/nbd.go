@@ -122,22 +122,19 @@ func ensureNBDClient(ctx context.Context, cmd commands, host string, port, slot 
 	return device, nil
 }
 
-// nbdClientAlive reports whether /dev/nbd<slot> has a LIVE client process, read from
-// the owning pid the kernel records in /sys/block/nbd<slot>/pid. A GUARD (it gates
-// the reconnect above and the clone-rebuild in dropCloneIfSourceDead), so OK is
-// free: a wrong "dead" reading costs a re-dial or a re-hydration from 0, never
+// nbdClientAlive reports whether /dev/nbd<slot> still has a connected client, read
+// from the PRESENCE of /sys/block/nbd<slot>/pid — the attribute the kernel keeps
+// while a connection is up and removes on disconnect. It does NOT check that the pid
+// there names a live PROCESS: nbd-client's default netlink mode hands the socket to
+// the kernel and the configuring process exits at once, so a healthy export has no
+// process at that pid — a `test -d /proc/<pid>` reported every healthy netlink client
+// dead, which had dropCloneIfSourceDead tearing down fully-hydrated clones. A GUARD
+// (it gates the reconnect above and the clone-rebuild in dropCloneIfSourceDead), so
+// OK is free: a wrong "dead" costs a re-dial or a re-hydration from 0, never
 // correctness — the source snapshot is intact and the dest re-copies. The REPORTED
 // liveness poll-hydration surfaces is a separate, three-valued check (clone.go).
 func nbdClientAlive(ctx context.Context, cmd commands, slot int) bool {
-	output, err := cmd.RunUnchecked(ctx, "cat /sys/block/nbd{}/pid", slot)
-	if err != nil {
-		return false
-	}
-	pid := strings.TrimSpace(output)
-	if !isDigits(pid) {
-		return false // no owner recorded → not connected
-	}
-	return cmd.OK(ctx, "test -d /proc/{}", pid)
+	return cmd.OK(ctx, "test -e /sys/block/nbd{}/pid", slot)
 }
 
 // killNBD tears down a qemu-nbd export: by its recorded pid first (when known), then
@@ -156,19 +153,4 @@ func killNBD(ctx context.Context, cmd commands, pid, port int) {
 		cmd.RunUnchecked(ctx, "sudo kill {}", filePid)
 	}
 	cmd.RunUnchecked(ctx, "sudo rm -f {}", pidFile)
-}
-
-// isDigits reports whether s is a non-empty run of ASCII digits — the pid check,
-// spelled out rather than reaching for strconv so a value with a stray sign or space
-// is rejected the way Python's str.isdigit rejects it.
-func isDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for index := 0; index < len(s); index++ {
-		if s[index] < '0' || s[index] > '9' {
-			return false
-		}
-	}
-	return true
 }

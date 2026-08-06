@@ -94,7 +94,7 @@ func TestReceiveBasePrepare(t *testing.T) {
 		"? sudo dmsetup info "+baseCloneNm,
 		// nbd client to the source base export on port+2 / slot+2
 		"sudo blockdev --getsize64 "+baseImageDev,
-		"- cat /sys/block/nbd2/pid",
+		"? test -e /sys/block/nbd2/pid",
 		"- sudo nbd-client -d /dev/nbd2",
 		"sudo nbd-client "+testSource+" 11167 /dev/nbd2 -persist",
 		// dm-clone over the base
@@ -110,7 +110,7 @@ func TestReceiveBasePrepare(t *testing.T) {
 		"sudo dmsetup create "+baseCloneNm+" --table 0 16777216 clone "+baseCloneMetaDev+" "+baseImageDev+" /dev/nbd2 32768",
 		// image directory: absent, so pull the tar over the meta export (port+3 / slot+3)
 		"? test -d "+imageDir,
-		"- cat /sys/block/nbd3/pid",
+		"? test -e /sys/block/nbd3/pid",
 		"- sudo nbd-client -d /dev/nbd3",
 		"sudo nbd-client "+testSource+" 11168 /dev/nbd3 -persist",
 		"sudo install -d -m 0700 "+imageDir,
