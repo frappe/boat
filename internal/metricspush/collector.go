@@ -9,6 +9,7 @@ package metricspush
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -40,7 +41,10 @@ type Grouped struct {
 // Collect builds all samples for one tick at timestamp ts (RFC3339 with Z). host is
 // the already-gathered host metrics; vms is the store's VM list.
 func Collect(ts, serverName string, host metrics.Metrics, vms []model.VirtualMachine, roots Roots) Grouped {
-	grouped := Grouped{Host: hostSamples(ts, host, len(vms)), VMs: map[string][]datum.Sample{}}
+	// hostSamples(ts, host, len(vms)) would shadow the function name here, so the
+	// local is allHost.
+	allHost := append(hostSamples(ts, host, len(vms)), hostUtilizationSamples(ts, roots)...)
+	grouped := Grouped{Host: allHost, VMs: map[string][]datum.Sample{}}
 	for _, vm := range vms {
 		grouped.VMs[vm.UUID] = vmSamples(ts, serverName, vm, roots)
 	}
@@ -234,4 +238,156 @@ func boolToFloat(b bool) float64 {
 		return 1
 	}
 	return 0
+}
+
+// hostUtilizationSamples reads live host utilization from /proc — all world-readable,
+// no sudo: memory used/available, cumulative CPU busy seconds, and host network and
+// disk byte counters. Every read is best-effort: a missing or unparseable file drops
+// those samples, never the batch.
+func hostUtilizationSamples(ts string, roots Roots) []datum.Sample {
+	var out []datum.Sample
+	add := func(metric string, value float64) {
+		out = append(out, datum.Sample{Metric: metric, Value: value, TS: ts})
+	}
+	if total, available, ok := readMeminfo(roots.Proc); ok {
+		add("host_memory_used_bytes", float64(total-available))
+		add("host_memory_available_bytes", float64(available))
+	}
+	if busy, ok := readCPUBusySeconds(roots.Proc); ok {
+		add("host_cpu_usage_seconds_total", busy)
+	}
+	if rx, tx, ok := readNetDev(roots.Proc); ok {
+		add("host_network_receive_bytes_total", rx)
+		add("host_network_transmit_bytes_total", tx)
+	}
+	if read, written, ok := readDiskstats(roots.Proc); ok {
+		add("host_disk_read_bytes_total", read)
+		add("host_disk_write_bytes_total", written)
+	}
+	return out
+}
+
+func readMeminfo(procRoot string) (total, available uint64, ok bool) {
+	content, err := os.ReadFile(filepath.Join(procRoot, "meminfo"))
+	if err != nil {
+		return 0, 0, false
+	}
+	haveTotal, haveAvailable := false, false
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "MemTotal:":
+			if value, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+				total, haveTotal = value*1024, true
+			}
+		case "MemAvailable:":
+			if value, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+				available, haveAvailable = value*1024, true
+			}
+		}
+	}
+	return total, available, haveTotal && haveAvailable
+}
+
+// readCPUBusySeconds returns cumulative non-idle CPU time in seconds from the
+// aggregate "cpu" line of /proc/stat (USER_HZ = 100). It is a counter; rate() gives
+// cores used.
+func readCPUBusySeconds(procRoot string) (float64, bool) {
+	content, err := os.ReadFile(filepath.Join(procRoot, "stat"))
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[0] != "cpu" {
+			continue
+		}
+		var total, idle uint64
+		for index := 1; index < len(fields); index++ {
+			value, err := strconv.ParseUint(fields[index], 10, 64)
+			if err != nil {
+				return 0, false
+			}
+			total += value
+			if index == 4 || index == 5 { // idle + iowait
+				idle += value
+			}
+		}
+		return float64(total-idle) / 100.0, true
+	}
+	return 0, false
+}
+
+// readNetDev sums rx/tx bytes over physical host interfaces, excluding loopback and
+// the virtual per-VM/bridge devices.
+func readNetDev(procRoot string) (receive, transmit float64, ok bool) {
+	content, err := os.ReadFile(filepath.Join(procRoot, "net", "dev"))
+	if err != nil {
+		return 0, 0, false
+	}
+	excluded := func(name string) bool {
+		if name == "lo" {
+			return true
+		}
+		for _, prefix := range []string{"veth", "tap", "atlas-", "docker", "br-", "vnet", "mig6"} {
+			if strings.HasPrefix(name, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	any := false
+	for _, line := range strings.Split(string(content), "\n") {
+		colon := strings.IndexByte(line, ':')
+		if colon < 0 {
+			continue
+		}
+		name := strings.TrimSpace(line[:colon])
+		if excluded(name) {
+			continue
+		}
+		numbers := strings.Fields(line[colon+1:])
+		if len(numbers) < 9 {
+			continue
+		}
+		rx, err1 := strconv.ParseUint(numbers[0], 10, 64)
+		tx, err2 := strconv.ParseUint(numbers[8], 10, 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		receive += float64(rx)
+		transmit += float64(tx)
+		any = true
+	}
+	return receive, transmit, any
+}
+
+var wholeDiskName = regexp.MustCompile(`^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+)$`)
+
+// readDiskstats sums read/written bytes across whole block devices (sectors * 512),
+// skipping partitions, dm and loop devices.
+func readDiskstats(procRoot string) (read, written float64, ok bool) {
+	content, err := os.ReadFile(filepath.Join(procRoot, "diskstats"))
+	if err != nil {
+		return 0, 0, false
+	}
+	any := false
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 10 || !wholeDiskName.MatchString(fields[2]) {
+			continue
+		}
+		sectorsRead, err1 := strconv.ParseUint(fields[5], 10, 64)
+		sectorsWritten, err2 := strconv.ParseUint(fields[9], 10, 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		read += float64(sectorsRead) * 512
+		written += float64(sectorsWritten) * 512
+		any = true
+	}
+	return read, written, any
 }

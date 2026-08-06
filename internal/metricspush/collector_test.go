@@ -185,6 +185,46 @@ func TestMemoryMaxLiteralSkipped(t *testing.T) {
 	}
 }
 
+func TestHostUtilizationSamples(t *testing.T) {
+	dir := t.TempDir()
+	proc := filepath.Join(dir, "proc")
+	if err := os.MkdirAll(filepath.Join(proc, "net"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(rel, body string) {
+		if err := os.WriteFile(filepath.Join(proc, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("meminfo", "MemTotal:       16384 kB\nMemAvailable:    4096 kB\n")
+	write("stat", "cpu  100 0 100 700 100 0 0 0 0 0\ncpu0 1 2 3 4\n") // busy=total(1000)-idle(700)-iowait(100)=200 -> 2.0s
+	write("net/dev", "Inter-|   Receive\n face |bytes\n  eth0: 1000 1 2 3 4 5 6 7 2000 8\n    lo: 9 0 0 0 0 0 0 0 9 0\n  veth9: 5 0 0 0 0 0 0 0 5 0\n")
+	write("diskstats", " 8 0 sda 1 0 10 0 1 0 20 0 0 0 0\n 8 1 sda1 1 0 999 0 0 0 0 0 0 0 0\n")
+
+	roots := Roots{Proc: proc, Cgroup: filepath.Join(dir, "cg"), SysClassNet: filepath.Join(dir, "net")}
+	index := byMetric(hostUtilizationSamples("2026-08-07T00:00:00Z", roots))
+
+	want := map[string]float64{
+		"host_memory_used_bytes":            (16384 - 4096) * 1024,
+		"host_memory_available_bytes":       4096 * 1024,
+		"host_cpu_usage_seconds_total":      2.0,
+		"host_network_receive_bytes_total":  1000, // eth0 only (lo, veth excluded)
+		"host_network_transmit_bytes_total": 2000,
+		"host_disk_read_bytes_total":        10 * 512, // sda only, not sda1
+		"host_disk_write_bytes_total":       20 * 512,
+	}
+	for metric, value := range want {
+		sample, ok := index[metric]
+		if !ok {
+			t.Errorf("missing %q", metric)
+			continue
+		}
+		if sample.Value != value {
+			t.Errorf("%s = %v, want %v", metric, sample.Value, value)
+		}
+	}
+}
+
 // fakeRoots builds a temp tree laid out like the real host and returns the Roots
 // that point at it, plus the cgroup and sysfs net roots for convenience.
 func fakeRoots(t *testing.T) (roots Roots, cgroup, sysClassNet string) {
