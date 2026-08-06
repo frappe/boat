@@ -11,6 +11,7 @@ import (
 
 	"github.com/frappe/boat/internal/adopt"
 	"github.com/frappe/boat/internal/api"
+	"github.com/frappe/boat/internal/datum"
 	"github.com/frappe/boat/internal/journal"
 	"github.com/frappe/boat/internal/model"
 	"github.com/frappe/boat/internal/park"
@@ -59,6 +60,14 @@ type daemonParts struct {
 	// updateKey is the trusted self-update signer, loaded from --update-key-file. A
 	// nil key (no file) disables POST /v1/update rather than trusting a default.
 	updateKey ed25519.PublicKey
+	// datum is the metrics push client, nil when --datum-url is unset (metrics
+	// export disabled). datumTokens holds the host + per-VM datum bearer tokens
+	// Atlas ships (keyed by resource_id), and datumInterval is the push cadence.
+	datum         *datum.Client
+	datumTokens   *datum.TokenSet
+	datumInterval time.Duration
+	// metricsListen, when non-empty, is the address the Prometheus /metrics endpoint serves on.
+	metricsListen string
 }
 
 // build constructs the daemon in dependency order: the store, the journal over
@@ -76,6 +85,18 @@ func build(options daemonOptions) (*daemonParts, error) {
 	}
 	parts := assemble(database)
 	parts.serverName = options.serverName
+	parts.metricsListen = options.metricsListen
+	// Metrics export is opt-in: with no --datum-url the client stays nil and the
+	// push loop is never registered, so an un-wired host behaves exactly as before.
+	if options.datumURL != "" {
+		datumTokens, tokenErr := datum.Open(options.datumTokenFilePath)
+		if tokenErr != nil {
+			return nil, fmt.Errorf("could not open the datum token file at %s: %w", options.datumTokenFilePath, tokenErr)
+		}
+		parts.datum = datum.New(options.datumURL)
+		parts.datumTokens = datumTokens
+		parts.datumInterval = options.datumInterval
+	}
 	// The update key is optional: no file means self-update is not enabled on this
 	// host, which is a policy and not a failure; a file that will not parse is an
 	// operator error worth refusing to start over rather than silently disabling.

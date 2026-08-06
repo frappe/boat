@@ -17,14 +17,17 @@ import (
 	"time"
 
 	"github.com/frappe/boat/internal/api"
+	"github.com/frappe/boat/internal/datum"
 	"github.com/frappe/boat/internal/paths"
 	"github.com/frappe/boat/internal/token"
 	"github.com/frappe/boat/internal/version"
 )
 
 const (
-	defaultStorePath     = "/var/lib/boat/boat.db"
-	defaultTokenFilePath = "/etc/boat/token"
+	defaultStorePath          = "/var/lib/boat/boat.db"
+	defaultTokenFilePath      = "/etc/boat/token"
+	defaultDatumTokenFilePath = "/etc/boat/datum-tokens.json"
+	defaultDatumInterval      = 30 * time.Second
 	// socketMode is 0660 because on the local socket the peer's credentials are
 	// the authentication: the boat service group may talk to the daemon and
 	// nobody else may.
@@ -44,6 +47,12 @@ type daemonOptions struct {
 	tokenFilePath string
 	serverName    string
 	updateKeyPath string
+
+	datumURL           string
+	datumTokenFilePath string
+	datumInterval      time.Duration
+
+	metricsListen string
 }
 
 func daemon(arguments []string, errorOutput io.Writer) int {
@@ -74,6 +83,10 @@ func parseDaemonOptions(arguments []string, errorOutput io.Writer) (daemonOption
 	flags.StringVar(&options.tokenFilePath, "token-file", defaultTokenFilePath, "file holding the bearer token the tunnel listener demands")
 	flags.StringVar(&options.serverName, "server-name", "", "this host's Frappe Server name; enables the §11.1 placement boot gate (empty leaves it inert)")
 	flags.StringVar(&options.updateKeyPath, "update-key-file", defaultUpdateKeyPath, "file holding the ed25519 public key trusted to sign self-updates; absent disables POST /v1/update")
+	flags.StringVar(&options.datumURL, "datum-url", "", "base URL of the datum ingest service; empty disables metrics export")
+	flags.StringVar(&options.datumTokenFilePath, "datum-token-file", defaultDatumTokenFilePath, "file holding the datum bearer tokens (host + per-VM) Atlas ships")
+	flags.DurationVar(&options.datumInterval, "datum-interval", defaultDatumInterval, "how often to collect and push metrics to datum")
+	flags.StringVar(&options.metricsListen, "metrics-listen", "", "address to serve Prometheus /metrics on (e.g. 127.0.0.1:9109); empty disables it")
 	return options, flags.Parse(arguments)
 }
 
@@ -116,7 +129,7 @@ func serve(options daemonOptions, tokens *token.Store) error {
 	// no verb killed mid-flight to change a secret. It stops when serve returns.
 	reloadCtx, stopReload := context.WithCancel(context.Background())
 	defer stopReload()
-	go reloadOnSignal(reloadCtx, tokens)
+	go reloadOnSignal(reloadCtx, tokens, parts.datumTokens)
 	slog.Info("boat is serving", "socket", options.socketPath, "listen", options.listenAddress, "version", version.Version)
 	served := serveUntilSignal(active)
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
@@ -210,7 +223,7 @@ func clearStaleSocket(path string) error {
 // file or a bad rotation must not disarm the listener, only be ignored until a
 // good one lands. SIGHUP's default action is to terminate, so registering this
 // handler is also what keeps a reload from killing the daemon.
-func reloadOnSignal(ctx context.Context, tokens *token.Store) {
+func reloadOnSignal(ctx context.Context, tokens *token.Store, datumTokens *datum.TokenSet) {
 	hangups := make(chan os.Signal, 1)
 	signal.Notify(hangups, syscall.SIGHUP)
 	defer signal.Stop(hangups)
@@ -224,6 +237,13 @@ func reloadOnSignal(ctx context.Context, tokens *token.Store) {
 				continue
 			}
 			slog.Info("reloaded the bearer token on SIGHUP")
+			if datumTokens != nil {
+				if err := datumTokens.Reload(); err != nil {
+					slog.Error("could not reload the datum tokens on SIGHUP", "error", err)
+				} else {
+					slog.Info("reloaded the datum tokens on SIGHUP")
+				}
+			}
 		}
 	}
 }

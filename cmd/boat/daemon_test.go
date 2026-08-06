@@ -29,6 +29,9 @@ func TestDaemonOptionsDefaultToTheHostsLayout(t *testing.T) {
 		tokenFilePath: defaultTokenFilePath,
 		serverName:    "",
 		updateKeyPath: defaultUpdateKeyPath,
+
+		datumTokenFilePath: defaultDatumTokenFilePath,
+		datumInterval:      defaultDatumInterval,
 	}
 	if options != want {
 		t.Errorf("got %+v, want %+v", options, want)

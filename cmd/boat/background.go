@@ -44,6 +44,18 @@ func (parts *daemonParts) runBackground() *background {
 	work.run("wake trap", func(ctx context.Context) error {
 		return parts.trap.Run(ctx, wakeTrapInterval)
 	})
+	// Registered only when metrics export is wired (--datum-url set); otherwise the
+	// daemon runs its two loops exactly as before.
+	if parts.datum != nil {
+		work.run("metrics push", func(ctx context.Context) error {
+			return parts.pushMetrics(ctx, parts.datumInterval)
+		})
+	}
+	if parts.metricsListen != "" {
+		work.run("metrics endpoint", func(ctx context.Context) error {
+			return parts.serveMetrics(ctx, parts.metricsListen)
+		})
+	}
 	return work
 }
 
