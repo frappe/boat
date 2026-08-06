@@ -81,6 +81,12 @@ func (reconciler *Reconciler) observe(
 	if err := reconciler.store.PutVirtualMachine(observed); err != nil {
 		return observed, fmt.Errorf("record what %s was observed to be: %w", uuid, err)
 	}
+	// The write bumped the observed epoch; now tell the watchers a change landed.
+	// Announced only after it is written down, for the reason the post-verb path
+	// is: a watcher told of a transition the store does not hold would read the
+	// export next and see it undone. A reconciler with no publisher wired is a
+	// no-op here, never a nil call.
+	reconciler.observed(observed)
 	return observed, nil
 }
 

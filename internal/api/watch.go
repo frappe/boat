@@ -36,13 +36,20 @@ func (response *eventStream) VisitWatchResponse(writer http.ResponseWriter) erro
 	return response.hub.ServeStream(response.ctx, writer)
 }
 
-// publishObserved tells the watchers what the host was just seen to be.
+// PublishObserved tells the watchers what the host was just seen to be.
+//
+// Both paths that write an observation call it: the post-verb one here, and the
+// reconciler, which the daemon wires to this method after the server is built. So
+// a change Atlas caused through a verb and one the reconciler noticed on its
+// own — a guest that died, a unit that failed, a VM the wake trap resumed — reach
+// the stream the same way, which is what lets a watcher trust /watch carries every
+// observed change and not only the ones it asked for.
 //
 // The epoch is read after the write that bumped it, so an event names the state a
 // later export would confirm. A hub that cannot be told is not a reason to fail
-// the verb that succeeded: watch carries freshness, the export carries truth, and
+// the caller that succeeded: watch carries freshness, the export carries truth, and
 // the backstop for a missed event is the client re-reading the export.
-func (server *Server) publishObserved(record model.VirtualMachine) {
+func (server *Server) PublishObserved(record model.VirtualMachine) {
 	epoch, err := server.state.ObservedEpoch()
 	if err != nil {
 		slog.Error("could not read the observed epoch for a watch event", "uuid", record.UUID, "error", err)

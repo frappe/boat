@@ -110,6 +110,16 @@ type Reconciler struct {
 	// wait is the seam over sleeping. A test replaces it to read the delays the
 	// reconciler asked for instead of living through them.
 	wait func(ctx context.Context, delay time.Duration)
+
+	// observed is told of every observation a pass writes, so a change the
+	// reconciler noticed on its own — a guest that died, a unit that failed, a VM
+	// the wake trap resumed, anything the sweep catches — reaches the watch stream
+	// the same way a post-verb observation does. Without it the stream would carry
+	// only what a verb caused, i.e. only what Atlas already knows. It defaults to a
+	// no-op and is never nil: a reconciler with no publisher is legitimate — every
+	// test in this package drives one, and the daemon wires it only after the API
+	// server that owns the hub exists.
+	observed func(model.VirtualMachine)
 }
 
 // New builds a reconciler over this host's store, its VM mechanics and its
@@ -127,7 +137,20 @@ func New(database *store.Store, machines VirtualMachines, record *journal.Journa
 		sweepInterval: defaultSweepInterval,
 		backoff:       backoff{base: defaultBaseBackoff, max: defaultMaxBackoff},
 		wait:          sleep,
+		observed:      func(model.VirtualMachine) {},
 	}
+}
+
+// OnObserved wires the reconciler's observations to a publisher, so a change it
+// noticed without a verb still announces itself on /watch. The daemon points this
+// at the API server's watch publisher once that server is built; a reconciler
+// left unwired announces nothing, which is what this package's tests rely on.
+//
+// It is set once at assembly, before Run or any Wake starts a pass, so no pass is
+// ever mid-observe while it changes — the reconciler does not guard it with a lock
+// because nothing races it.
+func (reconciler *Reconciler) OnObserved(publish func(model.VirtualMachine)) {
+	reconciler.observed = publish
 }
 
 // Do runs fn as that VM's actor, so a verb and a reconcile pass can never drive

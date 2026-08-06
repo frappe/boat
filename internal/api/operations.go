@@ -312,7 +312,7 @@ func (server *Server) observe(ctx context.Context, runner *run.Runner, uuid stri
 	}
 	// Announced only once it is written down. A watcher told of a transition the
 	// store does not hold would read the export next and see it undone.
-	server.publishObserved(record)
+	server.PublishObserved(record)
 }
 
 // missingOperationIdentifier refuses work that could not be replayed. The IDL
