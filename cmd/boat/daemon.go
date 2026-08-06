@@ -13,12 +13,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/frappe/boat/internal/api"
 	"github.com/frappe/boat/internal/paths"
+	"github.com/frappe/boat/internal/token"
 	"github.com/frappe/boat/internal/version"
 )
 
@@ -51,11 +51,14 @@ func daemon(arguments []string, errorOutput io.Writer) int {
 	if err != nil {
 		return exitUsage
 	}
-	token, err := options.bearerToken()
+	tokens, err := token.Open(options.tokenFilePath)
 	if err != nil {
 		return reportError(errorOutput, err)
 	}
-	if err := serve(options, token); err != nil {
+	if err := options.requireTunnelToken(tokens); err != nil {
+		return reportError(errorOutput, err)
+	}
+	if err := serve(options, tokens); err != nil {
 		return reportError(errorOutput, err)
 	}
 	return exitSuccess
@@ -74,31 +77,17 @@ func parseDaemonOptions(arguments []string, errorOutput io.Writer) (daemonOption
 	return options, flags.Parse(arguments)
 }
 
-// bearerToken reads the token the tunnel listener will demand. A TCP listener
-// without one is an open door onto the host, so it is refused loudly instead of
-// served.
-func (options daemonOptions) bearerToken() (string, error) {
-	token, err := readTokenFile(options.tokenFilePath)
-	if err != nil {
-		return "", err
+// requireTunnelToken refuses a TCP listener with no token to demand — an open
+// door onto the host, refused loudly instead of served. A socket-only daemon (no
+// listen address) needs none: the unix socket's peer credentials are its
+// authentication, so a host Atlas has not handed a token yet still serves its
+// socket. Expiry counts as no token here too: a listener whose only token has
+// already expired is the same open door, and is refused the same way.
+func (options daemonOptions) requireTunnelToken(tokens *token.Store) error {
+	if options.listenAddress != "" && tokens.Current() == "" {
+		return fmt.Errorf("refusing to serve %s: no bearer token in %s", options.listenAddress, options.tokenFilePath)
 	}
-	if options.listenAddress != "" && token == "" {
-		return "", fmt.Errorf("refusing to serve %s: no bearer token in %s", options.listenAddress, options.tokenFilePath)
-	}
-	return token, nil
-}
-
-// readTokenFile treats a missing file as no token: a socket-only daemon is
-// legitimate on a host Atlas has not handed a token yet.
-func readTokenFile(path string) (string, error) {
-	content, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("could not read the token file %s: %w", path, err)
-	}
-	return strings.TrimSpace(string(content)), nil
+	return nil
 }
 
 // listening pairs a server with the listener it answers on, so the socket and
@@ -111,17 +100,23 @@ type listening struct {
 // serve is the whole daemon: build it, learn what the host already holds, run
 // the loops that drive it, answer requests until the service manager asks for a
 // stop, and put it all down in the order the pieces depend on each other.
-func serve(options daemonOptions, token string) error {
+func serve(options daemonOptions, tokens *token.Store) error {
 	parts, err := build(options)
 	if err != nil {
 		return err
 	}
 	// Adoption runs inside startUp, before a listener exists to accept on.
-	active, err := parts.startUp(context.Background(), options, token)
+	active, err := parts.startUp(context.Background(), options, tokens)
 	if err != nil {
 		return errors.Join(err, parts.close())
 	}
 	work := parts.runBackground()
+	// A SIGHUP reloads the bearer token, so Atlas rotates it by replacing the file
+	// and signalling this daemon rather than restarting it — no dropped tunnel and
+	// no verb killed mid-flight to change a secret. It stops when serve returns.
+	reloadCtx, stopReload := context.WithCancel(context.Background())
+	defer stopReload()
+	go reloadOnSignal(reloadCtx, tokens)
 	slog.Info("boat is serving", "socket", options.socketPath, "listen", options.listenAddress, "version", version.Version)
 	served := serveUntilSignal(active)
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
@@ -131,7 +126,7 @@ func serve(options daemonOptions, token string) error {
 
 // openListeners binds the socket always and the tunnel only when asked. The two
 // authenticate differently, so they get different handlers off the one server.
-func openListeners(options daemonOptions, server *api.Server, token string) ([]listening, error) {
+func openListeners(options daemonOptions, server *api.Server, tokens *token.Store) ([]listening, error) {
 	socket, err := listenOnSocket(options.socketPath)
 	if err != nil {
 		return nil, err
@@ -145,7 +140,7 @@ func openListeners(options daemonOptions, server *api.Server, token string) ([]l
 		socket.Close()
 		return nil, fmt.Errorf("could not listen on %s: %w", options.listenAddress, err)
 	}
-	return append(active, listening{server: &http.Server{Handler: server.TunnelHandler(token)}, listener: tunnel}), nil
+	return append(active, listening{server: &http.Server{Handler: server.TunnelHandler(tokens.Current)}, listener: tunnel}), nil
 }
 
 // listenOnSocket binds the local control socket at 0660.
@@ -203,6 +198,34 @@ func clearStaleSocket(path string) error {
 		return fmt.Errorf("could not remove the stale socket %s: %w", path, err)
 	}
 	return nil
+}
+
+// reloadOnSignal reloads the bearer token on SIGHUP and returns when ctx is
+// cancelled. It is how a rotation reaches a running daemon: `systemctl reload
+// boat` (ExecReload → SIGHUP) after Atlas has replaced the token file, so the
+// listener demands the new secret without the daemon restarting under its own
+// tunnel.
+//
+// A failed reload is logged and the old token kept, deliberately: a half-written
+// file or a bad rotation must not disarm the listener, only be ignored until a
+// good one lands. SIGHUP's default action is to terminate, so registering this
+// handler is also what keeps a reload from killing the daemon.
+func reloadOnSignal(ctx context.Context, tokens *token.Store) {
+	hangups := make(chan os.Signal, 1)
+	signal.Notify(hangups, syscall.SIGHUP)
+	defer signal.Stop(hangups)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hangups:
+			if err := tokens.Reload(); err != nil {
+				slog.Error("could not reload the bearer token on SIGHUP", "error", err)
+				continue
+			}
+			slog.Info("reloaded the bearer token on SIGHUP")
+		}
+	}
 }
 
 // serveUntilSignal returns when the service manager asks for a stop or a

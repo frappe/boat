@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/frappe/boat/internal/model"
+	"github.com/frappe/boat/internal/token"
 )
 
 func TestDaemonOptionsDefaultToTheHostsLayout(t *testing.T) {
@@ -51,11 +52,16 @@ func TestDaemonOptionsTakeTheirOverrides(t *testing.T) {
 }
 
 // A TCP listener with no token would be an open door onto the host: better to
-// fail to start than to start wrong.
+// fail to start than to start wrong. (Token parsing and expiry are the token
+// package's own tests; this asserts only the daemon's start-time gate.)
 func TestATunnelListenerWithoutATokenIsRefused(t *testing.T) {
 	options := daemonOptions{listenAddress: "127.0.0.1:0", tokenFilePath: filepath.Join(t.TempDir(), "absent")}
+	tokens, err := token.Open(options.tokenFilePath)
+	if err != nil {
+		t.Fatalf("open token store: %v", err)
+	}
 
-	_, err := options.bearerToken()
+	err = options.requireTunnelToken(tokens)
 
 	if err == nil {
 		t.Fatal("a tunnel listener was accepted with no token")
@@ -68,28 +74,16 @@ func TestATunnelListenerWithoutATokenIsRefused(t *testing.T) {
 // A host Atlas has not handed a token yet still serves its local socket.
 func TestASocketOnlyDaemonNeedsNoToken(t *testing.T) {
 	options := daemonOptions{tokenFilePath: filepath.Join(t.TempDir(), "absent")}
-
-	token, err := options.bearerToken()
-
-	if err != nil || token != "" {
-		t.Errorf("got %q, %v; want no token and no error", token, err)
-	}
-}
-
-func TestTheTokenIsReadWithoutItsTrailingNewline(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(path, []byte("a-short-lived-token\n"), 0o600); err != nil {
-		t.Fatalf("could not write the token: %v", err)
-	}
-	options := daemonOptions{listenAddress: "127.0.0.1:0", tokenFilePath: path}
-
-	token, err := options.bearerToken()
-
+	tokens, err := token.Open(options.tokenFilePath)
 	if err != nil {
-		t.Fatalf("could not read the token: %v", err)
+		t.Fatalf("open token store: %v", err)
 	}
-	if token != "a-short-lived-token" {
-		t.Errorf("got %q, want the token without its newline", token)
+
+	if err := options.requireTunnelToken(tokens); err != nil {
+		t.Errorf("a socket-only daemon was refused: %v", err)
+	}
+	if got := tokens.Current(); got != "" {
+		t.Errorf("got token %q, want none for a host with no token file", got)
 	}
 }
 

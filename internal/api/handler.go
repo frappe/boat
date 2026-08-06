@@ -21,8 +21,14 @@ const bearerPrefix = "Bearer "
 // TunnelHandler serves the mgmt-tunnel listener, where the bearer token Atlas
 // minted for this host is the authentication. /health is exempt so a supervisor
 // can probe a Boat that has not been handed a token yet.
-func (server *Server) TunnelHandler(token string) http.Handler {
-	return requireBearerToken(token, server.routes())
+//
+// It takes the token as a getter, not a value, because the token rotates under
+// a running daemon: Atlas replaces the file and signals a reload, and the very
+// next request must be judged against the new secret. current() is read once per
+// request and returns empty for a token that has expired or been cleared, which
+// tokenMatches then refuses.
+func (server *Server) TunnelHandler(current func() string) http.Handler {
+	return requireBearerToken(current, server.routes())
 }
 
 // SocketHandler serves /run/boat.sock, where unix peer credentials are the
@@ -61,10 +67,11 @@ func (server *Server) strictHandler() wire.ServerInterface {
 	})
 }
 
-// requireBearerToken guards the tunnel listener.
-func requireBearerToken(token string, next http.Handler) http.Handler {
+// requireBearerToken guards the tunnel listener. current is read per request, so
+// a token rotated or expired between two requests is honoured on the second.
+func requireBearerToken(current func() string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if isHealth(request.URL.Path) || tokenMatches(token, request.Header.Get("Authorization")) {
+		if isHealth(request.URL.Path) || tokenMatches(current(), request.Header.Get("Authorization")) {
 			next.ServeHTTP(writer, request)
 			return
 		}

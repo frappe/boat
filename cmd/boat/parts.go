@@ -17,6 +17,7 @@ import (
 	"github.com/frappe/boat/internal/reconcile"
 	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/store"
+	"github.com/frappe/boat/internal/token"
 	"github.com/frappe/boat/internal/units"
 	"github.com/frappe/boat/internal/update"
 	"github.com/frappe/boat/internal/vm"
@@ -180,11 +181,11 @@ func (parts *daemonParts) wake(ctx context.Context, uuid string) error {
 // is the one answer a control plane must never be handed by accident: it is
 // indistinguishable from a wiped host, and it is what makes Atlas reschedule VMs
 // that are running right here.
-func (parts *daemonParts) startUp(ctx context.Context, options daemonOptions, token string) ([]listening, error) {
+func (parts *daemonParts) startUp(ctx context.Context, options daemonOptions, tokens *token.Store) ([]listening, error) {
 	if err := parts.adopt(ctx); err != nil {
 		return nil, err
 	}
-	return openListeners(options, parts.api, token)
+	return openListeners(options, parts.api, tokens)
 }
 
 // adopt learns this host's VMs by reading the host.

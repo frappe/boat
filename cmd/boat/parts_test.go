@@ -16,10 +16,23 @@ import (
 	"github.com/frappe/boat/internal/reconcile"
 	"github.com/frappe/boat/internal/run"
 	"github.com/frappe/boat/internal/store"
+	"github.com/frappe/boat/internal/token"
 	"github.com/frappe/boat/internal/vm"
 )
 
 const adoptedUuid = "1f8e0a2c-0000-4000-8000-00000000000a"
+
+// noTokens is a socket-only token store: an absent file, so Current() is empty.
+// startUp needs one, but the tests that use this open no tunnel listener, so the
+// token is never demanded.
+func noTokens(t *testing.T) *token.Store {
+	t.Helper()
+	tokens, err := token.Open(filepath.Join(t.TempDir(), "absent"))
+	if err != nil {
+		t.Fatalf("open token store: %v", err)
+	}
+	return tokens
+}
 
 // errScanFailed stands in for any host read that would not answer: the whole
 // scan fails with it, because a partial scan is a lie.
@@ -144,7 +157,7 @@ func TestAdoptionRunsBeforeTheListenersAccept(t *testing.T) {
 	}
 	parts.scanner = scanner
 
-	active, err := parts.startUp(context.Background(), options, "")
+	active, err := parts.startUp(context.Background(), options, noTokens(t))
 	if err != nil {
 		t.Fatalf("could not start up: %v", err)
 	}
@@ -196,7 +209,7 @@ func TestAFailedAdoptionOpensNoListener(t *testing.T) {
 	options := daemonOptions{socketPath: filepath.Join(t.TempDir(), "boat.sock")}
 	parts.scanner = &fakeScanner{socketPath: options.socketPath, err: errScanFailed}
 
-	active, err := parts.startUp(context.Background(), options, "")
+	active, err := parts.startUp(context.Background(), options, noTokens(t))
 
 	if err == nil {
 		closeListeners(active)

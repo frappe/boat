@@ -90,6 +90,13 @@ ExecStart=/usr/local/bin/boat daemon \
 Restart=on-failure
 RestartSec=2
 
+# `systemctl reload boat` re-reads the bearer token, nothing else: Atlas rotates
+# the token by replacing /etc/boat/token and reloading, so the new secret takes
+# effect without a restart that would drop the tunnel and kill in-flight verbs.
+# SIGHUP is the daemon's reload signal (see reloadOnSignal); a reload with no new
+# file is a harmless re-read of the same token.
+ExecReload=/bin/kill -HUP $MAINPID
+
 # SIGTERM plus a real window: on stop the daemon stops accepting, lets in-flight
 # operations reach a journal checkpoint, and closes the store. Killing it sooner
 # does not endanger a VM — Firecracker is not our child and keeps running — but
