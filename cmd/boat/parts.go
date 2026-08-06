@@ -146,6 +146,7 @@ func (parts *daemonParts) dependencies() api.Dependencies {
 		Reconciler:      parts.reconciler,
 		Watch:           watch.NewHub(),
 		Units:           parts.units,
+		HostVerbs:       hostVerbRunner{},
 		StartedAt:       time.Now().UTC(),
 		ServerName:      parts.serverName,
 		UpdateKey:       parts.updateKey,

@@ -133,6 +133,10 @@ func (response *errorResponse) VisitActOnUnitResponse(writer http.ResponseWriter
 	return response.write(writer)
 }
 
+func (response *errorResponse) VisitRunHostVerbResponse(writer http.ResponseWriter) error {
+	return response.write(writer)
+}
+
 func notFound(message string) *errorResponse {
 	return &errorResponse{statusCode: http.StatusNotFound, message: message}
 }

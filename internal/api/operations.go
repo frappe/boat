@@ -293,6 +293,12 @@ func exitCodeOf(verbError error) int {
 	if errors.As(verbError, &commandError) {
 		return commandError.ExitCode
 	}
+	// A host verb reports its own exit code, so the operation record carries the
+	// same code the equivalent Task did rather than flattening every failure to 1.
+	var hostError *hostVerbError
+	if errors.As(verbError, &hostError) {
+		return hostError.code
+	}
 	return 1
 }
 

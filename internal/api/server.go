@@ -164,7 +164,13 @@ type Dependencies struct {
 	// GET /host is required to carry unit liveness, and a Server that answered it
 	// with silence would report a host whose pool, network plane and wake trap are
 	// all unknown as though it had none of them.
-	Units     Units
+	Units Units
+	// HostVerbs runs the host verbs (provision-vm, the snapshot family, sync-image,
+	// per-VM networking) in-process behind POST /host-verbs/{verb}. A nil runner is
+	// legal and disables the endpoint — a handler test that never posts a host verb
+	// needs none — so `boat daemon` always passes cmd/boat's implementation, which
+	// wraps the same verb functions the CLI runs (spec/33 §2.1, §2.4).
+	HostVerbs HostVerbRunner
 	StartedAt time.Time
 	// UpdateKey is the ed25519 public key this host trusts to sign self-updates
 	// (§5). A nil or wrong-length key disables POST /v1/update: a host Atlas has
@@ -193,6 +199,7 @@ type Server struct {
 	reconciler      Reconciler
 	watch           *watch.Hub
 	units           Units
+	hostVerbs       HostVerbRunner
 	startedAt       time.Time
 	// admission is the self-update quiesce gate every mutating verb consults before
 	// it claims (perform, performMigrationPhase). It is always non-nil and defaults
@@ -309,6 +316,7 @@ func NewServer(dependencies Dependencies) *Server {
 		reconciler:        serializer,
 		watch:             hub,
 		units:             dependencies.Units,
+		hostVerbs:         dependencies.HostVerbs,
 		startedAt:         dependencies.StartedAt,
 		admission:         gate,
 		updateKey:         dependencies.UpdateKey,
