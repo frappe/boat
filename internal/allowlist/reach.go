@@ -18,12 +18,16 @@ const modulePath = "github.com/frappe/boat/"
 // user start from. Every function in them is a root, and reachability is
 // followed from there.
 //
-// Every other verb — `boat bootstrap`, `boat snapshot-vm`, the whole WO-6 set —
-// is invoked by an operator or by Atlas over SSH, both of which are already
-// root, and `sudo` from root is a pass-through that consults no allow-list at
-// all. Requiring grants for those would not make them safer; it would add
-// standing privileges for the `boat` user that nothing running as `boat` ever
-// exercises, which is the dead-grant problem this package also exists to stop.
+// `boat bootstrap` and `boat reset-server` are still invoked by Atlas over SSH,
+// where `sudo` from root is a pass-through that consults no allow-list at all, so
+// requiring grants for them would add standing privileges the `boat` user never
+// exercises. But the rest of the WO-6 host verbs — `boat snapshot-vm`,
+// `provision-vm`, `sync-image` and the others — are NO LONGER SSH-only: the
+// daemon runs them in-process behind POST /host-verbs/{verb} (spec/33 §2.4), as
+// the boat user, so each is a root too. Those are named in hostVerbEntryPoints
+// below, function by function, because the daemon reaches them through a func
+// field injected at start-up (cmd/boat's hostVerbRunner) that the static graph
+// cannot follow across.
 //
 // The list is short and it is the thing to change if a unit gains a verb:
 //
@@ -38,6 +42,43 @@ var unprivilegedEntryPoints = []string{
 	"internal/adopt",
 	// `boat networkd`: its own unit, same user, privileged for wg and ip.
 	"internal/networkd",
+}
+
+// hostVerbEntryPoints are the internal functions `boat daemon` reaches through
+// the host-verb endpoint — the entry point of each verb in cmd/boat's
+// servedHostVerbs, one function apiece. They are roots for the same reason the
+// packages above are: the daemon runs them as the boat user. They are named
+// function-granular, NOT by package, because a host-verb package also holds code
+// the daemon does NOT run as boat: `internal/snapshot` holds RestoreVM, the
+// firecracker-vm@ ExecStartPre systemd runs as ROOT, and rooting the whole
+// package would demand the boat user hold grants for a boot hook it never runs.
+//
+// The edge from `internal/api` into these cannot be followed statically —
+// cmd/boat's hostVerbRunner is set on a Server field at daemon start-up, so
+// api.RunHostVerb calls `.Run` on an interface whose implementation lives outside
+// internal/ — which is exactly why each is listed here by name.
+// The set is the ENABLED host verbs (cmd/boat's servedHostVerbs), and it is these
+// six because they reach ZERO privileged command the allow-list does not already
+// grant: each shares its host mechanics with a verb the daemon already runs — a
+// disk snapshot is the lifecycle LVM path, the memory snapshot is sleep-vm's, host
+// keys and firewall and the base-ship cleanup are migration's — so moving them to
+// the daemon is "no worse than today" with no new standing privilege (§12).
+//
+// The heavier verbs (provision-vm, sync-image, promote-snapshot-image, the s3
+// backups) are NOT here yet: each needs new grants the boat user does not hold —
+// curl, mkfs.ext4, dd, `systemctl start` an arbitrary unit — and those must be
+// written SCOPED and proven on a host with `sudo -u boat -n -l` before the daemon
+// runs them, or a denied sudo reads back as a fact about the host. vm-tunnel needs
+// its wireguard commands literalised first (they render `sudo {}`, which no grant
+// can safely authorise). Their transport is ready — run_task will route them the
+// day servedHostVerbs and this list gain them together with the grants.
+var hostVerbEntryPoints = []string{
+	"internal/snapshot.SnapshotVM",
+	"internal/snapshot.SnapshotStopVM",
+	"internal/snapshot.DeleteSnapshotVM",
+	"internal/hostkeys.RegenerateHostKeysVM",
+	"internal/netapply/vmnetwork.Firewall",
+	"internal/migration.ExportCleanupSource",
 }
 
 // function is one function or method and what this check needs to know about
@@ -149,6 +190,13 @@ func methodsNamed(functions map[string]function, name string, packagePath string
 func isEntryPoint(qualifiedName string) bool {
 	for _, entryPoint := range unprivilegedEntryPoints {
 		if strings.HasPrefix(qualifiedName, entryPoint+".") {
+			return true
+		}
+	}
+	// The host-verb roots are exact function names, not package prefixes: only
+	// `internal/snapshot.SnapshotVM` is a root, not everything in the package.
+	for _, entryPoint := range hostVerbEntryPoints {
+		if qualifiedName == entryPoint {
 			return true
 		}
 	}

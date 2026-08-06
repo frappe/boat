@@ -17,29 +17,36 @@ import "io"
 
 // servedHostVerbs is the closed set the daemon runs over the endpoint. It is a
 // SUBSET of the verbs Run dispatches, so a verb is written and testable before it
-// is switched on. Three deliberate absences:
+// is switched on — and it is switched on only once the boat user holds every grant
+// the verb needs (internal/allowlist proves that), which is why these six lead.
 //
+// These six reach ZERO privileged command the allow-list does not already grant:
+// each shares its host mechanics with a verb the daemon already runs (a disk
+// snapshot is the lifecycle LVM path, the memory snapshot is sleep-vm's, host keys
+// and firewall and base-ship cleanup are migration's), so serving them adds no new
+// standing privilege to the boat user (§12).
+//
+// NOT served yet, and why:
+//   - provision-vm, sync-image, promote-snapshot-image, warm-snapshot-vm, the two
+//     s3 backups: each needs grants the boat user does not hold (curl, mkfs.ext4,
+//     dd, `systemctl start` an arbitrary unit), which must be written scoped and
+//     proven on a host with `sudo -u boat -n -l` first — see hostVerbEntryPoints in
+//     internal/allowlist. vm-tunnel additionally renders `sudo {}` (its wireguard
+//     commands are computed), which no grant can safely authorise until they are
+//     literalised. Their transport is READY; enabling one is adding it here and to
+//     hostVerbEntryPoints together with its grants.
 //   - bootstrap and reset-server bookend the daemon's own existence — one brings
-//     the host up before there is a daemon to answer HTTP, the other tears the
-//     host down and stops boat.service, so neither can be driven THROUGH the
-//     daemon (§4). They keep the SSH path.
+//     the host up before there is a daemon to answer HTTP, the other tears the host
+//     down and stops boat.service — so neither can be driven THROUGH the daemon.
 //   - poll-vm-traffic and probe-woken-vms are read-only per-minute sweeps Atlas
-//     runs through run_probe with no Task row; a journaled POST would write
-//     ~2,880 operation records per host per day. They want a non-journaling read
-//     path, not this one.
+//     runs through run_probe with no Task row; a journaled POST would write ~2,880
+//     operation records per host per day. They want a non-journaling read path.
 var servedHostVerbs = map[string]bool{
-	"provision-vm":            true,
 	"snapshot-vm":             true,
 	"snapshot-stop-vm":        true,
-	"warm-snapshot-vm":        true,
 	"delete-snapshot-vm":      true,
-	"upload-snapshot-s3":      true,
-	"restore-snapshot-s3":     true,
-	"sync-image":              true,
-	"promote-snapshot-image":  true,
 	"regenerate-host-keys-vm": true,
 	"firewall-apply":          true,
-	"vm-tunnel":               true,
 	"export-cleanup-source":   true,
 }
 
