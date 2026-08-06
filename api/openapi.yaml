@@ -679,7 +679,7 @@ paths:
           its typed result. One of: export-source, export-base, clone-target,
           receive-base, inject-identity, collapse-clone, forward-up,
           source-forward, target-receive, forward-down, withdraw-private,
-          cleanup-source. The poll-only Hydrating phase is GET
+          source-autostart, cleanup-source. The poll-only Hydrating phase is GET
           .../migrate/hydration instead, because it runs every controller tick
           and must not journal a record per tick.
         schema:
@@ -1520,6 +1520,19 @@ components:
             the disk, nbd and snapshot teardown still run. False (a change-address
             migration) brings the source network down, the same teardown terminate
             does.
+        enabled:
+          type: boolean
+          description: |
+            source-autostart only: whether the source VM's systemd unit stays in
+            multi-user.target across a host reboot. Pending sends false (the
+            default), which takes the unit out of multi-user.target.wants so a
+            source-host reboot mid-migration cannot cold-boot a second copy of the
+            guest — the unit's WantedBy=multi-user.target plus provision's
+            `systemctl enable` would otherwise auto-start it, bypassing the
+            migration fence, since its ExecStart is jailer-launch.sh and not `boat
+            vm start`. True is the inverse an operator runs to hand an abandoned
+            source copy back its reboot survival. Idempotent either way: enabling
+            an enabled unit and disabling a disabled one are both no-ops.
         identity:
           $ref: "#/components/schemas/GuestIdentity"
 

@@ -333,6 +333,18 @@ type MigrateRequest struct {
 	// dest makes dm-clone fail with "Invalid argument".
 	DiskGb *int `json:"disk_gb,omitempty"`
 
+	// Enabled source-autostart only: whether the source VM's systemd unit stays in
+	// multi-user.target across a host reboot. Pending sends false (the
+	// default), which takes the unit out of multi-user.target.wants so a
+	// source-host reboot mid-migration cannot cold-boot a second copy of the
+	// guest — the unit's WantedBy=multi-user.target plus provision's
+	// `systemctl enable` would otherwise auto-start it, bypassing the
+	// migration fence, since its ExecStart is jailer-launch.sh and not `boat
+	// vm start`. True is the inverse an operator runs to hand an abandoned
+	// source copy back its reboot survival. Idempotent either way: enabling
+	// an enabled unit and disabling a disabled one are both no-ops.
+	Enabled *bool `json:"enabled,omitempty"`
+
 	// Identity What makes a freshly laid-down root filesystem this VM's rather than the
 	// image's. Boat writes every field of it into the mounted filesystem
 	// without interpreting any of it: an address is bytes it puts in a file,
