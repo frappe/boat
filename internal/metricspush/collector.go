@@ -40,14 +40,14 @@ type Grouped struct {
 // Collect builds all samples for one tick at timestamp ts (RFC3339 with Z). host is
 // the already-gathered host metrics; vms is the store's VM list.
 func Collect(ts, serverName string, host metrics.Metrics, vms []model.VirtualMachine, roots Roots) Grouped {
-	grouped := Grouped{Host: hostSamples(ts, host), VMs: map[string][]datum.Sample{}}
+	grouped := Grouped{Host: hostSamples(ts, host, len(vms)), VMs: map[string][]datum.Sample{}}
 	for _, vm := range vms {
 		grouped.VMs[vm.UUID] = vmSamples(ts, serverName, vm, roots)
 	}
 	return grouped
 }
 
-func hostSamples(ts string, m metrics.Metrics) []datum.Sample {
+func hostSamples(ts string, m metrics.Metrics, virtualMachineCount int) []datum.Sample {
 	var out []datum.Sample
 	add := func(metric string, value float64) {
 		out = append(out, datum.Sample{Metric: metric, Value: value, TS: ts})
@@ -66,7 +66,9 @@ func hostSamples(ts string, m metrics.Metrics) []datum.Sample {
 	if m.PoolMetadataPercent >= 0 {
 		add("host_pool_metadata_percent", m.PoolMetadataPercent)
 	}
-	add("host_virtual_machines", float64(m.VirtualMachines))
+	// The store's VM list is what boat actually holds; metrics.Gather's own count
+	// reads a root-only directory without sudo and would report 0 on a real host.
+	add("host_virtual_machines", float64(virtualMachineCount))
 	add("host_firecracker_running", float64(m.FirecrackerRunning))
 	return out
 }

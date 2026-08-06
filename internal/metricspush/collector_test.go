@@ -27,10 +27,10 @@ func TestHostSamplesSkipUnmeasured(t *testing.T) {
 		DiskFreeBytes:       100,
 		PoolDataPercent:     -1,
 		PoolMetadataPercent: 12.5,
-		VirtualMachines:     3,
+		VirtualMachines:     99, // ignored: host_virtual_machines comes from the VM list
 		FirecrackerRunning:  2,
 	}
-	grouped := Collect("2026-08-06T00:00:00Z", "srv", host, nil, DefaultRoots())
+	grouped := Collect("2026-08-06T00:00:00Z", "srv", host, make([]model.VirtualMachine, 3), DefaultRoots())
 
 	index := byMetric(grouped.Host)
 	want := map[string]float64{
