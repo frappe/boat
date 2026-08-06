@@ -8,7 +8,7 @@ import (
 	"github.com/frappe/boat/internal/run"
 )
 
-// ensureThinPool creates (or re-asserts) the LVM thin pool VM disks are carved
+// EnsureThinPool creates (or re-asserts) the LVM thin pool VM disks are carved
 // from, backed by a sparse loopback file — the stock-cloud-droplet path, where the
 // only disk is the mounted root. Idempotent: an existing pool is re-activated, its
 // loop device re-bound, and nothing re-created.
@@ -16,7 +16,14 @@ import (
 // Ported from lvm.py ThinPool.ensure + PoolBacking (loopback branch). The
 // double existence check guards a reboot race the Python documents: pvcreate/
 // vgcreate/lvcreate each only run when their object is absent.
-func ensureThinPool(ctx context.Context, runner *run.Runner) error {
+//
+// Exported because two callers share it: `boat bootstrap` runs it once to build
+// the pool, and `boat pool` (the boot-time atlas-pool.service oneshot) re-runs it
+// on every boot to re-bind the loop device a reboot dropped — the same
+// ThinPool().ensure() the Python unit called, now standalone. A real-device PV
+// (Scaleway Elastic Metal) survives a reboot intact and needs no re-assert; that
+// branch is not ported (see bootstrap.go), so this stays loopback-only.
+func EnsureThinPool(ctx context.Context, runner *run.Runner) error {
 	if runner.OK(ctx, "sudo lvs --noheadings {}/{}", volumeGroup, poolName) {
 		if _, err := ensureLoopDevice(ctx, runner); err != nil {
 			return err

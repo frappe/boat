@@ -9,7 +9,7 @@ import (
 const testToken = "a-short-lived-per-host-token"
 
 func newTestTunnel(token string) http.Handler {
-	return newTestServer(newFakeStore(), &fakeVirtualMachines{}).TunnelHandler(token)
+	return newTestServer(newFakeStore(), &fakeVirtualMachines{}).TunnelHandler(func() string { return token })
 }
 
 func TestTunnelRefusesAMissingOrWrongToken(t *testing.T) {

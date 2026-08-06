@@ -122,7 +122,7 @@ func Host(ctx context.Context, runner *run.Runner, params Params) (Result, error
 		{"modules", loadModules},
 		{"directories", makeDirectories},
 		{"host-controls", hostControls},
-		{"thin-pool", ensureThinPool},
+		{"thin-pool", EnsureThinPool},
 		{"nft-scaffold", ensureScaffold},
 	}
 	for _, step := range steps {
