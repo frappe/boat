@@ -43,7 +43,7 @@ type Grouped struct {
 func Collect(ts, serverName string, host metrics.Metrics, vms []model.VirtualMachine, roots Roots) Grouped {
 	// hostSamples(ts, host, len(vms)) would shadow the function name here, so the
 	// local is allHost.
-	allHost := append(hostSamples(ts, host, len(vms)), hostUtilizationSamples(ts, roots)...)
+	allHost := append(hostSamples(ts, serverName, host, len(vms)), hostUtilizationSamples(ts, serverName, roots)...)
 	grouped := Grouped{Host: allHost, VMs: map[string][]datum.Sample{}}
 	for _, vm := range vms {
 		grouped.VMs[vm.UUID] = vmSamples(ts, serverName, vm, roots)
@@ -51,10 +51,11 @@ func Collect(ts, serverName string, host metrics.Metrics, vms []model.VirtualMac
 	return grouped
 }
 
-func hostSamples(ts string, m metrics.Metrics, virtualMachineCount int) []datum.Sample {
+func hostSamples(ts, serverName string, m metrics.Metrics, virtualMachineCount int) []datum.Sample {
+	labels := map[string]string{"server": serverName}
 	var out []datum.Sample
 	add := func(metric string, value float64) {
-		out = append(out, datum.Sample{Metric: metric, Value: value, TS: ts})
+		out = append(out, datum.Sample{Metric: metric, Value: value, TS: ts, Labels: labels})
 	}
 	add("host_up", 1)
 	add("host_cpu_cores", float64(m.CPUCores))
@@ -244,10 +245,11 @@ func boolToFloat(b bool) float64 {
 // no sudo: memory used/available, cumulative CPU busy seconds, and host network and
 // disk byte counters. Every read is best-effort: a missing or unparseable file drops
 // those samples, never the batch.
-func hostUtilizationSamples(ts string, roots Roots) []datum.Sample {
+func hostUtilizationSamples(ts, serverName string, roots Roots) []datum.Sample {
+	labels := map[string]string{"server": serverName}
 	var out []datum.Sample
 	add := func(metric string, value float64) {
-		out = append(out, datum.Sample{Metric: metric, Value: value, TS: ts})
+		out = append(out, datum.Sample{Metric: metric, Value: value, TS: ts, Labels: labels})
 	}
 	if total, available, ok := readMeminfo(roots.Proc); ok {
 		add("host_memory_used_bytes", float64(total-available))
