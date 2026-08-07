@@ -75,6 +75,19 @@ func (client *daemonClient) post(path string, body any, into any) error {
 	return client.do(request, into)
 }
 
+func (client *daemonClient) put(path string, body any, into any) error {
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequest(http.MethodPut, "http://boat"+basePath+path, bytes.NewReader(encoded))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	return client.do(request, into)
+}
+
 func (client *daemonClient) do(request *http.Request, into any) error {
 	response, err := client.transport.Do(request)
 	if err != nil {

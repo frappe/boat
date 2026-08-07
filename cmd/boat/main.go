@@ -31,6 +31,7 @@ usage:
   boat daemon [--listen ADDR] [--socket PATH] [--store PATH] [--token-file PATH]
   boat vm start <uuid>
   boat vm stop <uuid> [--graceful=false] [--stop-timeout-seconds N]
+  boat vm adopt <uuid> [--power running|stopped]
   boat vm pause|resume|sleep|wake|terminate|resize <uuid>
   boat vm rebuild <uuid> (--image NAME | --snapshot-device DEV)
                          --identity-file PATH [--data-snapshot-device DEV]
@@ -182,6 +183,8 @@ func virtualMachineCommand(arguments []string, output io.Writer, errorOutput io.
 		return startVirtualMachine(arguments[1:], client, output, errorOutput)
 	case "stop":
 		return stopVirtualMachine(arguments[1:], client, output, errorOutput)
+	case "adopt":
+		return adoptVirtualMachine(arguments[1:], client, output, errorOutput)
 	// The verb name is also the path segment, which is not a coincidence to be
 	// tidied away: the CLI is a client of the documented API and nothing else, so
 	// a verb reachable here that the API does not serve is a 404 rather than a
