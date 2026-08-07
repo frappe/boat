@@ -80,9 +80,16 @@ func (set *TokenSet) HostToken() string {
 	return set.host
 }
 
-// TokenFor is the token for a VM's samples by its UUID, or "" if none is held.
+// TokenFor is the token for a VM's samples by its UUID. A VM with its own token
+// uses it; otherwise it falls back to the host token, so a single-token deployment
+// ({"host":"<jwt>","vms":{}}) pushes every VM's samples under that one token — the
+// VMs are distinguished by a vm=<uuid> label, not by resource_id. Returns "" only
+// when neither a per-VM token nor a host token is held.
 func (set *TokenSet) TokenFor(uuid string) string {
 	set.mutex.RLock()
 	defer set.mutex.RUnlock()
-	return set.vms[uuid]
+	if token, ok := set.vms[uuid]; ok {
+		return token
+	}
+	return set.host
 }
