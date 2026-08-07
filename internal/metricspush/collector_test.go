@@ -108,9 +108,15 @@ func TestVMRunningReadsCgroupAndNet(t *testing.T) {
 	if up := index["vm_up"]; up.Labels["status"] != "Running" {
 		t.Errorf("vm_up status label = %q, want %q", up.Labels["status"], "Running")
 	}
+	if up := index["vm_up"]; up.Labels["vm"] != uuid {
+		t.Errorf("vm_up vm label = %q, want %q", up.Labels["vm"], uuid)
+	}
 	for _, s := range samples {
 		if s.Metric == "vm_up" {
 			continue
+		}
+		if s.Labels["vm"] != uuid {
+			t.Errorf("%s vm label = %q, want %q", s.Metric, s.Labels["vm"], uuid)
 		}
 		if s.Labels["server"] != "srv" {
 			t.Errorf("%s server label = %q, want %q", s.Metric, s.Labels["server"], "srv")
