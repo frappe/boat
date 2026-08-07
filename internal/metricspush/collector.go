@@ -78,8 +78,8 @@ func hostSamples(ts string, m metrics.Metrics, virtualMachineCount int) []datum.
 }
 
 func vmSamples(ts, serverName string, vm model.VirtualMachine, roots Roots) []datum.Sample {
-	labels := map[string]string{"server": serverName}
-	upLabels := map[string]string{"server": serverName, "status": string(vm.ObservedStatus)}
+	labels := map[string]string{"server": serverName, "vm": vm.UUID}
+	upLabels := map[string]string{"server": serverName, "status": string(vm.ObservedStatus), "vm": vm.UUID}
 
 	out := []datum.Sample{{Metric: "vm_up", Value: boolToFloat(vm.ObservedStatus == model.StatusRunning), TS: ts, Labels: upLabels}}
 	if vm.ObservedStatus != model.StatusRunning {

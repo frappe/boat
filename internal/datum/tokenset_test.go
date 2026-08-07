@@ -24,8 +24,32 @@ func TestTokenSetReadsHostAndVMTokens(t *testing.T) {
 	if got := set.TokenFor("uuid-b"); got != "B" {
 		t.Errorf(`TokenFor("uuid-b") = %q, want %q`, got, "B")
 	}
-	if got := set.TokenFor("nope"); got != "" {
-		t.Errorf(`TokenFor("nope") = %q, want ""`, got)
+	if got := set.TokenFor("nope"); got != "H" {
+		t.Errorf(`TokenFor("nope") = %q, want host token %q`, got, "H")
+	}
+}
+
+func TestTokenForFallsBackToHostWhenNoVMEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	if err := os.WriteFile(path, []byte(`{"host":"H","vms":{}}`), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	set, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if got := set.TokenFor("any-uuid"); got != "H" {
+		t.Errorf(`TokenFor with empty vms = %q, want host token %q`, got, "H")
+	}
+}
+
+func TestTokenForEmptyWhenNoHostAndNoVM(t *testing.T) {
+	set, err := Open(filepath.Join(t.TempDir(), "missing.json"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if got := set.TokenFor("x"); got != "" {
+		t.Errorf("TokenFor with no tokens = %q, want empty", got)
 	}
 }
 

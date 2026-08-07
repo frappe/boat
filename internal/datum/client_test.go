@@ -26,11 +26,14 @@ func TestPushPostsSamplesWithBearerToken(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL)
-	err := client.Push(context.Background(), "tok-123", []Sample{
+	accepted, err := client.Push(context.Background(), "tok-123", []Sample{
 		{Metric: "host_cpu_cores", Value: 8, TS: "2026-08-06T22:30:00Z"},
 	})
 	if err != nil {
 		t.Fatalf("Push: %v", err)
+	}
+	if accepted != 1 {
+		t.Errorf("accepted = %d, want 1 (from the accepted:1 response body)", accepted)
 	}
 	if gotMethod != http.MethodPost {
 		t.Errorf("method = %q, want POST", gotMethod)
@@ -60,7 +63,7 @@ func TestPushEmptyTokenSkips(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL)
-	err := client.Push(context.Background(), "", []Sample{{Metric: "m", Value: 1, TS: "t"}})
+	_, err := client.Push(context.Background(), "", []Sample{{Metric: "m", Value: 1, TS: "t"}})
 	if err == nil {
 		t.Fatal("Push with empty token: got nil error, want non-nil")
 	}
@@ -77,7 +80,7 @@ func TestPushNon200IsError(t *testing.T) {
 	defer server.Close()
 
 	client := New(server.URL)
-	err := client.Push(context.Background(), "tok", []Sample{{Metric: "m", Value: 1, TS: "t"}})
+	_, err := client.Push(context.Background(), "tok", []Sample{{Metric: "m", Value: 1, TS: "t"}})
 	if err == nil {
 		t.Fatal("Push: got nil error, want non-nil")
 	}
@@ -99,8 +102,12 @@ func TestPushChunksAtMaxBatch(t *testing.T) {
 		samples[i] = Sample{Metric: "m", Value: float64(i), TS: "t"}
 	}
 	client := New(server.URL)
-	if err := client.Push(context.Background(), "tok", samples); err != nil {
+	accepted, err := client.Push(context.Background(), "tok", samples)
+	if err != nil {
 		t.Fatalf("Push: %v", err)
+	}
+	if accepted != 0 {
+		t.Errorf("accepted = %d, want 0 (server sends no accepted body)", accepted)
 	}
 	if got := atomic.LoadInt64(&posts); got != 2 {
 		t.Errorf("got %d POSTs, want 2 (maxBatch=%d)", got, maxBatch)
