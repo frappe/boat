@@ -48,42 +48,51 @@ func New(baseURL string) *Client {
 
 // Push sends samples under one bearer token. It is fire-and-forget: an empty
 // token, a marshal failure, a transport error, or a non-200 is returned as an
-// error for the caller to log and discard. Samples are chunked to maxBatch.
-func (c *Client) Push(ctx context.Context, token string, samples []Sample) error {
+// error for the caller to log and discard. Samples are chunked to maxBatch. The
+// return value is the total accepted count summed over the chunks.
+func (c *Client) Push(ctx context.Context, token string, samples []Sample) (int, error) {
 	if token == "" {
-		return fmt.Errorf("datum: empty token, skipping %d samples", len(samples))
+		return 0, fmt.Errorf("datum: empty token, skipping %d samples", len(samples))
 	}
+	accepted := 0
 	for start := 0; start < len(samples); start += maxBatch {
 		end := start + maxBatch
 		if end > len(samples) {
 			end = len(samples)
 		}
-		if err := c.postChunk(ctx, token, samples[start:end]); err != nil {
-			return err
+		n, err := c.postChunk(ctx, token, samples[start:end])
+		accepted += n
+		if err != nil {
+			return accepted, err
 		}
 	}
-	return nil
+	return accepted, nil
 }
 
-func (c *Client) postChunk(ctx context.Context, token string, chunk []Sample) error {
+func (c *Client) postChunk(ctx context.Context, token string, chunk []Sample) (int, error) {
 	body, err := json.Marshal(map[string][]Sample{"samples": chunk})
 	if err != nil {
-		return fmt.Errorf("datum: marshal samples: %w", err)
+		return 0, fmt.Errorf("datum: marshal samples: %w", err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.ingestURL, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("datum: build request: %w", err)
+		return 0, fmt.Errorf("datum: build request: %w", err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+token)
 	response, err := c.http.Do(request)
 	if err != nil {
-		return fmt.Errorf("datum: post: %w", err)
+		return 0, fmt.Errorf("datum: post: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(response.Body, 256))
-		return fmt.Errorf("datum: ingest status %d: %s", response.StatusCode, strings.TrimSpace(string(snippet)))
+		return 0, fmt.Errorf("datum: ingest status %d: %s", response.StatusCode, strings.TrimSpace(string(snippet)))
 	}
-	return nil
+	var result struct {
+		Accepted int `json:"accepted"`
+	}
+	payload, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+	_ = json.Unmarshal(payload, &result)
+	return result.Accepted, nil
 }
