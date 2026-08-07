@@ -56,6 +56,11 @@ func TestHostSamplesSkipUnmeasured(t *testing.T) {
 			t.Errorf("host samples contain %q, want it skipped (unmeasured)", metric)
 		}
 	}
+	for _, s := range grouped.Host {
+		if s.Labels["server"] != "srv" {
+			t.Errorf("host sample %s server label = %q, want %q", s.Metric, s.Labels["server"], "srv")
+		}
+	}
 }
 
 func TestVMRunningReadsCgroupAndNet(t *testing.T) {
@@ -208,7 +213,7 @@ func TestHostUtilizationSamples(t *testing.T) {
 	write("diskstats", " 8 0 sda 1 0 10 0 1 0 20 0 0 0 0\n 8 1 sda1 1 0 999 0 0 0 0 0 0 0 0\n")
 
 	roots := Roots{Proc: proc, Cgroup: filepath.Join(dir, "cg"), SysClassNet: filepath.Join(dir, "net")}
-	index := byMetric(hostUtilizationSamples("2026-08-07T00:00:00Z", roots))
+	index := byMetric(hostUtilizationSamples("2026-08-07T00:00:00Z", "srv", roots))
 
 	want := map[string]float64{
 		"host_memory_used_bytes":            (16384 - 4096) * 1024,
@@ -227,6 +232,11 @@ func TestHostUtilizationSamples(t *testing.T) {
 		}
 		if sample.Value != value {
 			t.Errorf("%s = %v, want %v", metric, sample.Value, value)
+		}
+	}
+	for _, sample := range hostUtilizationSamples("2026-08-07T00:00:00Z", "srv", roots) {
+		if sample.Labels["server"] != "srv" {
+			t.Errorf("util sample %s server label = %q, want %q", sample.Metric, sample.Labels["server"], "srv")
 		}
 	}
 }
