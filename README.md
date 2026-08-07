@@ -94,7 +94,7 @@ as a Boat subcommand, reserved-IP NAT — which is the first caller the CAS abov
 is waiting for — and the other ~50 host verbs. Each is its own work order,
 and until its verb ports, the Python script on the host remains the
 implementation. The CLI is narrower still than the API — `boat vm` starts,
-stops, lists and shows, and the other seven verbs are reachable only over HTTP.
+stops, adopts, lists and shows, and the other seven verbs are reachable only over HTTP.
 
 ## The API is the whole surface
 

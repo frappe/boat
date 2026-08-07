@@ -133,6 +133,65 @@ func TestVmStopSendsTheFlagsItWasGiven(t *testing.T) {
 	}
 }
 
+func TestVmAdoptAssertsDesiredViaPut(t *testing.T) {
+	var gotUUID string
+	var gotBody wire.DesiredVirtualMachine
+	mux := http.NewServeMux()
+	mux.HandleFunc("PUT /v1/vms/{uuid}", func(writer http.ResponseWriter, request *http.Request) {
+		gotUUID = request.PathValue("uuid")
+		if err := json.NewDecoder(request.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		writeJSON(t, writer, gotBody) // echo it back as the stored record
+	})
+	startFakeDaemon(t, mux)
+
+	// Default power is Running, boot_epoch is 1.
+	var output, errorOutput bytes.Buffer
+	if code := dispatch([]string{"vm", "adopt", "vm-one"}, &output, &errorOutput); code != exitSuccess {
+		t.Fatalf("got exit %d, want 0: %s", code, errorOutput.String())
+	}
+	if gotUUID != "vm-one" {
+		t.Errorf("PUT reached uuid %q, want vm-one", gotUUID)
+	}
+	if gotBody.DesiredPower != wire.DesiredPowerRunning {
+		t.Errorf("desired_power = %q, want Running", gotBody.DesiredPower)
+	}
+	if gotBody.BootEpoch != 1 {
+		t.Errorf("boot_epoch = %d, want 1", gotBody.BootEpoch)
+	}
+	if !strings.Contains(output.String(), "adopted vm-one") {
+		t.Errorf("output does not confirm the adoption: %s", output.String())
+	}
+
+	// --power stopped asserts a Stopped desire.
+	output.Reset()
+	errorOutput.Reset()
+	if code := dispatch([]string{"vm", "adopt", "vm-one", "--power", "stopped"}, &output, &errorOutput); code != exitSuccess {
+		t.Fatalf("got exit %d, want 0: %s", code, errorOutput.String())
+	}
+	if gotBody.DesiredPower != wire.DesiredPowerStopped {
+		t.Errorf("desired_power = %q, want Stopped", gotBody.DesiredPower)
+	}
+}
+
+func TestVmAdoptRejectsUnknownPower(t *testing.T) {
+	called := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("PUT /v1/vms/{uuid}", func(writer http.ResponseWriter, request *http.Request) {
+		called = true
+		writeJSON(t, writer, wire.DesiredVirtualMachine{})
+	})
+	startFakeDaemon(t, mux)
+	var output, errorOutput bytes.Buffer
+	if code := dispatch([]string{"vm", "adopt", "vm-one", "--power", "sideways"}, &output, &errorOutput); code != exitUsage {
+		t.Errorf("got exit %d, want exitUsage for a bad --power", code)
+	}
+	if called {
+		t.Error("a bad --power must be refused before any PUT is sent")
+	}
+}
+
 func TestVmShowAndHostFactsPrintTheirFields(t *testing.T) {
 	sleeping := true
 	mux := http.NewServeMux()

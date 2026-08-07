@@ -51,6 +51,70 @@ func stopVirtualMachine(arguments []string, client *daemonClient, output io.Writ
 	return reportOperation(operation, output, errorOutput)
 }
 
+// adoptVirtualMachine asserts a desired record for a VM whose artifacts are on
+// this host but which Atlas never asserted — an adopted orphan. It is the break-
+// glass answer to `boat vm start`'s refusal ("assert the desired state first"):
+// it issues the same PUT /vms/{uuid} Atlas issues, so the record is written
+// through the one path (store.PutDesired) and the fence is set the one way.
+//
+// It asserts boot_epoch=1 — the initial epoch Atlas itself uses, and nothing but
+// Atlas ever writes another — so the store's regression check does the safe thing
+// for free: a VM that already holds a NEWER epoch has migration history (a
+// retracted or evacuated source), and re-adopting it here is refused rather than
+// booting a second live copy. That refusal is the point, not a rough edge.
+//
+// desired_power defaults to Running, which is what unblocks `boat vm start` (a
+// Stopped desire is refused by the start verb on purpose); --power stopped asserts
+// the durable stop the reconciler will hold. The record carries power and epoch
+// and nothing else: vCPU, memory and disk are Atlas's to assert, so resize and
+// rebuild still require them, and adopt is deliberately not a second source for
+// numbers a shell could get wrong. Server is left empty, which asserts no
+// placement — a local adopt claims authority on THIS host and lets the epoch alone
+// gate the boot.
+//
+// `start` is NOT made to adopt-then-start on its own: silently granting boot
+// authority to a VM this host holds no intent for is the split-brain the fence
+// exists to prevent (internal/api/fence.go). The grant is explicit here, or it is
+// Atlas's — never a side effect.
+func adoptVirtualMachine(arguments []string, client *daemonClient, output io.Writer, errorOutput io.Writer) int {
+	uuid, rest, ok := uuidBeforeFlags(arguments, "adopt", errorOutput)
+	if !ok {
+		return exitUsage
+	}
+	flags := flag.NewFlagSet("boat vm adopt", flag.ContinueOnError)
+	flags.SetOutput(errorOutput)
+	power := flags.String("power", "running", "desired power to assert: running or stopped")
+	if err := flags.Parse(rest); err != nil {
+		return exitUsage
+	}
+	desiredPower, ok := desiredPowerFrom(*power)
+	if !ok {
+		fmt.Fprintf(errorOutput, "boat vm adopt --power must be running or stopped, not %q\n", *power)
+		return exitUsage
+	}
+	body := wire.DesiredVirtualMachine{Uuid: uuid, BootEpoch: 1, DesiredPower: desiredPower}
+	var stored wire.DesiredVirtualMachine
+	if err := client.put("/vms/"+uuid, body, &stored); err != nil {
+		return reportError(errorOutput, err)
+	}
+	fmt.Fprintf(output, "adopted %s: desired_power=%s boot_epoch=%d — this host is now authoritative; boat vm start/stop manage it\n",
+		stored.Uuid, stored.DesiredPower, stored.BootEpoch)
+	return exitSuccess
+}
+
+// desiredPowerFrom maps the --power flag to the wire enum, case-insensitively, and
+// reports whether it was one of the two the reconciler takes.
+func desiredPowerFrom(value string) (wire.DesiredPower, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "running":
+		return wire.DesiredPowerRunning, true
+	case "stopped":
+		return wire.DesiredPowerStopped, true
+	default:
+		return "", false
+	}
+}
+
 // plainVerb runs one of the verbs whose entire request is its operation
 // identifier: pause, resume, sleep, wake, terminate and resize.
 //
