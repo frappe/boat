@@ -121,7 +121,7 @@ func Host(ctx context.Context, runner *run.Runner, params Params) (Result, error
 		}},
 		{"sysctls", installSysctls},
 		{"vm-web-console", func(ctx context.Context, runner *run.Runner) error {
-			return installVMWebConsole(ctx, runner, params.AtlasURL)
+			return installVMWebConsole(ctx, runner, params.AtlasUrl)
 		}},
 		{"modules", loadModules},
 		{"directories", makeDirectories},
@@ -261,8 +261,8 @@ func installSysctls(ctx context.Context, runner *run.Runner) error {
 	return err
 }
 
-func installVMWebConsole(ctx context.Context, runner *run.Runner, AtlasURL string) error {
-	if err := runner.InstallFile(ctx, "ATLAS_BASE_URL="+AtlasURL, "/etc/default/vm-web-console", "0644"); err != nil {
+func installVMWebConsole(ctx context.Context, runner *run.Runner, AtlasUrl string) error {
+	if err := runner.InstallFile(ctx, "ATLAS_BASE_URL="+AtlasUrl, "/etc/default/vm-web-console", "0644"); err != nil {
 		return err
 	}
 	_, err := runner.Run(ctx, "sudo sysctl --system")
