@@ -978,7 +978,9 @@ Cmnd_Alias BOAT_SIBLING_UNITS = \
     /usr/bin/systemctl start atlas-wake-trap.service, \
     /usr/bin/systemctl restart atlas-wake-trap.service, \
     /usr/bin/systemctl start atlas-mgmt-firewall.service, \
-    /usr/bin/systemctl restart atlas-mgmt-firewall.service
+    /usr/bin/systemctl restart atlas-mgmt-firewall.service \
+    /usr/bin/systemctl start vm-web-console.service, \
+    /usr/bin/systemctl restart vm-web-console.service
 
 # --- Reserved-IP egress: the policy route a DO anchor's guest replies through -
 # Attach and detach both run in the daemon (the API's reserved-ip verb reaches

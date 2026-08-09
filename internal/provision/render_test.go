@@ -17,7 +17,7 @@ import (
 const wantFirecrackerConfiguration = `{
   "boot-source": {
     "kernel_image_path": "vmlinux",
-    "boot_args": "8250.nr_uarts=0 reboot=k panic=1"
+    "boot_args": "8250.nr_uarts=1 console=ttyS0 reboot=k panic=1"
   },
   "drives": [
     {
@@ -160,6 +160,11 @@ if [[ -f ` + testJailRoot + `/snapshot/READY ]]; then
     boot_args=()
 fi
 
+rm -rf ` + testDirectory + `/fifo.in ` + testDirectory + `/fifo.out
+mkfifo ` + testDirectory + `/fifo.in ` + testDirectory + `/fifo.out
+exec 0<>` + testDirectory + `/fifo.in
+exec 1<>` + testDirectory + `/fifo.out
+exec 2>&1
 exec /usr/local/bin/jailer \
     --id 3f2504e0-4f89-41d3-9a0c-0305e82c3301 \
     --exec-file /usr/local/bin/firecracker \
