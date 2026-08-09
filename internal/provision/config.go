@@ -35,7 +35,7 @@ type firecrackerFile struct {
 
 type bootSource struct {
 	KernelImagePath string `json:"kernel_image_path"`
-	BootArguments string `json:"boot_args"`
+	BootArguments   string `json:"boot_args"`
 }
 
 type drive struct {

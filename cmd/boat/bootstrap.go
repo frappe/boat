@@ -37,7 +37,7 @@ func bootstrapCommand(arguments []string, errorOutput io.Writer) int {
 	result, err := bootstrap.Host(context.Background(), runner, bootstrap.Params{
 		FirecrackerVersion: *firecrackerVersion,
 		Architecture:       *architecture,
-		AtlasUrl:       *atlasUrl,
+		AtlasUrl:           *atlasUrl,
 	})
 	if err != nil {
 		return reportError(errorOutput, err)

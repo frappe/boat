@@ -58,7 +58,7 @@ const (
 var packages = []string{
 	"ca-certificates", "curl", "e2fsprogs", "iproute2", "jq", "lvm2", "nftables",
 	"squashfs-tools", "thin-provisioning-tools", "wireguard-tools",
-	"qemu-utils", "nbd-client", "socat", "zstd", "nodejs", "node-express", "node-ws", "node-axios"
+	"qemu-utils", "nbd-client", "socat", "zstd", "nodejs", "node-express", "node-ws", "node-axios",
 }
 
 // additiveModules are loaded best-effort and persisted: the WireGuard mesh carrier
@@ -84,7 +84,7 @@ type Params struct {
 	// takes whatever the host says it is. A non-empty value that disagrees with
 	// the host is refused, not corrected — see checkArchitecture.
 	Architecture string
-	AtlasUrl string
+	AtlasUrl     string
 }
 
 // Host brings this host to VM-ready and reports what it left behind. Progress
