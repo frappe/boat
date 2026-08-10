@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/frappe/boat/internal/paths"
+	"github.com/frappe/boat/internal/thinpool"
 )
 
 // preflight is steps 0 and 0b: refuse before anything is laid down.
@@ -21,21 +22,40 @@ func (provisioning *provisioning) preflight(ctx context.Context) error {
 // message so the operator knows to click Sync to Server before retrying — image
 // sync is multi-minute and is deliberately not auto-triggered from provision.
 //
-// The probe stays even when the rootfs comes from a snapshot (the clone path):
-// the KERNEL is hard-linked out of the same image directory regardless of where
-// the rootfs blocks come from.
-//
-// The Python stats the file in process; here it is `test -f` with no sudo, which
-// is the same reach — /var/lib/atlas/images is root-owned and world-readable, and
-// this verb runs as root.
+// It probes the image's BASE LV DEVICE NODE, not the rootfs FILE. The rootfs file
+// lives in /var/lib/atlas/images/<name>/ which sync.go / bootstrap.go create 0700
+// root-owned; provision-vm runs as the boat DAEMON user, so a bare `test -f` there
+// reads the root-only dir as "not present" and fails a fully-synced host (the
+// boat-user-vs-root idiom trap, spec/33 §3.4), while sudo would need a new grant.
+// The base LV node (/dev/atlas/atlas-image-<name>) is a world-visible symlink AND
+// is the durable artifact every per-VM disk snapshots from, so `test -b` on it —
+// no sudo, no new grant — is both reachable and a truer "is this image synced?"
+// check. The clone path relies on the same image dir for the hard-linked kernel;
+// a truly-absent image dir there fails loud at the link step.
 func (provisioning *provisioning) requireImage(ctx context.Context) error {
-	rootfsImage := provisioning.imageDirectory + "/" + provisioning.params.RootfsFilename
-	if provisioning.commands.OK(ctx, "test -f {}", rootfsImage) {
+	// The ORIGIN the per-VM disk will snapshot from: the snapshot LV on the clone
+	// path, else the base image LV — the same selection (and the same distinct
+	// messages) resolveOrigin makes, so a clone never references the base image LV,
+	// and this refuses BEFORE anything is laid down (resolveOrigin runs after the VM
+	// dir exists). Probing the LV DEVICE NODE with `test -b` (a world-visible symlink)
+	// needs no sudo and no new grant — unlike a `test -f` of the rootfs file, whose
+	// 0700 root-owned dir the boat daemon user cannot stat.
+	if provisioning.params.SnapshotRootfsPath != "" {
+		origin := thinpool.NameFromDevice(provisioning.params.SnapshotRootfsPath)
+		if provisioning.commands.OK(ctx, "test -b {}", thinpool.DevicePath(origin)) {
+			return nil
+		}
+		return fmt.Errorf(
+			"snapshot LV not found: %s (from %s)", origin, provisioning.params.SnapshotRootfsPath,
+		)
+	}
+	node := thinpool.DevicePath(thinpool.BaseImageLV(provisioning.params.ImageName))
+	if provisioning.commands.OK(ctx, "test -b {}", node) {
 		return nil
 	}
 	return fmt.Errorf(
 		"image '%s' not present on server (missing %s); run Sync to Server first",
-		provisioning.params.ImageName, rootfsImage,
+		provisioning.params.ImageName, node,
 	)
 }
 
