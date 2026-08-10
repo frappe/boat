@@ -27,6 +27,7 @@ func warmParams() Params {
 // warmHost has the golden's disk snapshot and both halves of its memory pair.
 func warmHost() *fakeCommands {
 	return readyHost().
+		exists("test -b " + snapshotLV).
 		exists("sudo lvs --noheadings atlas/atlas-snap-golden").
 		exists("sudo test -s " + warmDirectory + "/vmstate.bin").
 		exists("sudo test -s " + warmDirectory + "/mem.bin")
@@ -51,7 +52,7 @@ func TestAWarmCloneStagesTheGoldenPairAndNeverTouchesTheDisk(t *testing.T) {
 	}
 
 	assertTrace(t, fake,
-		"? test -f "+testImage+"/rootfs.ext4",
+		"? test -b "+snapshotLV,
 		"? test -d /var/lib/atlas/virtual-machines",
 		"sudo ls -1 /var/lib/atlas/virtual-machines",
 		"install-dir 0700 "+testDirectory,
@@ -152,6 +153,7 @@ func TestAnUnconsumedMarkerLetsAReRunStageAgain(t *testing.T) {
 // back. The message names the file and the fix.
 func TestAnEmptyGoldenFileIsRefused(t *testing.T) {
 	fake := readyHost().
+		exists("test -b " + snapshotLV).
 		exists("sudo lvs --noheadings atlas/atlas-snap-golden").
 		exists("sudo test -s " + warmDirectory + "/vmstate.bin")
 

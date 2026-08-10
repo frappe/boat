@@ -68,7 +68,7 @@ func testParams() Params {
 // comes up as a block device. Each test then adds the scenario it is about.
 func readyHost() *fakeCommands {
 	return newFakeCommands().
-		exists("test -f "+testImage+"/rootfs.ext4").
+		exists("test -b /dev/atlas/atlas-image-ubuntu-24.04").
 		exists("test -d /var/lib/atlas/virtual-machines").
 		exists("test -b "+testDevice).
 		exists("test -b "+testDataDevice).
