@@ -810,6 +810,8 @@ Cmnd_Alias BOAT_MIGRATION_LVM = \
     /usr/sbin/lvcreate --type thin --thinpool atlas/pool0 -V [0-9]*G -n atlas-* atlas, \
     /usr/sbin/lvcreate -s atlas/* -n atlas-snap-*, \
     /usr/sbin/lvcreate -s atlas/* -n atlas-datasnap-*, \
+    /usr/sbin/lvremove -f atlas/atlas-snap-*, \
+    /usr/sbin/lvremove -f atlas/atlas-datasnap-*, \
     /usr/sbin/lvremove -f atlas/atlas-snap-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-migrate, \
     /usr/sbin/lvremove -f atlas/atlas-datasnap-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-migrate, \
     /usr/sbin/lvremove -f atlas/atlas-clonemeta-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f], \
