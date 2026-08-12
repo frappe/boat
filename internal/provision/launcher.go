@@ -96,6 +96,7 @@ func jailerExec(params Params, virtualMachine paths.VirtualMachine) []string {
 		"    --chroot-base-dir "+virtualMachine.JailChrootBase()+` \`,
 		`    -- \`,
 		`    --api-sock run/firecracker.socket \`,
+		`    --log-path `+virtualMachine.Directory() +`/log/firecracker.log \`,
 		`    "${boot_args[@]}"`,
 	)
 }
