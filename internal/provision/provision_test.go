@@ -40,7 +40,7 @@ func TestAColdProvisionRendersThePythonsSequence(t *testing.T) {
 	assertTrace(t, fake,
 		// 0. the image must be on the host; the kernel is hard-linked out of the
 		// same directory whatever the rootfs source is.
-		"? test -f "+testImage+"/rootfs.ext4",
+		"? test -b /dev/atlas/atlas-image-ubuntu-24.04",
 		// 0b. the per-VM uid collision guard, over the VMs this host already holds.
 		"? test -d /var/lib/atlas/virtual-machines",
 		"sudo ls -1 /var/lib/atlas/virtual-machines",
@@ -108,7 +108,9 @@ func TestTheGeneratedFilesLandWhereTheJailerLooksForThem(t *testing.T) {
 func TestACloneSnapshotsTheSnapshotLV(t *testing.T) {
 	params := testParams()
 	params.SnapshotRootfsPath = "/dev/atlas/atlas-snap-golden"
-	fake := readyHost().exists("sudo lvs --noheadings atlas/atlas-snap-golden")
+	fake := readyHost().
+		exists("test -b /dev/atlas/atlas-snap-golden").
+		exists("sudo lvs --noheadings atlas/atlas-snap-golden")
 
 	if _, err := Provision(context.Background(), fake, params, fake.recordInject()); err != nil {
 		t.Fatalf("Provision: %v", err)
@@ -156,7 +158,7 @@ func TestAMissingImageDirectoryIsRefusedBeforeAnythingIsLaidDown(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not present on server") {
 		t.Fatalf("a missing image gave %v", err)
 	}
-	assertTrace(t, fake, "? test -f "+testImage+"/rootfs.ext4")
+	assertTrace(t, fake, "? test -b /dev/atlas/atlas-image-ubuntu-24.04")
 }
 
 // TestANameThatIsNotAUUIDNeverBecomesAPath. The name is spliced into an LV
