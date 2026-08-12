@@ -58,7 +58,7 @@ const (
 var packages = []string{
 	"ca-certificates", "curl", "e2fsprogs", "iproute2", "jq", "lvm2", "nftables",
 	"squashfs-tools", "thin-provisioning-tools", "wireguard-tools",
-	"qemu-utils", "nbd-client", "socat", "zstd", "nodejs", "node-express", "node-ws", "node-axios",
+	"qemu-utils", "nbd-client", "socat", "zstd", "nodejs", "node-express", "node-ws", "node-axios", "acl",
 }
 
 // additiveModules are loaded best-effort and persisted: the WireGuard mesh carrier
@@ -265,7 +265,13 @@ func installVMWebConsole(ctx context.Context, runner *run.Runner, AtlasUrl strin
 	if err := runner.InstallFile(ctx, "ATLAS_BASE_URL="+AtlasUrl, "/etc/default/vm-web-console", "0644"); err != nil {
 		return err
 	}
-	_, err := runner.Run(ctx, "sudo sysctl --system")
+	_, err := runner.Run(ctx, "getent group atlas-vm-console")
+	if err != nil {
+	    _, err = runner.Run(ctx,
+	        "sudo /usr/sbin/groupadd --system atlas-vm-console",
+	    )
+		return err
+	}
 	return err
 }
 
