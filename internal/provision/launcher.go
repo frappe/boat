@@ -52,7 +52,7 @@ func jailerLaunch(params Params, virtualMachine paths.VirtualMachine) string {
 	fmt.Fprintf(&launcher, "rm -rf %s/fifo.in %s/fifo.out\n", virtualMachine.Directory(), virtualMachine.Directory())
 	fmt.Fprintf(&launcher, "mkfifo %s/fifo.in %s/fifo.out\n", virtualMachine.Directory(), virtualMachine.Directory())
 	fmt.Fprintf(&launcher, "setfacl -m g:atlas-vm-console:rw %s/fifo.in %s/fifo.out\n", virtualMachine.Directory(), virtualMachine.Directory())
-	launcher.WriteString("chmod 711 ../%s %s\n", virtualMachine.Directory(), virtualMachine.Directory())
+	fmt.Fprintf(&launcher, "chmod 711 %s %s/..\n", virtualMachine.Directory(), virtualMachine.Directory())
 	fmt.Fprintf(&launcher, "exec 0<>%s/fifo.in\n", virtualMachine.Directory())
 	fmt.Fprintf(&launcher, "exec 1<>%s/fifo.out\n", virtualMachine.Directory())
 	launcher.WriteString("exec 2>&1\n")
