@@ -75,6 +75,7 @@ const (
 	networkControlPlaneUnit = "atlas-networkd.service"
 	wakeTrapUnit            = "atlas-wake-trap.service"
 	managementFirewallUnit  = "atlas-mgmt-firewall.service"
+	vmWebConsoleUnit        = "vm-web-console.service"
 )
 
 // supervised is the closed list. Order is the order a liveness read reports
@@ -86,6 +87,7 @@ var supervised = []string{
 	networkControlPlaneUnit,
 	wakeTrapUnit,
 	managementFirewallUnit,
+	vmWebConsoleUnit,
 }
 
 // Supervised is the set, copied, so a caller cannot append to the allow-list by

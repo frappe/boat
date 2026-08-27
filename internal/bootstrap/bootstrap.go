@@ -58,7 +58,7 @@ const (
 var packages = []string{
 	"ca-certificates", "curl", "e2fsprogs", "iproute2", "jq", "lvm2", "nftables",
 	"squashfs-tools", "thin-provisioning-tools", "wireguard-tools",
-	"qemu-utils", "nbd-client", "socat", "zstd",
+	"qemu-utils", "nbd-client", "socat", "zstd", "nodejs", "node-express", "node-ws", "node-axios", "acl",
 }
 
 // additiveModules are loaded best-effort and persisted: the WireGuard mesh carrier
@@ -84,6 +84,7 @@ type Params struct {
 	// takes whatever the host says it is. A non-empty value that disagrees with
 	// the host is refused, not corrected — see checkArchitecture.
 	Architecture string
+	AtlasUrl     string
 }
 
 // Host brings this host to VM-ready and reports what it left behind. Progress
@@ -119,6 +120,9 @@ func Host(ctx context.Context, runner *run.Runner, params Params) (Result, error
 			return installFirecracker(ctx, runner, version, architecture)
 		}},
 		{"sysctls", installSysctls},
+		{"vm-web-console", func(ctx context.Context, runner *run.Runner) error {
+			return installVMWebConsole(ctx, runner, params.AtlasUrl)
+		}},
 		{"modules", loadModules},
 		{"directories", makeDirectories},
 		{"host-controls", hostControls},
@@ -254,6 +258,20 @@ func installSysctls(ctx context.Context, runner *run.Runner) error {
 		return err
 	}
 	_, err := runner.Run(ctx, "sudo sysctl --system")
+	return err
+}
+
+func installVMWebConsole(ctx context.Context, runner *run.Runner, AtlasUrl string) error {
+	if err := runner.InstallFile(ctx, "ATLAS_BASE_URL="+AtlasUrl, "/etc/default/vm-web-console", "0644"); err != nil {
+		return err
+	}
+	_, err := runner.Run(ctx, "getent group atlas-vm-console")
+	if err != nil {
+	    _, err = runner.Run(ctx,
+	        "sudo /usr/sbin/groupadd --system atlas-vm-console",
+	    )
+		return err
+	}
 	return err
 }
 

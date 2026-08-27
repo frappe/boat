@@ -35,16 +35,7 @@ type firecrackerFile struct {
 
 type bootSource struct {
 	KernelImagePath string `json:"kernel_image_path"`
-	// BootArguments disables the guest 8250 serial device at boot
-	// (prod-host-setup.md "8250 Serial Device"): the device is tied to
-	// Firecracker's stdout, and a guest with serial access can drive unbounded host
-	// log and storage growth. `console=ttyS0` is deliberately NOT passed either —
-	// the guest's console writes would otherwise flood firecracker.log. The host
-	// side is bounded too (the systemd unit logrotates the per-VM log), and since
-	// the guest can technically re-enable the device after boot, that bounded
-	// storage is the load-bearing half of the mitigation. reboot=k and panic=1 leave
-	// the guest's reboot and panic behaviour unchanged.
-	BootArguments string `json:"boot_args"`
+	BootArguments   string `json:"boot_args"`
 }
 
 type drive struct {
@@ -70,7 +61,7 @@ type mmdsConfiguration struct {
 	NetworkInterfaces []string `json:"network_interfaces"`
 }
 
-const bootArguments = "8250.nr_uarts=0 reboot=k panic=1"
+const bootArguments = "8250.nr_uarts=1 console=ttyS0 reboot=k panic=1"
 
 // firecrackerConfiguration renders the jail's firecracker.json.
 func firecrackerConfiguration(params Params) (string, error) {

@@ -49,6 +49,13 @@ func jailerLaunch(params Params, virtualMachine paths.VirtualMachine) string {
 	launcher.WriteString("    boot_args+=(--metadata metadata.json)\nfi\n")
 	fmt.Fprintf(&launcher, "if [[ -f %s ]]; then\n", virtualMachine.MemorySnapshotMarker())
 	launcher.WriteString("    boot_args=()\nfi\n\n")
+	fmt.Fprintf(&launcher, "rm -rf %s/fifo.in %s/fifo.out\n", virtualMachine.Directory(), virtualMachine.Directory())
+	fmt.Fprintf(&launcher, "mkfifo %s/fifo.in %s/fifo.out\n", virtualMachine.Directory(), virtualMachine.Directory())
+	fmt.Fprintf(&launcher, "setfacl -m g:atlas-vm-console:rw %s/fifo.in %s/fifo.out\n", virtualMachine.Directory(), virtualMachine.Directory())
+	fmt.Fprintf(&launcher, "chmod 711 %s %s/..\n", virtualMachine.Directory(), virtualMachine.Directory())
+	fmt.Fprintf(&launcher, "exec 0<>%s/fifo.in\n", virtualMachine.Directory())
+	fmt.Fprintf(&launcher, "exec 1<>%s/fifo.out\n", virtualMachine.Directory())
+	launcher.WriteString("exec 2>&1\n")
 	launcher.WriteString(strings.Join(jailerExec(params, virtualMachine), "\n"))
 	launcher.WriteString("\n")
 	return launcher.String()
@@ -89,6 +96,7 @@ func jailerExec(params Params, virtualMachine paths.VirtualMachine) []string {
 		"    --chroot-base-dir "+virtualMachine.JailChrootBase()+` \`,
 		`    -- \`,
 		`    --api-sock run/firecracker.socket \`,
+		`    --log-path `+virtualMachine.Directory() +`/log/firecracker.log \`,
 		`    "${boot_args[@]}"`,
 	)
 }
