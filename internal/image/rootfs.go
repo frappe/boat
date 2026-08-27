@@ -70,23 +70,28 @@ func installGuestNetworkUnit(ctx context.Context, cmd commands, params SyncImage
 // With the seed baked into the base image, the UUID change is a single superblock
 // write (~9ms) on every snapshot. Measured 185x: 1.673s -> 0.009s.
 func buildExt4(ctx context.Context, cmd commands, root, rootfsPath string, diskGB int) error {
-	if _, err := cmd.Run(ctx, "sudo chown -R root:root {}", root); err != nil {
-		return err
-	}
+	// Do NOT blanket `chown -R root:root` the tree here. `sudo unsquashfs` restored
+	// the source squashfs's uid/gid faithfully and `mkfs.ext4 -d` copies them
+	// through, so the reconstituted ext4 already carries the correct ownership. A
+	// blanket flatten destroys every legitimately non-root path — most damagingly a
+	// promoted image's /home/frappe (uid 1000) when that image is re-served as a
+	// squashfs and fanned out via sync-image: a server booting the distributed
+	// image then fails with `cd /home/frappe/pilot: Permission denied`. (It also
+	// clobbered the man cache below, which is why that fix-up existed at all.)
 
-	// The blanket root:root above clobbers the ownership /var/cache/man needs.
-	// Ubuntu installs `mandb` SETUID `man`, so the dpkg man-db trigger runs as the
-	// `man` user, and systemd-tmpfiles ships `d /var/cache/man 0755 man man` to make
-	// the cache man-owned for exactly that reason. tmpfiles never runs at build
-	// time, so without this every guest `apt` floods `mandb: can't chmod
-	// /var/cache/man/<locale>/CACHEDIR.TAG: Operation not permitted` (harmless, but
-	// noisy enough to push apt past the Task timeout). Use the NUMERIC id (man =
-	// uid 6, gid 12 on Ubuntu): this chown runs on the host against a foreign
-	// rootfs, so a by-name `man:man` would resolve against the HOST's /etc/passwd.
-	// Numeric is host-independent and matches the guest's own passwd. Guard on
-	// existence: the Ubuntu MINIMAL image ships no /var/cache/man, so an
-	// unconditional chown aborts the whole sync there; `[ -d ] &&` makes it a
-	// documented no-op, matching the guarded-strip convention in normalizeRootfs.
+	// Ensure the man cache is man-owned (Ubuntu: uid 6 / gid 12). Ubuntu installs
+	// `mandb` SETUID `man`, so the dpkg man-db trigger runs as the `man` user, and
+	// systemd-tmpfiles ships `d /var/cache/man 0755 man man` to make the cache
+	// man-owned for exactly that reason. tmpfiles never runs at build time, so a
+	// source that stored the cache root-owned would make every guest `apt` flood
+	// `mandb: can't chmod /var/cache/man/<locale>/CACHEDIR.TAG: Operation not
+	// permitted` (harmless, but noisy enough to push apt past the Task timeout) —
+	// this keeps it correct regardless of the source. Use the NUMERIC id: this runs
+	// on the host against a foreign rootfs, so a by-name `man:man` would resolve
+	// against the HOST's /etc/passwd. Guard on existence: the Ubuntu MINIMAL image
+	// ships no /var/cache/man, so an unconditional chown aborts the whole sync
+	// there; `[ -d ] &&` makes it a documented no-op, matching the guarded-strip
+	// convention in normalizeRootfs.
 	manCache := root + "/var/cache/man"
 	if _, err := cmd.Shell(ctx, "[ -d {} ] && chown -R 6:12 {} || true", manCache, manCache); err != nil {
 		return err

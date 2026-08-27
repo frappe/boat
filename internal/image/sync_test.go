@@ -126,6 +126,25 @@ func TestSyncImageHappyPath(t *testing.T) {
 	assertIssued(t, fake, "sudo lvchange --permission r atlas/"+syncBaseLV)
 }
 
+// The reconstitution must NOT flatten ownership. `sudo unsquashfs` restores the
+// source squashfs's uid/gid and `mkfs.ext4 -d` copies them through, so a promoted
+// image re-served as a squashfs and synced onto another host keeps its
+// /home/frappe at uid 1000. A blanket `chown -R root:root` here is what made a
+// distributed image boot into `cd /home/frappe/pilot: Permission denied` on every
+// host that was not the golden's promote-home.
+func TestSyncImagePreservesTreeOwnership(t *testing.T) {
+	fake := newSyncFake()
+	if _, err := SyncImage(context.Background(), fake, syncParams()); err != nil {
+		t.Fatalf("SyncImage: %v", err)
+	}
+	// The destructive blanket flatten of the extracted tree is gone.
+	assertNotIssued(t, fake, "chown -R root:root")
+	// The ext4 is still populated straight from the (ownership-preserving) tree.
+	assertIssued(t, fake, "sudo mkfs.ext4 -q -O metadata_csum_seed -L atlas-root -d "+syncExtracted+" -F "+syncRootfsPath+".part")
+	// The guarded, numeric man-cache normalization still runs (man = 6:12).
+	assertIssued(t, fake, "$ [ -d "+syncExtracted+"/var/cache/man ] && chown -R 6:12 "+syncExtracted+"/var/cache/man || true")
+}
+
 // A final ext4 already present means the image is complete: SyncImage stat-probes
 // the kernel (present) and the rootfs (present) and returns, touching nothing else.
 func TestSyncImageShortCircuitsWhenRootfsBuilt(t *testing.T) {
