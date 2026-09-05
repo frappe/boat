@@ -1,3 +1,7 @@
+> Archival Notice
+> 
+> This has been moved to https://github.com/frappe/atlas/ and now it's called `metal`.
+
 # Boat
 
 Boat is the per-host daemon for [Atlas](https://github.com/frappe/atlas). It owns
